@@ -6,15 +6,51 @@ function getSymbol(){return $("symbol").value}
 function getInterval(){return Number($("interval").value)}
 function initChart(){
   const el=$("chart");
-  chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:el.clientHeight,layout:{background:{color:"#121d2d"},textColor:"#91a4ba"},grid:{vertLines:{color:"#1e2d40"},horzLines:{color:"#1e2d40"}},rightPriceScale:{borderColor:"#27384d"},timeScale:{borderColor:"#27384d",timeVisible:true,secondsVisible:false},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
+  chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:el.clientHeight,layout:{background:{color:"#121d2d"},textColor:"#91a4ba"},grid:{vertLines:{color:"#1e2d40"},horzLines:{color:"#1e2d40"}},rightPriceScale:{borderColor:"#27384d"},timeScale:{borderColor:"#27384d",timeVisible:true,secondsVisible:false,tickMarkFormatter:istTickMarkFormatter},localization:{timeFormatter:istCrosshairTimeFormatter},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
   candleSeries=chart.addCandlestickSeries({upColor:"#25c58a",downColor:"#ff667a",borderUpColor:"#25c58a",borderDownColor:"#ff667a",wickUpColor:"#25c58a",wickDownColor:"#ff667a"});
   ema9Series=chart.addLineSeries({color:"#5aa7ff",lineWidth:2,priceLineVisible:false});
   ema21Series=chart.addLineSeries({color:"#f3c969",lineWidth:2,priceLineVisible:false});
   vwapSeries=chart.addLineSeries({color:"#c084fc",lineWidth:1,priceLineVisible:false,lineStyle:LightweightCharts.LineStyle.Dashed});
   window.addEventListener("resize",()=>chart.applyOptions({width:el.clientWidth,height:el.clientHeight}));
 }
-function epochSeconds(t){let d=Date.parse(t);return Math.floor(d/1000)}
+// Keep candle timestamps as true Unix seconds. Lightweight Charts can format numeric
+// timestamps in UTC depending on its formatter, so explicitly render the axis in India time.
+const IST_OFFSET_SECONDS = 5 * 60 * 60 + 30 * 60;
+function epochSeconds(t){
+  if(typeof t === "number" && Number.isFinite(t)) return Math.floor(t > 1e12 ? t / 1000 : t);
+  const ms = Date.parse(t);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : NaN;
+}
 function toChartTime(t){return epochSeconds(t)}
+function istDateFromChartTime(time){
+  const seconds = typeof time === "number"
+    ? time
+    : (time && typeof time === "object"
+      ? Date.UTC(time.year, time.month - 1, time.day) / 1000
+      : NaN);
+  return Number.isFinite(seconds) ? new Date((seconds + IST_OFFSET_SECONDS) * 1000) : null;
+}
+function istTickMarkFormatter(time, tickMarkType){
+  const d = istDateFromChartTime(time);
+  if(!d) return "";
+  const day = String(d.getUTCDate()).padStart(2,"0");
+  const month = d.toLocaleString("en-GB",{month:"short",timeZone:"UTC"});
+  const year = d.getUTCFullYear();
+  const hour = String(d.getUTCHours()).padStart(2,"0");
+  const minute = String(d.getUTCMinutes()).padStart(2,"0");
+  const kind = LightweightCharts.TickMarkType;
+  if(tickMarkType === kind.Year) return String(year);
+  if(tickMarkType === kind.Month) return `${month} '${String(year).slice(-2)}`;
+  if(tickMarkType === kind.DayOfMonth) return `${day} ${month}`;
+  return `${hour}:${minute}`;
+}
+function istCrosshairTimeFormatter(time){
+  const d = istDateFromChartTime(time);
+  if(!d) return "";
+  const date = `${String(d.getUTCDate()).padStart(2,"0")} ${d.toLocaleString("en-GB",{month:"short",timeZone:"UTC"})}`;
+  const timeText = `${String(d.getUTCHours()).padStart(2,"0")}:${String(d.getUTCMinutes()).padStart(2,"0")}`;
+  return `${date} ${timeText} IST`;
+}
 function calcEMA(vals,n){const a=2/(n+1),out=[];vals.forEach((v,i)=>out.push(i===0?v:a*v+(1-a)*out[i-1]));return out}
 function clearSRLines(){for(const line of srLines){try{candleSeries.removePriceLine(line)}catch{}}srLines=[]}
 function rsiValue(closes,n=14){if(closes.length<n+1)return null;let g=0,l=0;for(let i=closes.length-n;i<closes.length;i++){const d=closes[i]-closes[i-1];g+=Math.max(d,0);l+=Math.max(-d,0)}return l===0?100:100-100/(1+g/l)}
