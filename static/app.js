@@ -81,57 +81,99 @@ async function checkStatus(){
   try{const s=await api("/api/status");const el=$("apiStatus");if(s.token_configured){el.textContent="Upstox token configured";el.className="pill ok"}else{el.textContent="Upstox setup required";el.className="pill bad"}}
   catch{$("apiStatus").textContent="Backend unavailable"}
 }
-function renderChain(data){
-  const rows=data.data||data.chain||[];
+let optionChainRows=[];
+let optionChainSpot=null;
+function getChainSpot(rows=[]){
+  const candidates=[lastDerivatives?.spot, ...rows.map(r=>r.underlying_spot_price??r.underlying_spot??r.spot_price)].map(Number).filter(v=>Number.isFinite(v)&&v>0);
+  return candidates.length?candidates[0]:null;
+}
+function moneynessOf(strike,type,spot,atmStrike){
+  if(!spot)return "UNKNOWN";
+  if(Math.abs(Number(strike)-atmStrike)<0.001)return "ATM";
+  if(type==="CE")return Number(strike)<spot?"ITM":"OTM";
+  return Number(strike)>spot?"ITM":"OTM";
+}
+function renderFilteredChain(){
   const body=$("chainRows");body.innerHTML="";
-  if(!rows.length){body.innerHTML='<tr><td colspan="8" class="empty">No chain rows returned. Check expiry and API permissions.</td></tr>';return}
-  rows.forEach(r=>{
+  const rows=optionChainRows;
+  if(!rows.length){body.innerHTML='<tr><td colspan="8" class="empty">No option rows returned. Check expiry selection and Upstox API response.</td></tr>';return}
+  const typeFilter=$("optionTypeFilter")?.value||"BOTH", moneyFilter=$("moneynessFilter")?.value||"ALL";
+  optionChainSpot=getChainSpot(rows);
+  const strikes=rows.map(r=>Number(r.strike_price)).filter(Number.isFinite);
+  const atmStrike=optionChainSpot&&strikes.length?strikes.reduce((best,x)=>Math.abs(x-optionChainSpot)<Math.abs(best-optionChainSpot)?x:best,strikes[0]):null;
+  const filtered=rows.filter(r=>{
+    const strike=Number(r.strike_price), ce=r.call_options||{},pe=r.put_options||{};
+    if(typeFilter==="CE"&&!ce.instrument_key)return false;
+    if(typeFilter==="PE"&&!pe.instrument_key)return false;
+    if(moneyFilter==="ALL")return true;
+    if(!optionChainSpot||atmStrike===null)return false;
+    const ceMatch=ce.instrument_key&&moneynessOf(strike,"CE",optionChainSpot,atmStrike)===moneyFilter;
+    const peMatch=pe.instrument_key&&moneynessOf(strike,"PE",optionChainSpot,atmStrike)===moneyFilter;
+    return typeFilter==="CE"?!!ceMatch:typeFilter==="PE"?!!peMatch:!!(ceMatch||peMatch);
+  });
+  if(!filtered.length){body.innerHTML=`<tr><td colspan="8" class="empty">No ${moneyFilter} strikes available for this selection. ${optionChainSpot?`Spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}.`:"Underlying spot unavailable; choose All or refresh data."}</td></tr>`;return}
+  filtered.forEach(r=>{
     const call=r.call_options||{},put=r.put_options||{},cm=call.market_data||{},pm=put.market_data||{};
     const tr=document.createElement("tr");
-    [fmt(r.strike_price,0),fmt(cm.ltp),fmt(cm.oi,0),fmt(r.pcr,3),fmt(pm.oi,0),fmt(pm.ltp)].forEach(v=>{const td=document.createElement("td");td.textContent=v;tr.appendChild(td)});
-    const ceTd=document.createElement("td"), peTd=document.createElement("td");
+    const strike=Number(r.strike_price);
+    const label=optionChainSpot&&atmStrike!==null?(Math.abs(strike-atmStrike)<0.001?"ATM":`${moneynessOf(strike,"CE",optionChainSpot,atmStrike)} CE / ${moneynessOf(strike,"PE",optionChainSpot,atmStrike)} PE`):"";
+    [fmt(strike,0),fmt(cm.ltp),fmt(cm.oi,0),fmt(r.pcr,3),fmt(pm.oi,0),fmt(pm.ltp)].forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===0&&label)td.title=label;tr.appendChild(td)});
+    const ceTd=document.createElement("td"),peTd=document.createElement("td");
     const ceBtn=document.createElement("button");ceBtn.type="button";ceBtn.className="chain-select";ceBtn.textContent="Use CE";
-    ceBtn.disabled=!call.instrument_key || !(Number(cm.ltp)>0);
+    ceBtn.disabled=!call.instrument_key||!(Number(cm.ltp)>0)||typeFilter==="PE";
     ceBtn.addEventListener("click",()=>selectPaperContract("CE",r.strike_price,call.instrument_key,cm.ltp,r.expiry||$("expiry").value,ceBtn));
     const peBtn=document.createElement("button");peBtn.type="button";peBtn.className="chain-select pe";peBtn.textContent="Use PE";
-    peBtn.disabled=!put.instrument_key || !(Number(pm.ltp)>0);
+    peBtn.disabled=!put.instrument_key||!(Number(pm.ltp)>0)||typeFilter==="CE";
     peBtn.addEventListener("click",()=>selectPaperContract("PE",r.strike_price,put.instrument_key,pm.ltp,r.expiry||$("expiry").value,peBtn));
-    ceTd.appendChild(ceBtn);peTd.appendChild(peBtn);tr.appendChild(ceTd);tr.appendChild(peTd);
-    body.appendChild(tr);
+    ceTd.appendChild(ceBtn);peTd.appendChild(peBtn);tr.appendChild(ceTd);tr.appendChild(peTd);body.appendChild(tr);
   });
-  $("chainStatus").textContent=`Loaded ${rows.length} rows. Select Use CE/Use PE to prepare a paper trade. Prices reflect the API response time.`;
+  $("chainStatus").textContent=`Loaded ${filtered.length} of ${rows.length} strikes${optionChainSpot?` · spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}`:" · spot unavailable"}. Select Use CE/Use PE. Prices are API snapshots, not guaranteed live ticks.`;
 }
-async function loadContracts(){
+function renderChain(data){
+  optionChainRows=data.data||data.chain||[];
+  if(!optionChainRows.length){$("chainStatus").textContent="Upstox returned zero option rows for this expiry. Try another listed expiry or check Render Logs.";renderFilteredChain();return}
+  renderFilteredChain();
+}
+async function loadContracts(autoLoadChain=true){
+  const btn=$("loadContracts");if(btn){btn.disabled=true;btn.textContent="Loading…"}
+  $("chainStatus").textContent="Fetching actual expiry dates from Upstox…";
   try{
-    const data=await api(`/api/option-contracts?symbol=${getSymbol()}`);
+    const data=await api(`/api/option-contracts?symbol=${encodeURIComponent(getSymbol())}`);
     const rows=data.data||[];
-    const dates=[...new Set(rows.map(x=>x.expiry).filter(Boolean))].sort();
-    if(!dates.length){toast("No expiry dates returned.");return}
-    const select=$("expiry");select.innerHTML="";
+    const today=new Date();today.setHours(0,0,0,0);
+    const dates=[...new Set(rows.map(x=>String(x.expiry||"").slice(0,10)).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&new Date(d+"T00:00:00")>=today))].sort();
+    const select=$("expiry"),previous=select.value;select.innerHTML="";
+    if(!dates.length){select.innerHTML='<option value="">No expiry dates returned</option>';$("chainStatus").textContent="Upstox did not return upcoming expiries. Check token permissions and Render Logs.";toast("No upcoming expiry dates returned by Upstox.");return}
     dates.forEach(d=>{const op=document.createElement("option");op.value=d;op.textContent=d;select.appendChild(op)});
-    toast(`Loaded ${dates.length} expiry dates.`);
-  }catch(e){toast("Could not load expiries: "+e.message)}
+    select.value=dates.includes(previous)?previous:dates[0];
+    toast(`Loaded ${dates.length} actual expiry dates.`);
+    if(autoLoadChain)await loadChain(true);
+  }catch(e){$("chainStatus").textContent="Expiry request failed: "+e.message;toast("Could not load expiries: "+e.message)}
+  finally{if(btn){btn.disabled=false;btn.textContent="Load expiries"}}
 }
-async function loadChain(){
-  // Upstox expects an actual YYYY-MM-DD expiry, not labels like "current_week".
-  if(!/^\d{4}-\d{2}-\d{2}$/.test($("expiry").value)){
-    await loadContracts();
-    if(!/^\d{4}-\d{2}-\d{2}$/.test($("expiry").value)){
-      toast("Expiry dates could not be loaded. Check Upstox API response/status.");return;
-    }
+async function loadChain(skipExpiryCheck=false){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test($("expiry").value||"")){
+    await loadContracts(false);
+    if(!/^\d{4}-\d{2}-\d{2}$/.test($("expiry").value||""))return;
   }
+  const btn=$("loadChain");if(btn){btn.disabled=true;btn.textContent="Loading…"}
+  $("chainStatus").textContent=`Loading ${getSymbol()} option chain for expiry ${$("expiry").value}…`;
   try{
-    const data=await api(`/api/option-chain?symbol=${getSymbol()}&expiry_date=${encodeURIComponent($("expiry").value)}`);
+    const data=await api(`/api/option-chain?symbol=${encodeURIComponent(getSymbol())}&expiry_date=${encodeURIComponent($("expiry").value)}`);
     renderChain(data);
-  }catch(e){toast("Option chain failed: "+e.message);$("chainStatus").textContent="Option-chain request failed: "+e.message}
+    await refreshDerivatives();
+    renderFilteredChain();
+  }catch(e){optionChainRows=[];renderFilteredChain();$("chainStatus").textContent="Option-chain request failed: "+e.message;toast("Option chain failed: "+e.message)}
+  finally{if(btn){btn.disabled=false;btn.textContent="Load chain"}}
 }
 $("refreshBtn").addEventListener("click",refresh);
-$("symbol").addEventListener("change",()=>{refresh();$("chainRows").innerHTML='<tr><td colspan="6" class="empty">Load option chain for this underlying.</td></tr>'});
+$("symbol").addEventListener("change",()=>{optionChainRows=[];$("chainRows").innerHTML='<tr><td colspan="8" class="empty">Load expiries for this underlying.</td></tr>';loadContracts(true);refresh();});
 $("interval").addEventListener("change",refresh);
-$("loadContracts").addEventListener("click",loadContracts);
-$("loadChain").addEventListener("click",loadChain);
+$("loadContracts").addEventListener("click",()=>loadContracts(true));
+$("loadChain").addEventListener("click",()=>loadChain());
 $("chartView").addEventListener("change",refreshChartSource);
 ["showEma","showVWAP","showSR"].forEach(id=>$(id).addEventListener("change",()=>renderCandles(currentCandles)));
+["optionTypeFilter","moneynessFilter"].forEach(id=>$(id)?.addEventListener("change",renderFilteredChain));
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
 initChart();checkStatus();refresh();
 setInterval(()=>{if(document.visibilityState==="visible")refresh()},60000);
@@ -175,26 +217,9 @@ async function refreshDerivatives(){
     renderLiveTicks((d.live_near_atm||[]).map(t=>({...t,age_seconds:d.websocket_last_tick_age_seconds,fresh:d.websocket_last_tick_age_seconds!==null&&d.websocket_last_tick_age_seconds<=15})));
   }catch(e){$("livePCR").textContent="UNAVAILABLE";$("liveCallOI").textContent="UNAVAILABLE";$("livePutOI").textContent="UNAVAILABLE";$("liveIV").textContent="UNAVAILABLE";$("streamStatus").textContent="UNAVAILABLE";$("streamError").textContent=e.message;$("derivTimestamp").textContent="Snapshot timestamp: UNAVAILABLE"}
 }
-const originalLoadContracts=loadContracts;
-loadContracts=async function(){
-  try{
-    const data=await api(`/api/option-contracts?symbol=${getSymbol()}&expiry_date=current_week`);
-    const rows=data.data||[];const dates=[...new Set(rows.map(x=>x.expiry).filter(Boolean))].sort();
-    const select=$("expiry");const previous=select.value;select.innerHTML="";
-    [["current_week","Current week (auto)"],["next_week","Next week (auto)"],["current_month","Current month (auto)"],["next_month","Next month (auto)"]].forEach(([v,label])=>{const op=document.createElement("option");op.value=v;op.textContent=label;select.appendChild(op)});
-    dates.forEach(d=>{const op=document.createElement("option");op.value=d;op.textContent=d;select.appendChild(op)});
-    if([...select.options].some(o=>o.value===previous))select.value=previous;else select.value="current_week";
-    toast(`Loaded current-week contracts; ${dates.length} explicit expiry date(s) found.`);await refreshDerivatives();
-  }catch(e){toast("Could not load expiries: "+e.message)}
-};
 $("symbol").addEventListener("change",()=>{connectLiveSocket();refreshDerivatives()});
 $("expiry").addEventListener("change",()=>{refreshDerivatives();loadChain()});
-$("loadChain").addEventListener("click",refreshDerivatives);
 connectLiveSocket();refreshDerivatives();setInterval(()=>{if(document.visibilityState==="visible")refreshDerivatives()},15000);
-// Rebind the expiry loader after replacing its initial snapshot-only implementation.
-$("loadContracts").removeEventListener("click", originalLoadContracts);
-$("loadContracts").addEventListener("click", loadContracts);
-
 
 // ---------------- Local-browser paper trading ----------------
 // These are simulated positions only. They never place broker orders.

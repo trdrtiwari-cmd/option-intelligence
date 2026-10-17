@@ -74,7 +74,7 @@
   <section class="layout lower">
     <div class="panel">
       <div class="section-head"><div><h2>Option chain</h2><p>Current weekly expiry where available; monthly/manual expiry can also be selected</p></div></div>
-      <div class="option-controls"><label>Expiry<select id="expiry"><option value="">Load expiries first</option></select></label><button id="loadContracts">Load expiries</button><button id="loadChain" class="secondary">Load chain</button></div>
+      <div class="option-controls"><label>Expiry<select id="expiry"><option value="">Click Load expiries</option></select></label><button id="loadContracts">Load expiries</button><button id="loadChain" class="secondary">Load chain</button><label>Option type<select id="optionTypeFilter"><option value="BOTH">CE + PE</option><option value="CE">Call (CE)</option><option value="PE">Put (PE)</option></select></label><label>Moneyness<select id="moneynessFilter"><option value="ALL">All strikes</option><option value="ITM">ITM</option><option value="ATM">ATM</option><option value="OTM">OTM</option></select></label></div>
       <div class="table-wrap"><table><thead><tr><th>Strike</th><th>Call LTP</th><th>Call OI</th><th>PCR</th><th>Put OI</th><th>Put LTP</th><th>Select CE</th><th>Select PE</th></tr></thead><tbody id="chainRows"><tr><td colspan="8" class="empty">Load option chain to view available data.</td></tr></tbody></table></div>
       <div class="sub small" id="chainStatus">Data is shown only when returned by Upstox.</div>
     </div>
