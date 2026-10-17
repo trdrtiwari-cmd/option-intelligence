@@ -143,9 +143,13 @@ async def check_token_state():
         return c["state"]
     state = "UNKNOWN"
     try:
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {runtime_token}"}
         async with httpx.AsyncClient(timeout=8.0) as client:
-            r = await client.get(f"{API_BASE}/v2/user/profile",
-                                 headers={"Accept": "application/json", "Authorization": f"Bearer {runtime_token}"})
+            r = await client.get(f"{API_BASE}/v2/user/profile", headers=headers)
+            if r.status_code in (401, 403):
+                # Read-only / analytics tokens cannot read the profile but work for market data,
+                # so only call the token expired if a real market-data request is rejected too.
+                r = await client.get(f"{API_BASE}/v2/market-quote/ltp", params={"instrument_key": INDEX_KEYS["NIFTY"]}, headers=headers)
         state = "VALID" if r.status_code == 200 else "EXPIRED" if r.status_code == 401 else "UNKNOWN"
     except Exception:
         state = "UNKNOWN"
