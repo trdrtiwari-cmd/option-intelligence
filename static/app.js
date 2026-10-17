@@ -177,7 +177,7 @@ async function refresh(){
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";
     $("regime").textContent=a.status==="ok"?(a.regime||"—"):"—";
     $("decision").textContent=a.decision||"WAIT";
-    $("bigDecision").textContent=a.decision||"WAIT";
+    $("bigDecision").textContent=a.decision||"WAIT";$("decisionSub").textContent=marketOpen?"Bias only; confirm retest":"Last session data (market closed) — bias only";
     $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
     $("ema9").textContent=fmt(a.ema9);$("ema21").textContent=fmt(a.ema21);$("vwap").textContent=fmt(a.vwap_approx);
     $("rsi").textContent=fmt(a.rsi);$("atr").textContent=fmt(a.atr);$("relVol").textContent=a.relative_volume==null?"—":`${fmt(a.relative_volume)}x`;if($("vwapLabel"))$("vwapLabel").textContent=a.vwap_source==="VOLUME_VWAP"?"VWAP (session)":"Session avg price (no volume)";
