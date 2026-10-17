@@ -139,11 +139,11 @@ async function loadContracts(autoLoadChain=true){
   $("chainStatus").textContent="Fetching actual expiry dates from Upstox…";
   try{
     const data=await api(`/api/option-contracts?symbol=${encodeURIComponent(getSymbol())}`);
-    const rows=data.data||[];
-    const today=new Date();today.setHours(0,0,0,0);
-    const dates=[...new Set(rows.map(x=>String(x.expiry||"").slice(0,10)).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&new Date(d+"T00:00:00")>=today))].sort();
+    const rows=Array.isArray(data.data)?data.data:(Array.isArray(data.contracts)?data.contracts:[]);
+    const now=new Date();const todayKey=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+    const dates=[...new Set(rows.map(x=>String(x.expiry||x.expiry_date||x.expiryDate||"").slice(0,10)).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&d>=todayKey))].sort();
     const select=$("expiry"),previous=select.value;select.innerHTML="";
-    if(!dates.length){select.innerHTML='<option value="">No expiry dates returned</option>';$("chainStatus").textContent="Upstox did not return upcoming expiries. Check token permissions and Render Logs.";toast("No upcoming expiry dates returned by Upstox.");return}
+    if(!dates.length){select.innerHTML='<option value="">No expiry dates returned</option>';const detail=data.detail?JSON.stringify(data.detail):`Upstox returned ${rows.length} contracts; no upcoming expiry field was found.`;$("chainStatus").textContent=detail+" Check /api/option-contracts?symbol="+getSymbol()+" and Render Logs.";toast("No upcoming expiry dates returned. Check the API diagnostic.");return}
     dates.forEach(d=>{const op=document.createElement("option");op.value=d;op.textContent=d;select.appendChild(op)});
     select.value=dates.includes(previous)?previous:dates[0];
     toast(`Loaded ${dates.length} actual expiry dates.`);
