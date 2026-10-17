@@ -108,3 +108,10 @@ For a BUY PE alert, change the `alert` value accordingly and create a separate a
 - Stop-loss/target exits are simulations based on observed quotes, not guaranteed fill prices. Gaps, spread, latency, fees, taxes and slippage can make real outcomes differ.
 - Quantity is in option units, not lots. Enter the desired unit quantity; the app does not assume a lot size.
 - Public visitors have separate browser-local paper-trade histories. Do not expose API credentials in frontend code or public repositories.
+
+
+## Chart overlays and selected-option premium chart
+- The chart now includes toggleable EMA 9/21, approximate volume-weighted VWAP, and automatically detected recent swing support/resistance levels.
+- The RSI(14), ATR(14), relative volume, support and resistance values are shown beneath the chart. The Market Intelligence panel follows the active chart source.
+- To view an option premium chart, select a CE/PE using the option-chain table, then choose **Selected option premium** in Chart view. The app requests historical candles using that selected contract's Upstox instrument key. If Upstox returns no historical candles for the contract, the chart displays an unavailable message instead of substituting index candles.
+- These chart candles are historical REST data; this UI change does not by itself guarantee a live tick-by-tick chart.
