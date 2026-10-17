@@ -1,4 +1,5 @@
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
+let marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
 function toast(msg){const el=$("toast");el.textContent=msg;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),4500)}
 function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("en-IN",{maximumFractionDigits:n,minimumFractionDigits:n})}
@@ -53,9 +54,34 @@ function istCrosshairTimeFormatter(time){
 }
 function calcEMA(vals,n){const a=2/(n+1),out=[];vals.forEach((v,i)=>out.push(i===0?v:a*v+(1-a)*out[i-1]));return out}
 function clearSRLines(){for(const line of srLines){try{candleSeries.removePriceLine(line)}catch{}}srLines=[]}
-function rsiValue(closes,n=14){if(closes.length<n+1)return null;let g=0,l=0;for(let i=closes.length-n;i<closes.length;i++){const d=closes[i]-closes[i-1];g+=Math.max(d,0);l+=Math.max(-d,0)}return l===0?100:100-100/(1+g/l)}
-function atrValue(cs,n=14){if(cs.length<n+1)return null;const tr=[];for(let i=1;i<cs.length;i++)tr.push(Math.max(cs[i].high-cs[i].low,Math.abs(cs[i].high-cs[i-1].close),Math.abs(cs[i].low-cs[i-1].close)));return tr.slice(-n).reduce((a,b)=>a+b,0)/Math.min(n,tr.slice(-n).length)}
-function calcVWAP(cs){let pv=0,vol=0;return cs.map(c=>{const v=Number(c.volume)||0;pv+=((c.high+c.low+c.close)/3)*v;vol+=v;return {time:c.time,value:vol?pv/vol:c.close}})}
+// RSI / ATR use Wilder smoothing so values line up with TradingView's ta.rsi / ta.atr.
+function rsiValue(closes,n=14){
+  if(closes.length<n+1)return null;
+  let g=0,l=0;
+  for(let i=1;i<=n;i++){const d=closes[i]-closes[i-1];g+=Math.max(d,0);l+=Math.max(-d,0)}
+  g/=n;l/=n;
+  for(let i=n+1;i<closes.length;i++){const d=closes[i]-closes[i-1];g=(g*(n-1)+Math.max(d,0))/n;l=(l*(n-1)+Math.max(-d,0))/n}
+  return l===0?(g>0?100:50):100-100/(1+g/l);
+}
+function atrValue(cs,n=14){
+  if(cs.length<n+1)return null;
+  const tr=[];for(let i=1;i<cs.length;i++)tr.push(Math.max(cs[i].high-cs[i].low,Math.abs(cs[i].high-cs[i-1].close),Math.abs(cs[i].low-cs[i-1].close)));
+  let atr=tr.slice(0,n).reduce((a,b)=>a+b,0)/n;
+  for(let i=n;i<tr.length;i++)atr=(atr*(n-1)+tr[i])/n;
+  return atr;
+}
+function istDayKey(t){return Math.floor((t+IST_OFFSET_SECONDS)/86400)}
+function calcVWAP(cs){
+  // Anchored to each IST session. Index feeds carry no volume, so fall back to a running
+  // typical-price average (and say so in the legend) instead of a line that just tracks the close.
+  let day=null,pv=0,vol=0,tp=0,n=0;
+  return cs.map(c=>{
+    const d=istDayKey(c.time);if(d!==day){day=d;pv=vol=tp=n=0}
+    const typical=(c.high+c.low+c.close)/3,v=Number(c.volume)||0;
+    pv+=typical*v;vol+=v;tp+=typical;n++;
+    return {time:c.time,value:vol>0?pv/vol:tp/n,volumeBased:vol>0};
+  });
+}
 function findSR(cs){
   // Confirmed 5-bar swing points, clustered to avoid near-duplicate levels.
   // Only levels on the correct side of the latest close are retained.
@@ -89,13 +115,23 @@ function findSR(cs){
   const supports=cluster(lows,"support"),resistances=cluster(highs,"resistance");
   return {supports,resistances,support:supports[0]?.price??null,resistance:resistances[0]?.price??null};
 }
+// Show ~1.6 sessions on load / when the source changes, then leave the user's zoom and scroll alone
+// (the old code re-fitted all 5 days on every 60s refresh, squashing the latest session).
+function applyChartRange(n){
+  const key=`${chartSource}|${getSymbol()}|${getInterval()}|${paperSelected?.instrument_key||""}`;
+  if(chartFitKey===key||n<2)return;
+  chartFitKey=key;
+  const perSession=Math.max(1,Math.round(375/getInterval()));
+  const show=Math.min(n,Math.round(perSession*1.6));
+  chart.timeScale().setVisibleLogicalRange({from:n-show,to:n+3});
+}
 function renderCandles(candles){
   currentCandles=candles||[];
   const valid=currentCandles.map(c=>({time:toChartTime(c.time),open:+c.open,high:+c.high,low:+c.low,close:+c.close,volume:+c.volume||0})).filter(c=>Number.isFinite(c.time)&&[c.open,c.high,c.low,c.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
   const unique=[];for(const c of valid){if(!unique.length||unique[unique.length-1].time!==c.time)unique.push(c)}
   candleSeries.setData(unique);
   const closes=unique.map(c=>c.close), e9=calcEMA(closes,9),e21=calcEMA(closes,21),vw=calcVWAP(unique);
-  ema9Series.setData(unique.map((c,i)=>({time:c.time,value:e9[i]})));ema21Series.setData(unique.map((c,i)=>({time:c.time,value:e21[i]})));vwapSeries.setData(vw);
+  ema9Series.setData(unique.map((c,i)=>({time:c.time,value:e9[i]})));ema21Series.setData(unique.map((c,i)=>({time:c.time,value:e21[i]})));vwapSeries.setData(vw.map(({time,value})=>({time,value})));
   const showEma=$("showEma")?.checked!==false,showVwap=$("showVWAP")?.checked!==false,showSR=$("showSR")?.checked!==false;
   ema9Series.applyOptions({visible:showEma});ema21Series.applyOptions({visible:showEma});vwapSeries.applyOptions({visible:showVwap});clearSRLines();
   const sr=findSR(unique);
@@ -103,7 +139,10 @@ function renderCandles(candles){
     sr.supports.forEach((level,i)=>srLines.push(candleSeries.createPriceLine({price:level.price,color:i===0?"#25c58a":"#168f68",lineWidth:i===0?2:1,lineStyle:i===0?LightweightCharts.LineStyle.Solid:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:i===0?"SUPPORT":"S2",axisLabelColor:i===0?"#167c59":"#145c48",axisLabelTextColor:"#ffffff"})));
     sr.resistances.forEach((level,i)=>srLines.push(candleSeries.createPriceLine({price:level.price,color:i===0?"#ff4d5e":"#d94756",lineWidth:i===0?2:1,lineStyle:i===0?LightweightCharts.LineStyle.Solid:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:i===0?"RESISTANCE":"R2",axisLabelColor:i===0?"#b82b3c":"#8f2634",axisLabelTextColor:"#ffffff"})));
   }
-  chart.timeScale().fitContent();
+  applyChartRange(unique.length);
+  const vwapLegend=document.querySelector(".vwap-legend"),vwapIsVol=!!vw.at(-1)?.volumeBased;
+  if(vwapLegend)vwapLegend.textContent=vwapIsVol?"━ VWAP":"━ Session avg price (no index volume)";
+  if($("vwapLabel"))$("vwapLabel").textContent=vwapIsVol?"VWAP (session)":"Session avg price (no volume)";
   if(unique.length){const last=unique.at(-1),rsi=rsiValue(closes),atr=atrValue(unique),volume=last.volume,avgVol=unique.slice(-21,-1).reduce((a,c)=>a+c.volume,0)/Math.max(1,unique.slice(-21,-1).length);$("lastPrice").textContent=fmt(last.close);$("chartSubtitle").textContent=chartSource==="option"&&paperSelected?`${paperSelectedLabel()} · ${getInterval()}-minute premium OHLC`:`${getSymbol()==="NIFTY"?"NIFTY 50":"BANK NIFTY"} · ${getInterval()}-minute OHLC`;
     $("chartRsi").textContent=fmt(rsi);$("chartAtr").textContent=fmt(atr);$("chartSupport").textContent=fmt(sr.support);$("chartResistance").textContent=fmt(sr.resistance);$("chartVolume").textContent=avgVol>0?`${fmt(volume,0)} (${fmt(volume/avgVol,2)}x)`:`${fmt(volume,0)} · ratio N/A`;
     $("chartNote").textContent=chartSource==="option"?`Selected option premium candles · ${unique.length} bars. Indicators and support/resistance use this option's own candles. Historical data may be unavailable for illiquid/expired contracts.`:"Underlying index candles. Support/resistance uses confirmed swing points; only the nearest two levels on each side are shown. Choose Selected option premium, then select CE/PE from the option chain to switch the chart to that contract.";
@@ -136,22 +175,34 @@ async function refresh(){
     renderCandles(c.candles);
     $("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()}`;
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";
-    $("regime").textContent=a.status==="ok"?(a.sideways?"SIDEWAYS":a.bull_score>a.bear_score?"BULLISH":"BEARISH"):"—";
+    $("regime").textContent=a.status==="ok"?(a.regime||"—"):"—";
     $("decision").textContent=a.decision||"WAIT";
     $("bigDecision").textContent=a.decision||"WAIT";
     $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
     $("ema9").textContent=fmt(a.ema9);$("ema21").textContent=fmt(a.ema21);$("vwap").textContent=fmt(a.vwap_approx);
-    $("rsi").textContent=fmt(a.rsi);$("atr").textContent=fmt(a.atr);$("relVol").textContent=a.relative_volume===undefined?"—":`${fmt(a.relative_volume)}x`;
+    $("rsi").textContent=fmt(a.rsi);$("atr").textContent=fmt(a.atr);$("relVol").textContent=a.relative_volume==null?"—":`${fmt(a.relative_volume)}x`;if($("vwapLabel"))$("vwapLabel").textContent=a.vwap_source==="VOLUME_VWAP"?"VWAP (session)":"Session avg price (no volume)";
     $("breakHigh").textContent=fmt(a.breakout_high);$("breakLow").textContent=fmt(a.breakdown_low);
-    $("analysisNote").textContent=a.note||a.message||"Analysis loaded.";
+    $("analysisNote").textContent=[a.note||a.message||"Analysis loaded.",a.score_basis].filter(Boolean).join(" · ");
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
-    if(a.sideways){$("regime").style.color="var(--yellow)"}else{$("regime").style.color=a.bull_score>a.bear_score?"var(--green)":"var(--red)"}
+    $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";
   }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
   finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}
 }
+function renderMarketPill(m){
+  const el=$("marketStatus");if(!el||!m)return;
+  el.textContent=m.open?"Market open (IST)":"Market closed (IST)";
+  el.className=m.open?"pill live":"pill muted";
+  el.title=(m.ist_time||"")+" IST · "+(m.note||"");
+}
 async function checkStatus(){
-  try{const s=await api("/api/status");const el=$("apiStatus");if(s.token_configured){el.textContent="Upstox token configured";el.className="pill ok"}else{el.textContent="Upstox setup required";el.className="pill bad"}}
-  catch{$("apiStatus").textContent="Backend unavailable"}
+  try{
+    const s=await api("/api/status"),el=$("apiStatus");
+    if(s.token_state==="VALID"){el.textContent="Upstox token valid";el.className="pill ok"}
+    else if(s.token_state==="EXPIRED"){el.textContent="Upstox token expired — click Connect Upstox";el.className="pill bad"}
+    else if(s.token_configured){el.textContent="Upstox token set (could not verify)";el.className="pill muted"}
+    else{el.textContent="Upstox setup required";el.className="pill bad"}
+    marketOpen=!!(s.market&&s.market.open);renderMarketPill(s.market);
+  }catch{$("apiStatus").textContent="Backend unavailable"}
 }
 let optionChainRows=[];
 let optionChainSpot=null;
@@ -165,7 +216,9 @@ function moneynessOf(strike,type,spot,atmStrike){
   if(type==="CE")return Number(strike)<spot?"ITM":"OTM";
   return Number(strike)>spot?"ITM":"OTM";
 }
-function renderFilteredChain(){
+function renderFilteredChain(opts={}){
+  const scrollToAtm=opts.scroll!==false;
+  const wrap=$("chainRows").closest(".table-wrap"),keepTop=wrap?wrap.scrollTop:0;
   const body=$("chainRows");body.innerHTML="";
   const rows=optionChainRows;
   if(!rows.length){body.innerHTML='<tr><td colspan="8" class="empty">No option rows returned. Check expiry selection and Upstox API response.</td></tr>';return}
@@ -173,21 +226,27 @@ function renderFilteredChain(){
   optionChainSpot=getChainSpot(rows);
   const strikes=rows.map(r=>Number(r.strike_price)).filter(Number.isFinite);
   const atmStrike=optionChainSpot&&strikes.length?strikes.reduce((best,x)=>Math.abs(x-optionChainSpot)<Math.abs(best-optionChainSpot)?x:best,strikes[0]):null;
+  const sortedStrikes=[...new Set(strikes)].sort((a,b)=>a-b),atmIdx=atmStrike===null?-1:sortedStrikes.indexOf(atmStrike);
+  const nearSet=new Set(atmIdx<0?[]:sortedStrikes.slice(Math.max(0,atmIdx-10),atmIdx+11));
   const filtered=rows.filter(r=>{
     const strike=Number(r.strike_price), ce=r.call_options||{},pe=r.put_options||{};
     if(typeFilter==="CE"&&!ce.instrument_key)return false;
     if(typeFilter==="PE"&&!pe.instrument_key)return false;
     if(moneyFilter==="ALL")return true;
+    if(moneyFilter==="NEAR")return atmIdx<0?true:nearSet.has(strike);
     if(!optionChainSpot||atmStrike===null)return false;
     const ceMatch=ce.instrument_key&&moneynessOf(strike,"CE",optionChainSpot,atmStrike)===moneyFilter;
     const peMatch=pe.instrument_key&&moneynessOf(strike,"PE",optionChainSpot,atmStrike)===moneyFilter;
     return typeFilter==="CE"?!!ceMatch:typeFilter==="PE"?!!peMatch:!!(ceMatch||peMatch);
   });
   if(!filtered.length){body.innerHTML=`<tr><td colspan="8" class="empty">No ${moneyFilter} strikes available for this selection. ${optionChainSpot?`Spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}.`:"Underlying spot unavailable; choose All or refresh data."}</td></tr>`;return}
+  let atmRow=null;
   filtered.forEach(r=>{
     const call=r.call_options||{},put=r.put_options||{},cm=call.market_data||{},pm=put.market_data||{};
     const tr=document.createElement("tr");
     const strike=Number(r.strike_price);
+    if(atmStrike!==null&&Math.abs(strike-atmStrike)<0.001){tr.classList.add("atm-row");atmRow=tr}
+    if(paperSelected&&(paperSelected.instrument_key===call.instrument_key||paperSelected.instrument_key===put.instrument_key))tr.classList.add("chain-selected");
     const label=optionChainSpot&&atmStrike!==null?(Math.abs(strike-atmStrike)<0.001?"ATM":`${moneynessOf(strike,"CE",optionChainSpot,atmStrike)} CE / ${moneynessOf(strike,"PE",optionChainSpot,atmStrike)} PE`):"";
     [fmt(strike,0),fmt(cm.ltp),fmt(cm.oi,0),fmt(r.pcr,3),fmt(pm.oi,0),fmt(pm.ltp)].forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===0&&label)td.title=label;tr.appendChild(td)});
     const ceTd=document.createElement("td"),peTd=document.createElement("td");
@@ -199,10 +258,11 @@ function renderFilteredChain(){
     peBtn.addEventListener("click",()=>selectPaperContract("PE",r.strike_price,put.instrument_key,pm.ltp,r.expiry||$("expiry").value,peBtn));
     ceTd.appendChild(ceBtn);peTd.appendChild(peBtn);tr.appendChild(ceTd);tr.appendChild(peTd);body.appendChild(tr);
   });
-  $("chainStatus").textContent=`Loaded ${filtered.length} of ${rows.length} strikes${optionChainSpot?` · spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}`:" · spot unavailable"}. Select Use CE/Use PE. Prices are API snapshots, not guaranteed live ticks.`;
+  if(wrap){if(scrollToAtm&&atmRow){requestAnimationFrame(()=>{wrap.scrollTop=Math.max(0,atmRow.getBoundingClientRect().top-wrap.getBoundingClientRect().top+wrap.scrollTop-wrap.clientHeight/2+atmRow.clientHeight/2)})}else wrap.scrollTop=keepTop}
+  $("chainStatus").textContent=`Showing ${filtered.length} of ${rows.length} strikes${chainLotSize?` · lot size ${chainLotSize}`:""}${optionChainSpot?` · spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}`:" · spot unavailable"}. ATM row highlighted. Select Use CE/Use PE. Prices are API snapshots (refreshed every 30s while the market is open), not guaranteed live ticks.`;
 }
 function renderChain(data){
-  optionChainRows=data.data||data.chain||[];
+  optionChainRows=data.data||data.chain||[];chainLotSize=data.lot_size||null;
   if(!optionChainRows.length){$("chainStatus").textContent="Upstox returned zero option rows for this expiry. Try another listed expiry or check Render Logs.";renderFilteredChain();return}
   renderFilteredChain();
 }
@@ -238,8 +298,20 @@ async function loadChain(skipExpiryCheck=false){
   }catch(e){optionChainRows=[];renderFilteredChain();$("chainStatus").textContent="Option-chain request failed: "+e.message;toast("Option chain failed: "+e.message)}
   finally{if(btn){btn.disabled=false;btn.textContent="Load chain"}}
 }
+async function refreshChainQuiet(){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test($("expiry").value||"")||!optionChainRows.length)return;
+  try{
+    const data=await api(`/api/option-chain?symbol=${encodeURIComponent(getSymbol())}&expiry_date=${encodeURIComponent($("expiry").value)}`);
+    optionChainRows=data.data||[];chainLotSize=data.lot_size||chainLotSize;renderFilteredChain({scroll:false});
+  }catch{}
+}
 $("refreshBtn").addEventListener("click",refresh);
-$("symbol").addEventListener("change",()=>{optionChainRows=[];$("chainRows").innerHTML='<tr><td colspan="8" class="empty">Load expiries for this underlying.</td></tr>';loadContracts(true);refresh();});
+$("symbol").addEventListener("change",()=>{
+  optionChainRows=[];chainLotSize=null;chartFitKey=null;lastDerivatives=null;
+  $("chainRows").innerHTML='<tr><td colspan="8" class="empty">Loading expiries for this underlying…</td></tr>';
+  renderLiveTicks([]);connectLiveSocket();refresh();
+  loadContracts(true); // expiry list -> chain -> derivatives for that real expiry
+});
 $("interval").addEventListener("change",refresh);
 $("loadContracts").addEventListener("click",()=>loadContracts(true));
 $("loadChain").addEventListener("click",()=>loadChain());
@@ -247,13 +319,14 @@ $("chartView").addEventListener("change",refreshChartSource);
 ["showEma","showVWAP","showSR"].forEach(id=>$(id).addEventListener("change",()=>renderCandles(currentCandles)));
 const chartPanel=document.querySelector(".chart-panel");
 const chartWrap=$("chart");
-function resizeChartSoon(){requestAnimationFrame(()=>{if(chart&&chartWrap){chart.applyOptions({width:chartWrap.clientWidth,height:chartWrap.clientHeight});chart.timeScale().fitContent();}})}
+function resizeChartSoon(){requestAnimationFrame(()=>{if(chart&&chartWrap){chart.applyOptions({width:chartWrap.clientWidth,height:chartWrap.clientHeight});}})}
 $("chartMaximize").addEventListener("click",()=>{
   const maximized=chartPanel.classList.toggle("chart-maximized");
   $("chartMaximize").textContent=maximized?"↙ Restore":"⛶ Maximize";
   document.body.classList.toggle("chart-modal-open",maximized);
   resizeChartSoon();
 });
+$("chartFit").addEventListener("click",()=>{chartFitKey=null;renderCandles(currentCandles)});
 $("chartMinimize").addEventListener("click",()=>{
   const collapsed=chartPanel.classList.toggle("chart-collapsed");
   $("chartMinimize").textContent=collapsed?"＋ Show chart":"− Minimize chart";
@@ -263,8 +336,8 @@ window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.
 ["optionTypeFilter","moneynessFilter"].forEach(id=>$(id)?.addEventListener("change",renderFilteredChain));
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
 initChart();checkStatus();refresh();
-setInterval(()=>{if(document.visibilityState==="visible")refresh()},60000);
-let liveSocket=null, lastDerivatives=null;
+setInterval(()=>{if(document.visibilityState==="visible"&&marketOpen)refresh()},60000);
+let liveSocket=null, lastDerivatives=null, liveSocketGen=0, liveReconnectTimer=null;
 function renderLiveTicks(ticks){
   const body=$("liveTicksRows");
   if(!ticks||!ticks.length){body.innerHTML='<tr><td colspan="7" class="empty">No fresh WebSocket ticks yet. Verify API token, SDK subscription and market hours.</td></tr>';return}
@@ -278,13 +351,27 @@ function renderLiveTicks(ticks){
   });
 }
 function connectLiveSocket(){
-  if(liveSocket){try{liveSocket.close()}catch{}}
+  // One socket at a time. Old handlers are detached first so closing it cannot schedule a second reconnect.
+  clearTimeout(liveReconnectTimer);
+  const gen=++liveSocketGen;
+  if(liveSocket){liveSocket.onopen=liveSocket.onmessage=liveSocket.onerror=liveSocket.onclose=null;try{liveSocket.close()}catch{}}
   const proto=location.protocol==="https:"?"wss:":"ws:";
-  liveSocket=new WebSocket(`${proto}//${location.host}/ws/live?symbol=${encodeURIComponent(getSymbol())}`);
-  liveSocket.onopen=()=>{$("streamStatus").textContent="CONNECTED";$("streamStatus").className="pill ok"};
-  liveSocket.onmessage=ev=>{try{const m=JSON.parse(ev.data);const ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));renderLiveTicks(ticks);if(m.stream==="LIVE"){$("streamStatus").textContent="LIVE TICKS";$("streamStatus").className="pill live"}else{$("streamStatus").textContent=m.stream||"CONNECTING";$("streamStatus").className="pill stale"}if(m.error)$ ("streamError").textContent=m.error;else if(ticks.length)$ ("streamError").textContent="WebSocket feed connected";}catch{}}
-  liveSocket.onerror=()=>{$("streamStatus").textContent="UNAVAILABLE";$("streamStatus").className="pill bad"};
-  liveSocket.onclose=()=>{if(document.visibilityState==="visible")setTimeout(connectLiveSocket,4000)};
+  const ws=new WebSocket(`${proto}//${location.host}/ws/live?symbol=${encodeURIComponent(getSymbol())}`);
+  liveSocket=ws;
+  ws.onopen=()=>{if(gen!==liveSocketGen)return;$("streamStatus").textContent="CONNECTED";$("streamStatus").className="pill ok"};
+  ws.onmessage=ev=>{
+    if(gen!==liveSocketGen)return;
+    try{
+      const m=JSON.parse(ev.data),ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));
+      renderLiveTicks(ticks);
+      if(m.stream==="LIVE"){$("streamStatus").textContent="LIVE TICKS";$("streamStatus").className="pill live"}
+      else{$("streamStatus").textContent=m.stream||"CONNECTING";$("streamStatus").className="pill stale"}
+      if(ticks.length){const ages=ticks.map(t=>t.age_seconds).filter(Number.isFinite);if(ages.length)$("tickAge").textContent=`${fmt(Math.min(...ages),1)}s`}
+      if(m.error)$("streamError").textContent=m.error;else if(ticks.length)$("streamError").textContent=m.stream==="LIVE"?"WebSocket feed connected":"Ticks are stale (market closed or feed idle)";
+    }catch{}
+  };
+  ws.onerror=()=>{if(gen!==liveSocketGen)return;$("streamStatus").textContent="UNAVAILABLE";$("streamStatus").className="pill bad"};
+  ws.onclose=()=>{if(gen!==liveSocketGen)return;liveReconnectTimer=setTimeout(()=>{if(gen===liveSocketGen&&document.visibilityState==="visible")connectLiveSocket()},4000)};
 }
 async function refreshDerivatives(){
   try{
@@ -295,18 +382,22 @@ async function refreshDerivatives(){
     $("livePutOI").textContent=typeof d.total_put_oi==="number"?fmt(d.total_put_oi,0):"UNAVAILABLE";
     $("liveIV").textContent=typeof d.iv_average==="number"?`${fmt(d.iv_average)}%`:"UNAVAILABLE";
     $("pcrStatus").textContent=d.pcr!=="UNAVAILABLE"?`REST snapshot · ${d.expiry}`:"No valid same-expiry PCR";
-    $("oiStatus").textContent=d.oi_status||"UNAVAILABLE";$("ivStatus").textContent=d.iv_status||"UNAVAILABLE";
-    $("tickAge").textContent=d.websocket_last_tick_age_seconds===null?"—":`${fmt(d.websocket_last_tick_age_seconds,1)}s`;
+    $("oiStatus").textContent=d.oi_status||"UNAVAILABLE";$("ivStatus").textContent=(d.iv_status||"UNAVAILABLE")+(d.atm_iv?` · ATM IV ${fmt(d.atm_iv)}%`:"");
+    $("tickAge").textContent=d.websocket_last_tick_age_seconds==null?"—":`${fmt(d.websocket_last_tick_age_seconds,1)}s`;if(d.market)renderMarketPill(d.market),marketOpen=!!d.market.open;
     $("streamError").textContent=d.websocket_error||d.note||"Waiting for ticks";
     $("derivTimestamp").textContent=`Snapshot timestamp: ${d.rest_snapshot_timestamp||d.timestamp||"UNAVAILABLE"} · expiry: ${d.expiry||"UNAVAILABLE"} · WS: ${d.websocket||"UNAVAILABLE"}`;
     if(d.websocket==="LIVE"){$("streamStatus").textContent="LIVE TICKS";$("streamStatus").className="pill live"}
     else if(d.websocket_error){$("streamStatus").textContent="UNAVAILABLE";$("streamStatus").className="pill bad"}
-    renderLiveTicks((d.live_near_atm||[]).map(t=>({...t,age_seconds:d.websocket_last_tick_age_seconds,fresh:d.websocket_last_tick_age_seconds!==null&&d.websocket_last_tick_age_seconds<=15})));
+    else if(d.websocket==="MARKET_CLOSED"){$("streamStatus").textContent="MARKET CLOSED";$("streamStatus").className="pill muted"}
+    if(!liveSocket||liveSocket.readyState!==1)renderLiveTicks(d.live_near_atm||[]); // the 1s WebSocket push owns this table while connected
   }catch(e){$("livePCR").textContent="UNAVAILABLE";$("liveCallOI").textContent="UNAVAILABLE";$("livePutOI").textContent="UNAVAILABLE";$("liveIV").textContent="UNAVAILABLE";$("streamStatus").textContent="UNAVAILABLE";$("streamError").textContent=e.message;$("derivTimestamp").textContent="Snapshot timestamp: UNAVAILABLE"}
 }
-$("symbol").addEventListener("change",()=>{connectLiveSocket();refreshDerivatives()});
-$("expiry").addEventListener("change",()=>{refreshDerivatives();loadChain()});
-connectLiveSocket();refreshDerivatives();setInterval(()=>{if(document.visibilityState==="visible")refreshDerivatives()},15000);
+$("expiry").addEventListener("change",()=>loadChain()); // loadChain also refreshes derivatives for the same expiry
+connectLiveSocket();loadContracts(true);
+setInterval(()=>{if(document.visibilityState==="visible")refreshDerivatives()},15000);
+setInterval(()=>{if(document.visibilityState==="visible"&&marketOpen)refreshChainQuiet()},30000);
+setInterval(checkStatus,60000);
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&(!liveSocket||liveSocket.readyState>1))connectLiveSocket()});
 
 // ---------------- Local-browser paper trading ----------------
 // These are simulated positions only. They never place broker orders.
@@ -322,10 +413,11 @@ function paperGetCapital(){const v=Number(localStorage.getItem(PAPER_CAPITAL_KEY
 function paperMoney(v){return v===null||v===undefined||!Number.isFinite(Number(v))?"—":"₹"+Number(v).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}
 function paperTime(v){if(!v)return "—";try{return new Date(v).toLocaleString()}catch{return String(v)}}
 function paperNum(id){const v=Number($(id).value);return Number.isFinite(v)&&v>0?v:null}
-function paperSelectedLabel(){return paperSelected?`${getSymbol()} ${paperSelected.expiry} ${paperSelected.strike} ${paperSelected.type}`:"No option selected"}
+function paperSelectedLabel(){return paperSelected?`${paperSelected.symbol} ${paperSelected.expiry} ${paperSelected.strike} ${paperSelected.type}`:"No option selected"}
 function selectPaperContract(type,strike,instrumentKey,ltp,expiry,button){
   if(!instrumentKey){toast("This option has no instrument key in the chain response.");return}
-  paperSelected={symbol:getSymbol(),type,strike:Number(strike),instrument_key:instrumentKey,expiry:String(expiry||$("expiry").value),ltp:Number(ltp)||null,quoteStatus:"CHAIN_SNAPSHOT"};
+  paperSelected={symbol:getSymbol(),type,strike:Number(strike),instrument_key:instrumentKey,expiry:String(expiry||$("expiry").value),ltp:Number(ltp)||null,quoteStatus:"CHAIN_SNAPSHOT",lot:chainLotSize||null};
+  {const lot=paperSelected.lot||1;$("paperQty").value=String(lot);$("paperQty").step=String(lot);$("paperLotHint").textContent=paperSelected.lot?` · 1 lot = ${paperSelected.lot}`:""}
   paperAtr=null;$("paperAtrValue").textContent="UNAVAILABLE";
   $("paperSelectedContract").textContent=`Selected: ${paperSelectedLabel()} · chain LTP ${paperMoney(paperSelected.ltp)} (snapshot)`;
   $("paperEntry").value=paperSelected.ltp||"";
@@ -344,14 +436,9 @@ function paperUpdateMode(){
 }
 function paperCalcAtrFromCandles(candles){
   if(!Array.isArray(candles)||candles.length<15)return null;
-  const cs=candles.slice().sort((a,b)=>Date.parse(a.time)-Date.parse(b.time));
-  const trs=[];
-  for(let i=1;i<cs.length;i++){
-    const h=Number(cs[i].high),l=Number(cs[i].low),pc=Number(cs[i-1].close);
-    if([h,l,pc].every(Number.isFinite))trs.push(Math.max(h-l,Math.abs(h-pc),Math.abs(l-pc)));
-  }
-  if(trs.length<14)return null;
-  return trs.slice(-14).reduce((a,b)=>a+b,0)/14;
+  const cs=candles.map(c=>({t:Date.parse(c.time),high:Number(c.high),low:Number(c.low),close:Number(c.close)}))
+    .filter(c=>Number.isFinite(c.t)&&[c.high,c.low,c.close].every(Number.isFinite)).sort((a,b)=>a.t-b.t);
+  return atrValue(cs); // Wilder ATR(14), same as the chart / TradingView
 }
 async function paperCalculateAtr(){
   if(!paperSelected){toast("पहले option chain से CE या PE select करें.");return}
@@ -398,7 +485,13 @@ function paperUpdatePreview(){
   $("paperBuyBtn").disabled=!valid;
   if(!paperSelected)$("paperRiskNote").textContent="Select CE or PE from the option chain.";
   else if(!p)$("paperRiskNote").textContent=$("paperRiskMode").value==="atr"?"Calculate option-premium ATR and confirm entry price; targets/SL will then be previewed.":"Enter a valid entry, stop-loss below entry and target above entry.";
-  else $("paperRiskNote").textContent=`${p.mode} plan ready. Risk ${paperMoney(risk)} per unit; max planned loss at selected quantity: ${paperMoney(risk*qty)} (excluding costs/slippage).`;
+  else{
+    const rr=risk>0?(p.t1-p.entry)/risk:null,lot=paperSelected.lot;
+    let note=`${p.mode} plan ready. Risk ${paperMoney(risk)} per unit; max planned loss at selected quantity: ${paperMoney(risk*qty)} (excluding costs/slippage).`;
+    if(rr!==null&&rr<1)note+=` ⚠ Target 1 pays only ${rr.toFixed(2)}R: with "Auto-exit at Target 1" you need a win rate above ${(100/(1+rr)).toFixed(0)}% just to break even.`;
+    if(lot&&qty%lot!==0)note+=` ⚠ Quantity is not a multiple of the lot size (${lot}); real exchange orders need whole lots.`;
+    $("paperRiskNote").textContent=note;
+  }
 }
 async function paperFetchQuote(force){
   if(!paperSelected)return null;
@@ -443,7 +536,7 @@ async function paperOpenTrade(){
   const required=p.entry*qty;
   if(required>available){toast(`Insufficient paper cash. Required ${paperMoney(required)}, available ${paperMoney(Math.max(0,available))}.`);return}
   trades.unshift(trade);paperSave(trades);paperRender();
-  toast(`Paper BUY opened: ${trade.symbol} ${trade.strike} ${trade.type}`);
+  toast(`Paper BUY opened: ${trade.symbol} ${trade.strike} ${trade.type}${marketOpen?"":" — market is closed, entry uses the last snapshot price"}`);
 }
 function paperRender(){
   const trades=paperRead(),open=trades.filter(t=>t.status==="OPEN"),closed=trades.filter(t=>t.status==="CLOSED");
@@ -493,7 +586,7 @@ async function paperRefreshQuotes(){
         if(!(Number(q.ltp)>0)||q.status==="UNAVAILABLE") {t.last_quote_status="UNAVAILABLE";continue}
         const price=Number(q.ltp);t.last_price=price;t.last_quote_status=q.status;t.last_quote_time=q.timestamp;
         // Simulated threshold exits only when the backend returned a usable quote.
-        if(price<=t.sl)paperCloseTrade(t,t.sl,"Stop-loss touched (observed quote)");
+        if(price<=t.sl)paperCloseTrade(t,Math.min(price,t.sl),"Stop-loss hit (filled at observed quote)");
         else {
           const target=t.exit_target==="t1"?t.t1:t.exit_target==="t2"?t.t2:t.exit_target==="t3"?t.t3:null;
           if(target&&price>=target)paperCloseTrade(t,target,`Target ${t.exit_target.toUpperCase()} touched (observed quote)`);
