@@ -1,4 +1,4 @@
-import os, secrets, threading, time, asyncio, json, logging
+import os, re, secrets, threading, time, asyncio, json, logging
 from datetime import date, timedelta, datetime, timezone
 from urllib.parse import urlencode
 import httpx
@@ -266,24 +266,58 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
     return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": candles}
 
 @app.get("/api/option-contracts")
-async def option_contracts(symbol: str = "NIFTY", expiry_date: str = "current_week"):
+async def option_contracts(symbol: str = "NIFTY", expiry_date: str = ""):
+    """Return option contracts. If unfiltered contracts are empty, try Upstox's supported relative expiries."""
     key = INDEX_KEYS.get(symbol.upper())
     if not key:
         raise HTTPException(status_code=400, detail="Unknown index symbol.")
-    params = {"instrument_key": key}
+
+    async def fetch_contracts(expiry=""):
+        params = {"instrument_key": key}
+        if expiry:
+            params["expiry_date"] = expiry
+        response = await upstox_get(f"{API_BASE}/v2/option/contract", params)
+        rows = response.get("data", []) if isinstance(response, dict) else []
+        # Be tolerant of wrappers used by proxy/provider responses.
+        if isinstance(rows, dict):
+            rows = rows.get("data", rows.get("contracts", []))
+        return rows if isinstance(rows, list) else []
+
+    # A specific actual date or documented relative keyword should be honored directly.
     if expiry_date:
-        params["expiry_date"] = expiry_date
-    data = await upstox_get(f"{API_BASE}/v2/option/contract", params)
-    return data
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", expiry_date) or expiry_date in {
+            "current_week", "next_week", "far_week", "current_month", "next_month", "far_month"
+        }:
+            rows = await fetch_contracts(expiry_date)
+            return {"status": "success", "data": rows, "requested_expiry": expiry_date, "source": "Upstox option contract API"}
+        raise HTTPException(status_code=400, detail="expiry_date must be YYYY-MM-DD or a supported Upstox expiry keyword.")
+
+    # First try the unfiltered endpoint; some API responses/accounts return no rows without a keyword.
+    rows = await fetch_contracts()
+    if not rows:
+        collected = {}
+        errors = []
+        for keyword in ("current_week", "current_month", "next_week", "next_month", "far_week", "far_month"):
+            try:
+                for row in await fetch_contracts(keyword):
+                    ident = row.get("instrument_key") or (row.get("expiry"), row.get("trading_symbol"))
+                    if ident:
+                        collected[ident] = row
+            except HTTPException as exc:
+                errors.append(f"{keyword}: {str(exc.detail)[:160]}")
+        rows = list(collected.values())
+        if not rows and errors:
+            logger.warning("Upstox option contract lookup returned no rows for %s; keyword errors: %s", symbol.upper(), " | ".join(errors))
+    return {"status": "success", "data": rows, "source": "Upstox option contract API"}
 
 
 @app.get("/api/option-chain")
-async def option_chain(symbol: str = "NIFTY", expiry_date: str = "current_week"):
+async def option_chain(symbol: str = "NIFTY", expiry_date: str = ""):
     key = INDEX_KEYS.get(symbol.upper())
     if not key:
         raise HTTPException(status_code=400, detail="Unknown index symbol.")
-    if not expiry_date:
-        expiry_date = "current_week"
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", expiry_date or ""):
+        raise HTTPException(status_code=400, detail="Choose an actual expiry date. Click Load expiries, then Load chain.")
     data = await upstox_get(f"{API_BASE}/v2/option/chain", {"instrument_key": key, "expiry_date": expiry_date})
     return data
 
