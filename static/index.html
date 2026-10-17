@@ -30,8 +30,20 @@
   <section class="layout">
     <div class="panel chart-panel">
       <div class="section-head"><div><h2>Market candles</h2><p id="chartSubtitle">NIFTY 50 · 5-minute OHLC</p></div><div class="legend"><span class="green">● Bull candle</span><span class="red">● Bear candle</span></div></div>
+      <div class="chart-tools" aria-label="Chart overlays">
+        <label><input type="checkbox" id="showEma" checked> EMA 9/21</label>
+        <label><input type="checkbox" id="showVWAP" checked> VWAP</label>
+        <label><input type="checkbox" id="showSR" checked> Auto S/R</label>
+      </div>
       <div id="chart" class="chart"></div>
-      <div class="chart-note">Historical candle data. Live streaming is not enabled in this starter version.</div>
+      <div class="chart-indicators" id="chartIndicators">
+        <div><span>RSI (14)</span><b id="chartRsi">—</b></div>
+        <div><span>ATR (14)</span><b id="chartAtr">—</b></div>
+        <div><span>Support</span><b id="chartSupport">—</b></div>
+        <div><span>Resistance</span><b id="chartResistance">—</b></div>
+        <div><span>Volume</span><b id="chartVolume">—</b></div>
+      </div>
+      <div class="chart-note" id="chartNote">Historical candles. Select an option contract to view its premium candles.</div>
     </div>
     <aside class="panel intelligence">
       <div class="section-head"><div><h2>Market intelligence</h2><p>Indicators calculated from available candles</p></div></div>
@@ -62,7 +74,7 @@
   <section class="layout lower">
     <div class="panel">
       <div class="section-head"><div><h2>Option chain</h2><p>Current weekly expiry where available; monthly/manual expiry can also be selected</p></div></div>
-      <div class="option-controls"><label>Expiry<select id="expiry"><option value="current_week">Current week</option><option value="next_week">Next week</option><option value="current_month">Current month</option></select></label><button id="loadContracts">Load expiries</button><button id="loadChain" class="secondary">Load chain</button></div>
+      <div class="option-controls"><label>Expiry<select id="expiry"><option value="">Load expiries first</option></select></label><button id="loadContracts">Load expiries</button><button id="loadChain" class="secondary">Load chain</button></div>
       <div class="table-wrap"><table><thead><tr><th>Strike</th><th>Call LTP</th><th>Call OI</th><th>PCR</th><th>Put OI</th><th>Put LTP</th><th>Select CE</th><th>Select PE</th></tr></thead><tbody id="chainRows"><tr><td colspan="8" class="empty">Load option chain to view available data.</td></tr></tbody></table></div>
       <div class="sub small" id="chainStatus">Data is shown only when returned by Upstox.</div>
     </div>
@@ -82,7 +94,18 @@
       <div><h2>Paper Trading Dashboard</h2><p>Virtual trades only · no real orders · history stored in this browser</p></div>
       <span class="pill muted" id="paperStatus">PAPER MODE</span>
     </div>
+    <div class="paper-form-card paper-capital-card">
+      <h3>Paper account settings</h3>
+      <div class="capital-controls">
+        <label>Initial paper capital (₹)<input id="paperInitialCapital" type="number" min="1" step="1000" value="100000" inputmode="decimal"></label>
+        <button type="button" id="paperSaveCapital">Save starting balance</button>
+        <span id="paperCapitalNote" class="sub small">Starting balance is saved in this browser only.</span>
+      </div>
+    </div>
     <div class="paper-stats">
+      <div class="deriv-card"><span>Initial capital</span><strong id="paperInitialDisplay">₹1,00,000.00</strong></div>
+      <div class="deriv-card"><span>Available cash</span><strong id="paperAvailableCash">₹1,00,000.00</strong></div>
+      <div class="deriv-card"><span>Account equity (MTM)</span><strong id="paperEquity">₹1,00,000.00</strong></div>
       <div class="deriv-card"><span>Open trades</span><strong id="paperOpenCount">0</strong></div>
       <div class="deriv-card"><span>Open P&amp;L (MTM)</span><strong id="paperOpenPnl">₹0.00</strong></div>
       <div class="deriv-card"><span>Realized P&amp;L</span><strong id="paperRealizedPnl">₹0.00</strong></div>
