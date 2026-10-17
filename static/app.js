@@ -8,9 +8,9 @@ function initChart(){
   const el=$("chart");
   chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:el.clientHeight,layout:{background:{color:"#121d2d"},textColor:"#91a4ba"},grid:{vertLines:{color:"#1e2d40"},horzLines:{color:"#1e2d40"}},rightPriceScale:{borderColor:"#27384d"},timeScale:{borderColor:"#27384d",timeVisible:true,secondsVisible:false,tickMarkFormatter:istTickMarkFormatter},localization:{timeFormatter:istCrosshairTimeFormatter},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
   candleSeries=chart.addCandlestickSeries({upColor:"#25c58a",downColor:"#ff667a",borderUpColor:"#25c58a",borderDownColor:"#ff667a",wickUpColor:"#25c58a",wickDownColor:"#ff667a"});
-  ema9Series=chart.addLineSeries({color:"#25c58a",lineWidth:2,priceLineVisible:false,lastValueVisible:true});
-  ema21Series=chart.addLineSeries({color:"#ff4d5e",lineWidth:2,priceLineVisible:false,lastValueVisible:true});
-  vwapSeries=chart.addLineSeries({color:"#ffffff",lineWidth:2,priceLineVisible:false,lineStyle:LightweightCharts.LineStyle.Solid,lastValueVisible:true});
+  ema9Series=chart.addLineSeries({color:"#25c58a",lineWidth:2,priceLineVisible:false,lastValueVisible:false});
+  ema21Series=chart.addLineSeries({color:"#ff4d5e",lineWidth:2,priceLineVisible:false,lastValueVisible:false});
+  vwapSeries=chart.addLineSeries({color:"#ffffff",lineWidth:2,priceLineVisible:false,lineStyle:LightweightCharts.LineStyle.Solid,lastValueVisible:false});
   window.addEventListener("resize",()=>chart.applyOptions({width:el.clientWidth,height:el.clientHeight}));
 }
 // Keep candle timestamps as true Unix seconds. Lightweight Charts can format numeric
@@ -57,23 +57,37 @@ function rsiValue(closes,n=14){if(closes.length<n+1)return null;let g=0,l=0;for(
 function atrValue(cs,n=14){if(cs.length<n+1)return null;const tr=[];for(let i=1;i<cs.length;i++)tr.push(Math.max(cs[i].high-cs[i].low,Math.abs(cs[i].high-cs[i-1].close),Math.abs(cs[i].low-cs[i-1].close)));return tr.slice(-n).reduce((a,b)=>a+b,0)/Math.min(n,tr.slice(-n).length)}
 function calcVWAP(cs){let pv=0,vol=0;return cs.map(c=>{const v=Number(c.volume)||0;pv+=((c.high+c.low+c.close)/3)*v;vol+=v;return {time:c.time,value:vol?pv/vol:c.close}})}
 function findSR(cs){
-  if(cs.length<10)return {support:null,resistance:null};
-  const start=Math.max(2,cs.length-120), end=cs.length-2;
+  // Confirmed 5-bar swing points, clustered to avoid near-duplicate levels.
+  // Only levels on the correct side of the latest close are retained.
+  if(cs.length<12)return {supports:[],resistances:[],support:null,resistance:null};
+  const last=cs.at(-1).close;
+  const start=Math.max(2,cs.length-160), end=cs.length-2;
+  const recent=cs.slice(-30);
+  const ranges=recent.map(c=>c.high-c.low).filter(v=>Number.isFinite(v)&&v>0);
+  const avgRange=ranges.length?ranges.reduce((a,b)=>a+b,0)/ranges.length:0;
+  const tolerance=Math.max(avgRange*0.35,last*0.00035);
   const lows=[],highs=[];
   for(let i=start;i<end;i++){
     const c=cs[i];
-    if(c.low<=cs[i-1].low&&c.low<=cs[i-2].low&&c.low<=cs[i+1].low&&c.low<=cs[i+2].low)lows.push(c.low);
-    if(c.high>=cs[i-1].high&&c.high>=cs[i-2].high&&c.high>=cs[i+1].high&&c.high>=cs[i+2].high)highs.push(c.high);
+    if(c.low<=cs[i-1].low&&c.low<=cs[i-2].low&&c.low<=cs[i+1].low&&c.low<=cs[i+2].low)lows.push({price:c.low,index:i});
+    if(c.high>=cs[i-1].high&&c.high>=cs[i-2].high&&c.high>=cs[i+1].high&&c.high>=cs[i+2].high)highs.push({price:c.high,index:i});
   }
-  const last=cs.at(-1).close;
-  // Only choose levels on the correct side of the latest close. Never label a
-  // recent low above price as support or a recent high below price as resistance.
-  const supportCandidates=lows.filter(v=>v<last).sort((a,b)=>b-a);
-  const resistanceCandidates=highs.filter(v=>v>last).sort((a,b)=>a-b);
-  const recent=cs.slice(-30);
-  const support=supportCandidates[0] ?? Math.max(...recent.map(c=>c.low).filter(v=>v<last));
-  const resistance=resistanceCandidates[0] ?? Math.min(...recent.map(c=>c.high).filter(v=>v>last));
-  return {support:Number.isFinite(support)?support:null,resistance:Number.isFinite(resistance)?resistance:null};
+  function cluster(pivots,side){
+    const valid=pivots.filter(p=>side==="support"?p.price<last:p.price>last).sort((a,b)=>a.price-b.price);
+    const groups=[];
+    for(const p of valid){
+      let g=groups.find(x=>Math.abs(x.price-p.price)<=tolerance);
+      if(!g){g={price:p.price,prices:[],indices:[]};groups.push(g)}
+      g.prices.push(p.price);g.indices.push(p.index);
+      g.price=g.prices.reduce((a,b)=>a+b,0)/g.prices.length;
+    }
+    return groups.map(g=>({price:g.price,touches:g.prices.length,lastTouch:Math.max(...g.indices),distance:Math.abs(last-g.price)}))
+      .sort((a,b)=>a.distance-b.distance||b.touches-a.touches||b.lastTouch-a.lastTouch)
+      .filter((g,i,arr)=>arr.findIndex(x=>Math.abs(x.price-g.price)<=tolerance)===i)
+      .slice(0,2).sort((a,b)=>side==="support"?b.price-a.price:a.price-b.price);
+  }
+  const supports=cluster(lows,"support"),resistances=cluster(highs,"resistance");
+  return {supports,resistances,support:supports[0]?.price??null,resistance:resistances[0]?.price??null};
 }
 function renderCandles(candles){
   currentCandles=candles||[];
@@ -84,11 +98,15 @@ function renderCandles(candles){
   ema9Series.setData(unique.map((c,i)=>({time:c.time,value:e9[i]})));ema21Series.setData(unique.map((c,i)=>({time:c.time,value:e21[i]})));vwapSeries.setData(vw);
   const showEma=$("showEma")?.checked!==false,showVwap=$("showVWAP")?.checked!==false,showSR=$("showSR")?.checked!==false;
   ema9Series.applyOptions({visible:showEma});ema21Series.applyOptions({visible:showEma});vwapSeries.applyOptions({visible:showVwap});clearSRLines();
-  const sr=findSR(unique);if(showSR&&sr.support!==null&&Number.isFinite(sr.support))srLines.push(candleSeries.createPriceLine({price:sr.support,color:"#25c58a",lineWidth:2,lineStyle:LightweightCharts.LineStyle.Solid,axisLabelVisible:true,title:"SUPPORT",axisLabelColor:"#167c59",axisLabelTextColor:"#ffffff"}));if(showSR&&sr.resistance!==null&&Number.isFinite(sr.resistance))srLines.push(candleSeries.createPriceLine({price:sr.resistance,color:"#ff4d5e",lineWidth:2,lineStyle:LightweightCharts.LineStyle.Solid,axisLabelVisible:true,title:"RESISTANCE",axisLabelColor:"#b82b3c",axisLabelTextColor:"#ffffff"}));
+  const sr=findSR(unique);
+  if(showSR){
+    sr.supports.forEach((level,i)=>srLines.push(candleSeries.createPriceLine({price:level.price,color:i===0?"#25c58a":"#168f68",lineWidth:i===0?2:1,lineStyle:i===0?LightweightCharts.LineStyle.Solid:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:i===0?"SUPPORT":"S2",axisLabelColor:i===0?"#167c59":"#145c48",axisLabelTextColor:"#ffffff"})));
+    sr.resistances.forEach((level,i)=>srLines.push(candleSeries.createPriceLine({price:level.price,color:i===0?"#ff4d5e":"#d94756",lineWidth:i===0?2:1,lineStyle:i===0?LightweightCharts.LineStyle.Solid:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:i===0?"RESISTANCE":"R2",axisLabelColor:i===0?"#b82b3c":"#8f2634",axisLabelTextColor:"#ffffff"})));
+  }
   chart.timeScale().fitContent();
   if(unique.length){const last=unique.at(-1),rsi=rsiValue(closes),atr=atrValue(unique),volume=last.volume,avgVol=unique.slice(-21,-1).reduce((a,c)=>a+c.volume,0)/Math.max(1,unique.slice(-21,-1).length);$("lastPrice").textContent=fmt(last.close);$("chartSubtitle").textContent=chartSource==="option"&&paperSelected?`${paperSelectedLabel()} · ${getInterval()}-minute premium OHLC`:`${getSymbol()==="NIFTY"?"NIFTY 50":"BANK NIFTY"} · ${getInterval()}-minute OHLC`;
     $("chartRsi").textContent=fmt(rsi);$("chartAtr").textContent=fmt(atr);$("chartSupport").textContent=fmt(sr.support);$("chartResistance").textContent=fmt(sr.resistance);$("chartVolume").textContent=avgVol>0?`${fmt(volume,0)} (${fmt(volume/avgVol,2)}x)`:`${fmt(volume,0)} · ratio N/A`;
-    $("chartNote").textContent=chartSource==="option"?`Selected option premium candles · ${unique.length} bars. Indicators and support/resistance use this option's own candles. Historical data may be unavailable for illiquid/expired contracts.`:"Underlying index candles. Choose Selected option premium, then select CE/PE from the option chain to switch the chart to that contract.";
+    $("chartNote").textContent=chartSource==="option"?`Selected option premium candles · ${unique.length} bars. Indicators and support/resistance use this option's own candles. Historical data may be unavailable for illiquid/expired contracts.`:"Underlying index candles. Support/resistance uses confirmed swing points; only the nearest two levels on each side are shown. Choose Selected option premium, then select CE/PE from the option chain to switch the chart to that contract.";
     $("ema9").textContent=fmt(e9.at(-1));$("ema21").textContent=fmt(e21.at(-1));$("vwap").textContent=fmt(vw.at(-1)?.value);$("rsi").textContent=fmt(rsi);$("atr").textContent=fmt(atr);$("relVol").textContent=avgVol>0?`${fmt(volume/avgVol,2)}x`:"—";$("breakHigh").textContent=fmt(Math.max(...unique.slice(-20,-1).map(c=>c.high)));$("breakLow").textContent=fmt(Math.min(...unique.slice(-20,-1).map(c=>c.low)));
   }else{$("chartNote").textContent=chartSource==="option"?"No historical candles returned for this option contract. Index candles are not substituted.":"No candle data returned."}
 }
