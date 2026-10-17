@@ -1,48 +1,115 @@
-import os, re, secrets, threading, time, asyncio, json, logging
-from datetime import date, timedelta, datetime, timezone
+import os, re, base64, secrets, threading, time, asyncio, json, logging
+from datetime import date, timedelta, datetime, timezone, time as dtime
+from pathlib import Path
 from urllib.parse import urlencode
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
+from indicators import IST, analyze, normalize_candles, parse_time
+from feed_parser import parse_feed_message
+
+BASE_DIR = Path(__file__).resolve().parent
 APP_TITLE = "Option Intelligence"
 UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY", "").strip()
 UPSTOX_API_SECRET = os.getenv("UPSTOX_API_SECRET", "").strip()
 UPSTOX_REDIRECT_URI = os.getenv("UPSTOX_REDIRECT_URI", "").strip()
-# For quick setup, an access token may be supplied as an environment variable.
-# Do not put tokens in frontend JavaScript or commit them to GitHub.
+# Quick-start access token (Upstox tokens expire daily; use Connect Upstox to refresh).
 UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()
+# Optional: protect the whole dashboard with a password (HTTP Basic, any username).
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "").strip()
 API_BASE = "https://api.upstox.com"
 API_V3 = "https://api.upstox.com/v3"
 
-app = FastAPI(title=APP_TITLE, version="1.0.0")
-app.mount("/static", StaticFiles(directory="static"), name="static")
-oauth_states = set()
-runtime_token = UPSTOX_ACCESS_TOKEN
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
-# In-memory live cache only; secrets never leave the backend. On restart, reconnect/re-authenticate.
+
+# ---------------------------------------------------------------- optional password gate
+class BasicAuthMiddleware:
+    """Pure-ASGI Basic-auth gate (HTTP + WebSocket). /health and the TradingView webhook
+    (which has its own secret) stay open. Enabled only when DASHBOARD_PASSWORD is set."""
+    OPEN_PATHS = {"/health", "/api/tradingview/webhook"}
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket") or scope.get("path") in self.OPEN_PATHS:
+            return await self.app(scope, receive, send)
+        auth = dict(scope.get("headers") or []).get(b"authorization", b"").decode("latin-1")
+        ok = False
+        if auth.lower().startswith("basic "):
+            try:
+                _, _, pw = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+                ok = secrets.compare_digest(pw, DASHBOARD_PASSWORD)
+            except Exception:
+                ok = False
+        if ok:
+            return await self.app(scope, receive, send)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 4401})
+            return
+        await send({"type": "http.response.start", "status": 401, "headers": [
+            (b"www-authenticate", b'Basic realm="Option Intelligence"'), (b"content-type", b"text/plain")]})
+        await send({"type": "http.response.body", "body": b"Authentication required"})
+
+
+app = FastAPI(title=APP_TITLE, version="1.1.0")
+if DASHBOARD_PASSWORD:
+    app.add_middleware(BasicAuthMiddleware)
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+oauth_states = set()
+runtime_token = UPSTOX_ACCESS_TOKEN
+# In-memory caches only; secrets never leave the backend.
 LIVE_TICKS = {}
 STREAMS = {}
+STREAM_META = {}
 STREAM_ERRORS = {}
 CHAIN_CACHE = {}
+CONTRACT_CACHE = {}
+CANDLE_CACHE = {}
+TOKEN_CHECK = {"at": 0.0, "token": None, "state": "UNKNOWN"}
 CHAIN_CACHE_TTL = 12
+CONTRACT_CACHE_TTL = 300
+CANDLE_CACHE_TTL = 8
+FRESH_SECONDS = 15
 STREAM_LOCK = threading.RLock()
 
 INDEX_KEYS = {
     "NIFTY": "NSE_INDEX|Nifty 50",
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
 }
+RELATIVE_EXPIRIES = {"current_week", "next_week", "far_week", "current_month", "next_month", "far_month"}
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+# ---------------------------------------------------------------- helpers
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ist_now():
+    return datetime.now(IST)
+
+
+def market_status():
+    now = ist_now()
+    is_open = now.weekday() < 5 and dtime(9, 15) <= now.time() <= dtime(15, 30)
+    return {"open": is_open, "ist_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "note": "Regular NSE schedule (Mon-Fri 09:15-15:30 IST); exchange holidays are not checked."}
+
 
 def token_or_401():
     if not runtime_token:
         raise HTTPException(
             status_code=401,
-            detail="Upstox access token not configured. Add UPSTOX_ACCESS_TOKEN in Render environment variables, or configure OAuth credentials."
+            detail="Upstox access token not configured. Add UPSTOX_ACCESS_TOKEN in Render environment variables, or use Connect Upstox."
         )
     return runtime_token
+
 
 async def upstox_get(url, params=None):
     token = token_or_401()
@@ -54,81 +121,233 @@ async def upstox_get(url, params=None):
             detail = response.json()
         except Exception:
             detail = response.text[:500]
-        raise HTTPException(status_code=response.status_code, detail={"upstox_error": detail})
+        if response.status_code == 401:
+            detail = {"upstox_error": detail, "hint": "Access token expired or invalid. Upstox tokens expire daily - click Connect Upstox."}
+        elif response.status_code == 429:
+            detail = {"upstox_error": detail, "hint": "Upstox rate limit hit. Wait a few seconds and retry."}
+        else:
+            detail = {"upstox_error": detail}
+        raise HTTPException(status_code=response.status_code, detail=detail)
     try:
         return response.json()
     except Exception:
         raise HTTPException(status_code=502, detail="Unexpected response from Upstox")
 
-def utc_now_iso():
-    return datetime.now(timezone.utc).isoformat()
 
-
-def _get_nested(obj, *path):
-    cur = obj
-    for key in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
-
-
-def _on_stream_message(message):
-    """Store latest decoded SDK event. Upstox SDK decodes V3 protobuf into dict-like payloads."""
+async def check_token_state():
+    """VALID / EXPIRED / MISSING / UNKNOWN. Cached for 60s so /api/status stays cheap."""
+    if not runtime_token:
+        return "MISSING"
+    c = TOKEN_CHECK
+    if c["token"] == runtime_token and time.time() - c["at"] < 60:
+        return c["state"]
+    state = "UNKNOWN"
     try:
-        payload = message if isinstance(message, dict) else json.loads(message) if isinstance(message, str) else None
-        if not isinstance(payload, dict):
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(f"{API_BASE}/v2/user/profile",
+                                 headers={"Accept": "application/json", "Authorization": f"Bearer {runtime_token}"})
+        state = "VALID" if r.status_code == 200 else "EXPIRED" if r.status_code == 401 else "UNKNOWN"
+    except Exception:
+        state = "UNKNOWN"
+    TOKEN_CHECK.update({"at": time.time(), "token": runtime_token, "state": state})
+    return state
+
+
+def contract_expiry(row):
+    """Return YYYY-MM-DD for a contract row (handles string dates and epoch-ms values)."""
+    val = row.get("expiry") or row.get("expiry_date") or row.get("expiryDate")
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        seconds = val / 1000 if val > 1e12 else val
+        return datetime.fromtimestamp(seconds, tz=IST).strftime("%Y-%m-%d")
+    text = str(val)[:10]
+    return text if DATE_RE.fullmatch(text) else None
+
+
+# ---------------------------------------------------------------- candles
+def _rows_to_candles(rows):
+    out = []
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 5:
+            continue
+        out.append({"time": row[0], "open": row[1], "high": row[2], "low": row[3], "close": row[4],
+                    "volume": row[5] if len(row) > 5 else 0, "oi": row[6] if len(row) > 6 else None})
+    return out
+
+
+async def fetch_candles(key, interval, days):
+    """Historical + today's intraday candles, merged, ascending, de-duplicated (cached ~8s).
+
+    Upstox's historical endpoint does not include the current session, so the intraday
+    endpoint is merged in; without it the chart goes stale during market hours."""
+    ck = (key, interval, days)
+    hit = CANDLE_CACHE.get(ck)
+    if hit and time.time() - hit[0] < CANDLE_CACHE_TTL:
+        return hit[1]
+    end = ist_now().date()
+    start = end - timedelta(days=days)
+    hist = await upstox_get(f"{API_V3}/historical-candle/{key}/minutes/{interval}/{end.isoformat()}/{start.isoformat()}")
+    rows = _rows_to_candles((hist.get("data") or {}).get("candles"))
+    try:
+        intra = await upstox_get(f"{API_V3}/historical-candle/intraday/{key}/minutes/{interval}")
+        rows += _rows_to_candles((intra.get("data") or {}).get("candles"))
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            raise
+        logger.info("Intraday candles unavailable for %s: %s", key, str(exc.detail)[:160])
+    candles = [{k: v for k, v in c.items() if k != "_dt"} for c in normalize_candles(rows)]
+    CANDLE_CACHE[ck] = (time.time(), candles)
+    if len(CANDLE_CACHE) > 60:
+        for old in sorted(CANDLE_CACHE, key=lambda k: CANDLE_CACHE[k][0])[:20]:
+            CANDLE_CACHE.pop(old, None)
+    return candles
+
+
+# ---------------------------------------------------------------- contracts / expiries / chain
+async def get_contracts(sym, expiry=""):
+    ck = (sym, expiry)
+    hit = CONTRACT_CACHE.get(ck)
+    if hit and time.time() - hit[0] < CONTRACT_CACHE_TTL:
+        return hit[1]
+    params = {"instrument_key": INDEX_KEYS[sym]}
+    if expiry:
+        params["expiry_date"] = expiry
+    response = await upstox_get(f"{API_BASE}/v2/option/contract", params)
+    rows = response.get("data", []) if isinstance(response, dict) else []
+    if isinstance(rows, dict):  # tolerate proxy wrappers
+        rows = rows.get("data", rows.get("contracts", []))
+    rows = rows if isinstance(rows, list) else []
+    CONTRACT_CACHE[ck] = (time.time(), rows)
+    return rows
+
+
+async def get_all_contracts(sym):
+    """Unfiltered contracts; if the account returns nothing, merge relative-expiry lookups."""
+    rows = await get_contracts(sym)
+    if rows:
+        return rows
+    collected, errors = {}, []
+    for keyword in ("current_week", "current_month", "next_week", "next_month", "far_week", "far_month"):
+        try:
+            for row in await get_contracts(sym, keyword):
+                ident = row.get("instrument_key") or (row.get("expiry"), row.get("trading_symbol"))
+                if ident:
+                    collected[ident] = row
+        except HTTPException as exc:
+            errors.append(f"{keyword}: {str(exc.detail)[:160]}")
+    if not collected and errors:
+        logger.warning("Upstox contract lookup returned no rows for %s: %s", sym, " | ".join(errors))
+    return list(collected.values())
+
+
+async def resolve_expiry(sym, requested):
+    """Turn current_week / current_month / '' into an actual YYYY-MM-DD expiry.
+    The option-chain endpoint only accepts real dates, so keywords must never reach it."""
+    if requested and DATE_RE.fullmatch(requested):
+        return requested
+    rows = await get_all_contracts(sym)
+    today = ist_now().strftime("%Y-%m-%d")
+    dates = sorted({d for d in (contract_expiry(r) for r in rows) if d and d >= today})
+    if not dates:
+        raise HTTPException(status_code=404, detail="No upcoming expiry dates returned by Upstox.")
+    if requested in ("current_month", "next_month", "far_month"):
+        month_ends = sorted({max(x for x in dates if x[:7] == ym) for ym in {d[:7] for d in dates}})
+        idx = {"current_month": 0, "next_month": 1, "far_month": 2}[requested]
+        return month_ends[min(idx, len(month_ends) - 1)]
+    idx = {"next_week": 1, "far_week": 2}.get(requested, 0)
+    return dates[min(idx, len(dates) - 1)]
+
+
+async def get_chain(sym, expiry):
+    ck = (sym, expiry)
+    hit = CHAIN_CACHE.get(ck)
+    if hit and time.time() - hit["cached_at"] < CHAIN_CACHE_TTL:
+        return hit
+    data = await upstox_get(f"{API_BASE}/v2/option/chain", {"instrument_key": INDEX_KEYS[sym], "expiry_date": expiry})
+    rows = (data or {}).get("data") or []
+    entry = {"cached_at": time.time(), "fetched_at": utc_now_iso(), "rows": rows}
+    CHAIN_CACHE[ck] = entry
+    return entry
+
+
+async def lot_size_for(sym, expiry):
+    try:
+        for row in await get_contracts(sym, expiry):
+            if row.get("lot_size"):
+                return int(row["lot_size"])
+    except Exception:
+        pass
+    return None
+
+
+def _pick_near_atm_contracts(contracts, spot, max_strikes=12):
+    options = [c for c in contracts if c.get("instrument_key") and c.get("instrument_type") in ("CE", "PE")]
+    strikes = sorted({float(c["strike_price"]) for c in options if c.get("strike_price") is not None})
+    if not strikes:
+        return []
+    atm = min(strikes, key=lambda x: abs(x - float(spot))) if spot else strikes[len(strikes) // 2]
+    keep = set(sorted(strikes, key=lambda x: abs(x - atm))[:max_strikes])
+    return [c for c in options if float(c.get("strike_price", -1)) in keep]
+
+
+# ---------------------------------------------------------------- WebSocket (Upstox V3 SDK)
+def _on_stream_message(message):
+    """Store the latest decoded SDK event per instrument (see feed_parser for the shapes)."""
+    try:
+        if isinstance(message, str):
+            message = json.loads(message)
+        current_ts, parsed = parse_feed_message(message)
+        if not parsed:
             return
-        feeds = payload.get("feeds") or {}
-        received = payload.get("currentTs") or payload.get("current_ts")
-        for instrument_key, feed in feeds.items():
-            # SDK response fields may be nested by feed mode; handle common V3 full/option_greeks shapes.
-            core = feed.get("fullFeed", {}).get("marketFF", {}) if isinstance(feed, dict) else {}
-            oc = feed.get("oc", {}) if isinstance(feed, dict) else {}
-            if not core and isinstance(feed, dict):
-                core = feed.get("marketFF", {}) or feed.get("fullFeed", {}) or {}
-            ltpc = (core.get("ltpc") or oc.get("ltpc") or (feed.get("ltpc", {}) if isinstance(feed, dict) else {}))
-            efd = core.get("eFeedDetails") or oc.get("eFeedDetails") or {}
-            greeks = core.get("optionGreeks") or oc.get("optionGreeks") or feed.get("optionGreeks", {}) or {}
-            ltp = ltpc.get("ltp") if isinstance(ltpc, dict) else None
-            ltt = ltpc.get("ltt") if isinstance(ltpc, dict) else None
-            oi = efd.get("oi") if isinstance(efd, dict) else None
-            iv = greeks.get("iv") if isinstance(greeks, dict) else None
-            if iv is not None:
-                # Upstox WebSocket optionGreeks IV is commonly decimal fraction; normalize to percentage.
-                try:
-                    iv = float(iv) * 100 if 0 < float(iv) < 3 else float(iv)
-                except (TypeError, ValueError):
-                    pass
-            with STREAM_LOCK:
-                old = LIVE_TICKS.get(instrument_key, {})
-                LIVE_TICKS[instrument_key] = {
-                    "instrument_key": instrument_key,
-                    "ltp": ltp if ltp is not None else old.get("ltp"),
-                    "oi": oi if oi is not None else old.get("oi"),
-                    "iv": iv if iv is not None else old.get("iv"),
-                    "last_trade_time": ltt or old.get("last_trade_time"),
+        now = time.time()
+        with STREAM_LOCK:
+            for key, p in parsed.items():
+                old = LIVE_TICKS.get(key, {})
+                LIVE_TICKS[key] = {
+                    "instrument_key": key,
+                    "ltp": p["ltp"] if p["ltp"] is not None else old.get("ltp"),
+                    "oi": p["oi"] if p["oi"] is not None else old.get("oi"),
+                    "iv": p["iv"] if p["iv"] is not None else old.get("iv"),
+                    "last_trade_time": p["ltt"] or old.get("last_trade_time"),
                     "received_at": utc_now_iso(),
-                    "feed_timestamp": received,
+                    "received_ts": now,
+                    "feed_timestamp": current_ts,
                 }
     except Exception as exc:
         logger.debug("Could not parse market stream event: %s", exc)
 
 
+def _reset_streams():
+    """Disconnect all streams (used after a new OAuth token so streams re-open with it)."""
+    with STREAM_LOCK:
+        streams = list(STREAMS.values())
+        STREAMS.clear()
+        STREAM_ERRORS.clear()
+    for s in streams:
+        try:
+            s["streamer"].disconnect()
+        except Exception:
+            pass
+
+
 def _start_stream(symbol, instruments):
-    """Start one Upstox V3 SDK stream per underlying, in a daemon thread."""
+    """One Upstox V3 SDK stream per underlying, in a daemon thread. Keys follow the current expiry."""
+    new_keys = list(dict.fromkeys(instruments))
     with STREAM_LOCK:
         existing = STREAMS.get(symbol)
-        existing_keys = set(existing.get("keys", [])) if existing else set()
-        new_keys = list(dict.fromkeys(instruments))
         if existing and existing.get("streamer"):
-            add = [k for k in new_keys if k not in existing_keys]
-            if add:
-                try:
+            have = set(existing.get("keys", []))
+            add = [k for k in new_keys if k not in have]
+            drop = [k for k in have if k not in set(new_keys)]
+            try:
+                if drop:
+                    existing["streamer"].unsubscribe(drop)
+                if add:
                     existing["streamer"].subscribe(add, "full")
-                    existing["keys"] = list(existing_keys.union(add))
-                except Exception as exc:
-                    STREAM_ERRORS[symbol] = f"Subscription update failed: {exc}"
+                existing["keys"] = [k for k in existing["keys"] if k not in drop] + add
+            except Exception as exc:
+                STREAM_ERRORS[symbol] = f"Subscription update failed: {exc}"
             return
     try:
         import upstox_client
@@ -137,27 +356,33 @@ def _start_stream(symbol, instruments):
         api_client = upstox_client.ApiClient(cfg)
         streamer = upstox_client.MarketDataStreamerV3(api_client, new_keys, "full")
         streamer.on("message", _on_stream_message)
+
         def on_error(err):
             with STREAM_LOCK:
                 STREAM_ERRORS[symbol] = str(err)[:300]
             logger.warning("Upstox stream error (%s): %s", symbol, err)
+
         def on_open(*args):
             with STREAM_LOCK:
                 STREAM_ERRORS.pop(symbol, None)
             logger.info("Upstox V3 stream opened for %s (%d keys)", symbol, len(new_keys))
+
         streamer.on("error", on_error)
         streamer.on("open", on_open)
         try:
             streamer.auto_reconnect(True, 5, 10)
         except Exception:
             pass
+
         def runner():
             try:
                 streamer.connect()
             except Exception as exc:
                 with STREAM_LOCK:
                     STREAM_ERRORS[symbol] = str(exc)[:300]
+                    STREAMS.pop(symbol, None)  # allow a clean restart on the next poll
                 logger.exception("Upstox stream stopped for %s", symbol)
+
         thread = threading.Thread(target=runner, daemon=True, name=f"upstox-{symbol.lower()}")
         with STREAM_LOCK:
             STREAMS[symbol] = {"streamer": streamer, "keys": new_keys, "thread": thread, "started_at": utc_now_iso()}
@@ -169,30 +394,36 @@ def _start_stream(symbol, instruments):
         logger.warning("Could not start Upstox stream for %s: %s", symbol, exc)
 
 
-def _pick_near_atm_contracts(contracts, spot, max_strikes=12):
-    options = [c for c in contracts if c.get("instrument_key") and c.get("instrument_type") in ("CE", "PE")]
-    strikes = sorted({float(c["strike_price"]) for c in options if c.get("strike_price") is not None})
-    if not strikes:
-        return []
-    atm = min(strikes, key=lambda x: abs(x - float(spot))) if spot else strikes[len(strikes)//2]
-    nearest = sorted(strikes, key=lambda x: abs(x-atm))[:max_strikes]
-    keep = set(nearest)
-    return [c for c in options if float(c.get("strike_price", -1)) in keep]
+def _tick_view(key, now):
+    """Tick + contract metadata + per-row age, or None if nothing has been received."""
+    tick = LIVE_TICKS.get(key)
+    if not tick:
+        return None
+    age = max(0.0, now - tick.get("received_ts", now))
+    meta = STREAM_META.get(key, {})
+    return {**meta, **tick, "age_seconds": round(age, 1), "fresh": age <= FRESH_SECONDS}
 
 
+# ---------------------------------------------------------------- routes
 @app.get("/")
 async def home():
-    return FileResponse("static/index.html")
+    return FileResponse(BASE_DIR / "static" / "index.html")
+
 
 @app.get("/api/status")
 async def status():
+    state = await check_token_state()
     return {
-        "app": APP_TITLE,
-        "provider": "Upstox",
-        "token_configured": bool(runtime_token),
+        "app": APP_TITLE, "provider": "Upstox",
+        "token_configured": bool(runtime_token), "token_state": state,
         "oauth_configured": bool(UPSTOX_API_KEY and UPSTOX_API_SECRET and UPSTOX_REDIRECT_URI),
-        "mode": "Upstox REST + optional V3 WebSocket; analysis-only; no orders are placed", "websocket_sdk_available": __import__("importlib").util.find_spec("upstox_client") is not None, "tradingview_webhook_configured": bool(os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "").strip())
+        "mode": "Upstox REST + optional V3 WebSocket; analysis-only; no orders are placed",
+        "websocket_sdk_available": __import__("importlib").util.find_spec("upstox_client") is not None,
+        "tradingview_webhook_configured": bool(os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "").strip()),
+        "password_protected": bool(DASHBOARD_PASSWORD),
+        "market": market_status(),
     }
+
 
 @app.get("/api/login")
 async def login():
@@ -200,13 +431,9 @@ async def login():
         raise HTTPException(status_code=400, detail="Set UPSTOX_API_KEY and UPSTOX_REDIRECT_URI first.")
     state = secrets.token_urlsafe(24)
     oauth_states.add(state)
-    params = {
-        "response_type": "code",
-        "client_id": UPSTOX_API_KEY,
-        "redirect_uri": UPSTOX_REDIRECT_URI,
-        "state": state
-    }
+    params = {"response_type": "code", "client_id": UPSTOX_API_KEY, "redirect_uri": UPSTOX_REDIRECT_URI, "state": state}
     return RedirectResponse("https://api.upstox.com/v2/login/authorization/dialog?" + urlencode(params))
+
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
@@ -218,26 +445,21 @@ async def auth_callback(request: Request, code: str = "", state: str = "", error
     oauth_states.discard(state)
     if not (UPSTOX_API_KEY and UPSTOX_API_SECRET and UPSTOX_REDIRECT_URI):
         raise HTTPException(status_code=400, detail="OAuth environment variables are incomplete.")
-    payload = {
-        "code": code,
-        "client_id": UPSTOX_API_KEY,
-        "client_secret": UPSTOX_API_SECRET,
-        "redirect_uri": UPSTOX_REDIRECT_URI,
-        "grant_type": "authorization_code"
-    }
+    payload = {"code": code, "client_id": UPSTOX_API_KEY, "client_secret": UPSTOX_API_SECRET,
+               "redirect_uri": UPSTOX_REDIRECT_URI, "grant_type": "authorization_code"}
     async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.post(
-            "https://api.upstox.com/v2/login/authorization/token",
-            data=payload,
-            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
-        )
+        resp = await client.post("https://api.upstox.com/v2/login/authorization/token", data=payload,
+                                 headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"})
     if resp.status_code >= 400:
         raise HTTPException(status_code=resp.status_code, detail={"upstox_error": resp.text[:500]})
-    runtime_token = resp.json().get("access_token", "")
-    if not runtime_token:
+    new_token = resp.json().get("access_token", "")
+    if not new_token:
         raise HTTPException(status_code=502, detail="No access token returned by Upstox.")
-    # In-memory token is not durable across restart/redeploy; use env token for the simple deployment mode.
+    runtime_token = new_token
+    TOKEN_CHECK.update({"at": 0.0, "token": None, "state": "UNKNOWN"})
+    _reset_streams()  # running streams still hold the old token
     return RedirectResponse("/?connected=1")
+
 
 @app.get("/api/candles")
 async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instrument_key: str = ""):
@@ -248,185 +470,144 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
     key = instrument_key.strip() or INDEX_KEYS.get(symbol.upper())
     if not key:
         raise HTTPException(status_code=400, detail="Unknown symbol or instrument key.")
-    end = date.today()
-    start = end - timedelta(days=days)
-    url = f"{API_V3}/historical-candle/{key}/minutes/{interval}/{end.isoformat()}/{start.isoformat()}"
-    data = await upstox_get(url)
-    candles_raw = (data.get("data") or {}).get("candles") or []
-    # Upstox rows: timestamp, open, high, low, close, volume, open_interest (if available)
-    candles = []
-    for row in candles_raw:
-        if len(row) < 6:
-            continue
-        candles.append({
-            "time": row[0],
-            "open": row[1], "high": row[2], "low": row[3], "close": row[4],
-            "volume": row[5], "oi": row[6] if len(row) > 6 else None
-        })
-    return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": candles}
+    data = await fetch_candles(key, interval, days)
+    return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": data}
+
 
 @app.get("/api/option-contracts")
 async def option_contracts(symbol: str = "NIFTY", expiry_date: str = ""):
-    """Return option contracts. If unfiltered contracts are empty, try Upstox's supported relative expiries."""
-    key = INDEX_KEYS.get(symbol.upper())
-    if not key:
+    sym = symbol.upper()
+    if sym not in INDEX_KEYS:
         raise HTTPException(status_code=400, detail="Unknown index symbol.")
-
-    async def fetch_contracts(expiry=""):
-        params = {"instrument_key": key}
-        if expiry:
-            params["expiry_date"] = expiry
-        response = await upstox_get(f"{API_BASE}/v2/option/contract", params)
-        rows = response.get("data", []) if isinstance(response, dict) else []
-        # Be tolerant of wrappers used by proxy/provider responses.
-        if isinstance(rows, dict):
-            rows = rows.get("data", rows.get("contracts", []))
-        return rows if isinstance(rows, list) else []
-
-    # A specific actual date or documented relative keyword should be honored directly.
     if expiry_date:
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", expiry_date) or expiry_date in {
-            "current_week", "next_week", "far_week", "current_month", "next_month", "far_month"
-        }:
-            rows = await fetch_contracts(expiry_date)
-            return {"status": "success", "data": rows, "requested_expiry": expiry_date, "source": "Upstox option contract API"}
-        raise HTTPException(status_code=400, detail="expiry_date must be YYYY-MM-DD or a supported Upstox expiry keyword.")
-
-    # First try the unfiltered endpoint; some API responses/accounts return no rows without a keyword.
-    rows = await fetch_contracts()
-    if not rows:
-        collected = {}
-        errors = []
-        for keyword in ("current_week", "current_month", "next_week", "next_month", "far_week", "far_month"):
-            try:
-                for row in await fetch_contracts(keyword):
-                    ident = row.get("instrument_key") or (row.get("expiry"), row.get("trading_symbol"))
-                    if ident:
-                        collected[ident] = row
-            except HTTPException as exc:
-                errors.append(f"{keyword}: {str(exc.detail)[:160]}")
-        rows = list(collected.values())
-        if not rows and errors:
-            logger.warning("Upstox option contract lookup returned no rows for %s; keyword errors: %s", symbol.upper(), " | ".join(errors))
+        if not (DATE_RE.fullmatch(expiry_date) or expiry_date in RELATIVE_EXPIRIES):
+            raise HTTPException(status_code=400, detail="expiry_date must be YYYY-MM-DD or a supported Upstox expiry keyword.")
+        rows = await get_contracts(sym, expiry_date)
+        return {"status": "success", "data": rows, "requested_expiry": expiry_date, "source": "Upstox option contract API"}
+    rows = await get_all_contracts(sym)
     return {"status": "success", "data": rows, "source": "Upstox option contract API"}
 
 
 @app.get("/api/option-chain")
 async def option_chain(symbol: str = "NIFTY", expiry_date: str = ""):
-    key = INDEX_KEYS.get(symbol.upper())
-    if not key:
+    sym = symbol.upper()
+    if sym not in INDEX_KEYS:
         raise HTTPException(status_code=400, detail="Unknown index symbol.")
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", expiry_date or ""):
+    if not DATE_RE.fullmatch(expiry_date or ""):
         raise HTTPException(status_code=400, detail="Choose an actual expiry date. Click Load expiries, then Load chain.")
-    data = await upstox_get(f"{API_BASE}/v2/option/chain", {"instrument_key": key, "expiry_date": expiry_date})
-    return data
+    entry = await get_chain(sym, expiry_date)
+    lot = await lot_size_for(sym, expiry_date)
+    return {"status": "success", "expiry": expiry_date, "lot_size": lot, "fetched_at": entry["fetched_at"], "data": entry["rows"]}
+
+
+def _unavailable(reason, sym, expiry):
+    return {"status": "UNAVAILABLE", "reason": str(reason)[:300], "symbol": sym, "expiry": expiry,
+            "timestamp": utc_now_iso(), "oi_status": "UNAVAILABLE", "pcr": "UNAVAILABLE",
+            "iv_average": "UNAVAILABLE", "websocket": "UNAVAILABLE", "market": market_status()}
 
 
 @app.get("/api/live-derivatives")
 async def live_derivatives(symbol: str = "NIFTY", expiry_date: str = "current_week"):
-    """REST snapshot for PCR + chain OI/IV; V3 WebSocket updates selected near-ATM contracts."""
+    """REST snapshot for PCR + chain OI/IV; V3 WebSocket updates near-ATM contracts of the SAME expiry."""
     sym = symbol.upper()
-    key = INDEX_KEYS.get(sym)
-    if not key:
+    if sym not in INDEX_KEYS:
         raise HTTPException(status_code=400, detail="Unknown index symbol.")
-    cache_key = (sym, expiry_date)
-    now = time.time()
-    cached = CHAIN_CACHE.get(cache_key)
-    if cached and now - cached["cached_at"] < CHAIN_CACHE_TTL:
-        chain_data = cached["data"]
-    else:
-        try:
-            chain_data = await upstox_get(f"{API_BASE}/v2/option/chain", {"instrument_key": key, "expiry_date": expiry_date})
-        except HTTPException as exc:
-            return {"status": "UNAVAILABLE", "reason": str(exc.detail)[:300], "symbol": sym, "expiry": expiry_date, "timestamp": utc_now_iso(), "oi_status": "UNAVAILABLE", "pcr": "UNAVAILABLE", "iv_average": "UNAVAILABLE", "websocket": "UNAVAILABLE"}
-        CHAIN_CACHE[cache_key] = {"cached_at": now, "fetched_at": utc_now_iso(), "data": chain_data}
-    rows = (chain_data or {}).get("data") or []
-    expiry_used = expiry_date
-    fallback_used = False
-    if not rows and expiry_date == "current_week":
-        # Some underlyings may not have a weekly expiry listed; transparently fall back to current month.
-        try:
-            fallback = await upstox_get(f"{API_BASE}/v2/option/chain", {"instrument_key": key, "expiry_date": "current_month"})
-            fallback_rows = (fallback or {}).get("data") or []
-            if fallback_rows:
-                rows, chain_data, expiry_used = fallback_rows, fallback, "current_month"
-                fallback_used = True
-                CHAIN_CACHE[(sym, "current_month")] = {"cached_at": now, "fetched_at": utc_now_iso(), "data": fallback}
-                CHAIN_CACHE[cache_key] = {"cached_at": now, "fetched_at": utc_now_iso(), "data": fallback}
-        except HTTPException:
-            pass
+    key = INDEX_KEYS[sym]
+    try:
+        expiry = await resolve_expiry(sym, expiry_date)
+        entry = await get_chain(sym, expiry)
+    except HTTPException as exc:
+        return _unavailable(exc.detail, sym, expiry_date)
+    rows = entry["rows"]
     if not rows:
-        return {"status": "UNAVAILABLE", "reason": "Upstox returned no option-chain rows for current weekly or fallback monthly expiry.", "symbol": sym, "expiry": expiry_date, "timestamp": utc_now_iso(), "oi_status": "UNAVAILABLE", "pcr": "UNAVAILABLE", "iv_average": "UNAVAILABLE", "websocket": "UNAVAILABLE"}
-    expiry_actual = rows[0].get("expiry") or expiry_used
+        return _unavailable(f"Upstox returned no option-chain rows for expiry {expiry}.", sym, expiry)
+    now = time.time()
     spot = rows[0].get("underlying_spot_price")
     try:
-        contracts_data = await upstox_get(f"{API_BASE}/v2/option/contract", {"instrument_key": key, "expiry_date": expiry_actual})
-        contracts = (contracts_data or {}).get("data") or []
+        contracts = await get_contracts(sym, expiry)
     except HTTPException as exc:
         contracts = []
         with STREAM_LOCK:
             STREAM_ERRORS[sym] = f"Option contracts unavailable: {str(exc.detail)[:200]}"
     selected = _pick_near_atm_contracts(contracts, spot, max_strikes=12)
     if selected:
+        with STREAM_LOCK:
+            for c in selected:
+                STREAM_META[c["instrument_key"]] = {
+                    "trading_symbol": c.get("trading_symbol"), "strike": c.get("strike_price"),
+                    "type": c.get("instrument_type"), "expiry": expiry}
         _start_stream(sym, [c["instrument_key"] for c in selected])
-    # Compute aggregate PCR from the entire same-expiry chain, not from one row's PCR.
-    total_call_oi = 0.0; total_put_oi = 0.0; usable_call = 0; usable_put = 0
-    chain_out = []
-    iv_values = []
+
+    total_call_oi = total_put_oi = 0.0
+    usable_call = usable_put = 0
+    iv_values, chain_out = [], []
+    strikes = [float(r["strike_price"]) for r in rows if r.get("strike_price") is not None]
+    atm_strike = min(strikes, key=lambda x: abs(x - float(spot))) if strikes and spot else None
+    atm_ivs = []
     for row in rows:
-        cm = (row.get("call_options") or {}).get("market_data") or {}
-        pm = (row.get("put_options") or {}).get("market_data") or {}
-        cg = (row.get("call_options") or {}).get("option_greeks") or {}
-        pg = (row.get("put_options") or {}).get("option_greeks") or {}
+        co, po = row.get("call_options") or {}, row.get("put_options") or {}
+        cm, pm = co.get("market_data") or {}, po.get("market_data") or {}
+        cg, pg = co.get("option_greeks") or {}, po.get("option_greeks") or {}
         if cm.get("oi") is not None:
             total_call_oi += float(cm["oi"]); usable_call += 1
         if pm.get("oi") is not None:
             total_put_oi += float(pm["oi"]); usable_put += 1
-        civ = cg.get("iv", cm.get("iv")); piv = pg.get("iv", pm.get("iv"))
+        civ, piv = cg.get("iv", cm.get("iv")), pg.get("iv", pm.get("iv"))
         for val in (civ, piv):
             try:
-                if val is not None and float(val) > 0: iv_values.append(float(val))
-            except (TypeError, ValueError): pass
+                if val is not None and float(val) > 0:
+                    iv_values.append(float(val))
+                    if atm_strike is not None and float(row.get("strike_price", -1)) == atm_strike:
+                        atm_ivs.append(float(val))
+            except (TypeError, ValueError):
+                pass
         chain_out.append({
             "strike": row.get("strike_price"),
-            "call": {"instrument_key": (row.get("call_options") or {}).get("instrument_key"), "ltp": cm.get("ltp"), "oi": cm.get("oi"), "prev_oi": cm.get("prev_oi"), "iv": civ},
-            "put": {"instrument_key": (row.get("put_options") or {}).get("instrument_key"), "ltp": pm.get("ltp"), "oi": pm.get("oi"), "prev_oi": pm.get("prev_oi"), "iv": piv},
-            "pcr_row": row.get("pcr")
+            "call": {"instrument_key": co.get("instrument_key"), "ltp": cm.get("ltp"), "oi": cm.get("oi"), "prev_oi": cm.get("prev_oi"), "iv": civ},
+            "put": {"instrument_key": po.get("instrument_key"), "ltp": pm.get("ltp"), "oi": pm.get("oi"), "prev_oi": pm.get("prev_oi"), "iv": piv},
+            "pcr_row": row.get("pcr"),
         })
     aggregate_pcr = total_put_oi / total_call_oi if total_call_oi > 0 and usable_call and usable_put else None
-    stream_age_sec = None
-    live_near_atm = []
+
+    live_near_atm, ages = [], []
     with STREAM_LOCK:
         stream_error = STREAM_ERRORS.get(sym)
         stream_state = STREAMS.get(sym)
         for c in selected:
-            tick = LIVE_TICKS.get(c["instrument_key"])
-            if tick:
-                try:
-                    age = max(0, now - datetime.fromisoformat(tick["received_at"].replace("Z", "+00:00")).timestamp())
-                    stream_age_sec = age if stream_age_sec is None else min(stream_age_sec, age)
-                except Exception: pass
-                live_near_atm.append({"instrument_key": c["instrument_key"], "trading_symbol": c.get("trading_symbol"), "strike": c.get("strike_price"), "type": c.get("instrument_type"), **tick})
-    stream_ok = bool(live_near_atm and stream_age_sec is not None and stream_age_sec <= 15)
-    # REST snapshot is valid for this response but not labelled as a WebSocket tick.
+            view = _tick_view(c["instrument_key"], now)
+            if view:
+                live_near_atm.append(view)
+                ages.append(view["age_seconds"])
+    stream_age = min(ages) if ages else None
+    stream_ok = bool(live_near_atm) and stream_age is not None and stream_age <= FRESH_SECONDS
+    market = market_status()
+    if stream_ok:
+        ws_state = "LIVE"
+    elif stream_state and not stream_error:
+        ws_state = "MARKET_CLOSED" if not market["open"] else "CONNECTING"
+    else:
+        ws_state = "UNAVAILABLE"
+    note = "PCR and chain OI are REST snapshots. Only contract rows in live_near_atm are confirmed WebSocket ticks. Values older than 15 seconds are not labelled live."
+    if not market["open"]:
+        note += " Market is closed (IST schedule): stale ticks and last-session prices are expected."
     return {
-        "status": "LIVE" if stream_ok else ("REST_SNAPSHOT" if rows else "UNAVAILABLE"),
-        "symbol": sym, "underlying_key": key, "expiry": expiry_actual,
-        "timestamp": utc_now_iso(), "rest_snapshot_timestamp": (CHAIN_CACHE.get(cache_key) or {}).get("fetched_at", utc_now_iso()),
-        "chain_snapshot_age_seconds": round(now - (CHAIN_CACHE.get(cache_key) or {}).get("cached_at", now), 1),
-        "expiry_mode_requested": expiry_date, "spot": spot, "pcr": round(aggregate_pcr, 4) if aggregate_pcr is not None else "UNAVAILABLE",
+        "status": "LIVE" if stream_ok else "REST_SNAPSHOT",
+        "symbol": sym, "underlying_key": key, "expiry": expiry, "expiry_mode_requested": expiry_date,
+        "timestamp": utc_now_iso(), "rest_snapshot_timestamp": entry["fetched_at"],
+        "chain_snapshot_age_seconds": round(now - entry["cached_at"], 1),
+        "spot": spot, "atm_strike": atm_strike,
+        "pcr": round(aggregate_pcr, 4) if aggregate_pcr is not None else "UNAVAILABLE",
         "total_call_oi": total_call_oi if usable_call else "UNAVAILABLE",
         "total_put_oi": total_put_oi if usable_put else "UNAVAILABLE",
         "oi_status": "REST_SNAPSHOT" if usable_call and usable_put else "UNAVAILABLE",
-        "iv_average": round(sum(iv_values)/len(iv_values), 2) if iv_values else "UNAVAILABLE",
+        "iv_average": round(sum(iv_values) / len(iv_values), 2) if iv_values else "UNAVAILABLE",
+        "atm_iv": round(sum(atm_ivs) / len(atm_ivs), 2) if atm_ivs else None,
         "iv_status": "REST_SNAPSHOT" if iv_values else "UNAVAILABLE",
-        "websocket": "LIVE" if stream_ok else ("CONNECTING" if stream_state and not stream_error else "UNAVAILABLE"),
-        "websocket_error": stream_error,
-        "websocket_last_tick_age_seconds": round(stream_age_sec, 1) if stream_age_sec is not None else None,
+        "websocket": ws_state, "websocket_error": stream_error,
+        "websocket_last_tick_age_seconds": round(stream_age, 1) if stream_age is not None else None,
         "selected_contracts": len(selected), "live_near_atm": live_near_atm,
-        "chain": chain_out,
-        "freshness_policy_seconds": 15,
-        "note": ("PCR and chain OI are REST snapshots. Only contract fields in live_near_atm are confirmed WebSocket ticks. Values older than 15 seconds are not labelled live." + (" Current-week chain was empty; monthly expiry fallback was used." if fallback_used else ""))
+        "chain": chain_out, "freshness_policy_seconds": FRESH_SECONDS,
+        "market": market, "note": note,
     }
 
 
@@ -440,14 +621,13 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
             with STREAM_LOCK:
                 stream_error = STREAM_ERRORS.get(sym)
                 state = STREAMS.get(sym)
-                recent = []
-                for tick in LIVE_TICKS.values():
-                    if tick.get("instrument_key") in set(state.get("keys", [])) if state else False:
-                        try:
-                            age = now - datetime.fromisoformat(tick["received_at"].replace("Z", "+00:00")).timestamp()
-                        except Exception: age = 999999
-                        recent.append({**tick, "age_seconds": round(max(0, age), 1), "fresh": age <= 15})
-            await websocket.send_json({"type": "ticks", "symbol": sym, "timestamp": utc_now_iso(), "stream": "LIVE" if any(x["fresh"] for x in recent) else "STALE/CONNECTING", "error": stream_error, "ticks": recent})
+                keys = list(state.get("keys", [])) if state else []
+                recent = [v for v in (_tick_view(k, now) for k in keys) if v]
+            any_fresh = any(x["fresh"] for x in recent)
+            market = market_status()
+            stream = "LIVE" if any_fresh else ("MARKET CLOSED" if not market["open"] and recent else "STALE/CONNECTING")
+            await websocket.send_json({"type": "ticks", "symbol": sym, "timestamp": utc_now_iso(), "stream": stream,
+                                       "error": stream_error, "ticks": recent})
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         return
@@ -461,12 +641,15 @@ async def tradingview_webhook(request: Request):
     expected = os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "").strip()
     if not expected:
         raise HTTPException(status_code=503, detail="TradingView webhook is disabled until TRADINGVIEW_WEBHOOK_SECRET is configured.")
-    payload = await request.json()
-    if payload.get("secret") != expected:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Webhook body must be JSON.")
+    if not isinstance(payload, dict) or not secrets.compare_digest(str(payload.get("secret", "")), expected):
         raise HTTPException(status_code=401, detail="Invalid webhook secret.")
-    # Store only the latest alert in memory; no orders are placed.
     app.state.last_tv_alert = {"received_at": utc_now_iso(), "payload": {k: v for k, v in payload.items() if k != "secret"}}
-    return {"ok": True, "received_at": app.state.last_tv_alert["received_at"], "note": "Alert received only; this does not inject data into Pine or place orders."}
+    return {"ok": True, "received_at": app.state.last_tv_alert["received_at"],
+            "note": "Alert received only; this does not inject data into Pine or place orders."}
 
 
 @app.get("/api/tradingview/last-alert")
@@ -474,115 +657,41 @@ async def tradingview_last_alert():
     return getattr(app.state, "last_tv_alert", {"status": "UNAVAILABLE", "message": "No TradingView alert received in this running instance."})
 
 
-
-
 @app.get("/api/option-quote")
 async def option_quote(instrument_key: str):
-    """Return a selected option's latest quote, preferring a fresh WebSocket tick."""
+    """Latest quote for one option: a fresh WebSocket tick if available, else a labelled REST snapshot."""
     key = instrument_key.strip()
     if not key or "|" not in key:
         raise HTTPException(status_code=400, detail="A valid Upstox option instrument_key is required.")
     now = time.time()
     with STREAM_LOCK:
-        tick = LIVE_TICKS.get(key)
-        if tick:
-            try:
-                age = max(0.0, now - datetime.fromisoformat(tick["received_at"].replace("Z", "+00:00")).timestamp())
-            except Exception:
-                age = 999999
-            if age <= 15 and tick.get("ltp") is not None:
-                return {
-                    "status": "LIVE_TICK", "instrument_key": key, "ltp": tick["ltp"],
-                    "timestamp": tick.get("received_at"), "age_seconds": round(age, 1),
-                    "source": "Upstox V3 WebSocket"
-                }
-    # REST LTP fallback is explicitly identified as a snapshot, not a WebSocket tick.
+        view = _tick_view(key, now)
+    if view and view["fresh"] and view.get("ltp") is not None:
+        return {"status": "LIVE_TICK", "instrument_key": key, "ltp": view["ltp"], "timestamp": view.get("received_at"),
+                "age_seconds": view["age_seconds"], "source": "Upstox V3 WebSocket"}
     data = await upstox_get(f"{API_BASE}/v2/market-quote/ltp", {"instrument_key": key})
     quote_data = (data or {}).get("data") or {}
     quote = quote_data.get(key)
-    if quote is None and quote_data:
-        # Upstox may key response rows by trading symbol rather than instrument_key.
-        quote = next(iter(quote_data.values()))
+    if quote is None:
+        # Upstox keys the response by "EXCHANGE:SYMBOL"; match on instrument_token, else take the only row.
+        quote = next((q for q in quote_data.values() if isinstance(q, dict) and q.get("instrument_token") == key), None)
+        if quote is None and len(quote_data) == 1:
+            quote = next(iter(quote_data.values()))
     ltp = quote.get("last_price", quote.get("ltp")) if isinstance(quote, dict) else None
     if ltp is None:
-        return {"status": "UNAVAILABLE", "instrument_key": key, "ltp": None, "timestamp": utc_now_iso(), "source": "REST quote", "reason": "No LTP returned for selected contract."}
-    return {
-        "status": "REST_SNAPSHOT", "instrument_key": key, "ltp": float(ltp),
-        "timestamp": utc_now_iso(), "age_seconds": 0, "source": "Upstox REST quote",
-        "note": "REST snapshot; not a confirmed WebSocket tick."
-    }
+        return {"status": "UNAVAILABLE", "instrument_key": key, "ltp": None, "timestamp": utc_now_iso(),
+                "source": "REST quote", "reason": "No LTP returned for selected contract."}
+    return {"status": "REST_SNAPSHOT", "instrument_key": key, "ltp": float(ltp), "timestamp": utc_now_iso(),
+            "age_seconds": 0, "source": "Upstox REST quote", "market_open": market_status()["open"],
+            "note": "REST snapshot; not a confirmed WebSocket tick."}
+
 
 @app.get("/api/analysis")
 async def analysis(symbol: str = "NIFTY", interval: int = 5):
-    # Transparent technical score from index candles. Not a guarantee and not an order instruction.
+    """Transparent technical score from index candles. Not a guarantee and not an order instruction."""
     result = await candles(symbol=symbol, interval=interval, days=5)
-    cs = result["candles"]
-    if len(cs) < 30:
-        return {"status": "insufficient_data", "message": "Not enough candles to calculate indicators.", "score": 0, "decision": "WAIT"}
-    closes = [float(c["close"]) for c in cs]
-    highs = [float(c["high"]) for c in cs]
-    lows = [float(c["low"]) for c in cs]
-    volumes = [float(c["volume"] or 0) for c in cs]
-    def ema(values, n):
-        alpha = 2/(n+1)
-        out = [values[0]]
-        for x in values[1:]:
-            out.append(alpha*x + (1-alpha)*out[-1])
-        return out
-    e9, e21 = ema(closes, 9), ema(closes, 21)
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        d = closes[i]-closes[i-1]
-        gains.append(max(d, 0)); losses.append(max(-d, 0))
-    avg_gain = sum(gains[-14:])/14
-    avg_loss = sum(losses[-14:])/14
-    rsi = 100 if avg_loss == 0 else 100 - 100/(1 + avg_gain/avg_loss)
-    # Wilder-style directional movement approximation and ATR
-    trs, plus_dm, minus_dm = [], [], []
-    for i in range(1, len(cs)):
-        trs.append(max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])))
-        up, down = highs[i]-highs[i-1], lows[i-1]-lows[i]
-        plus_dm.append(up if up > down and up > 0 else 0)
-        minus_dm.append(down if down > up and down > 0 else 0)
-    atr = sum(trs[-14:])/min(14, len(trs))
-    avg_vol = sum(volumes[-21:-1])/max(1, len(volumes[-21:-1]))
-    rel_vol = volumes[-1]/avg_vol if avg_vol else 0
-    # Simple intraday VWAP approximation on the returned candle window.
-    pv = sum(((float(c["high"])+float(c["low"])+float(c["close"]))/3)*float(c["volume"] or 0) for c in cs)
-    vv = sum(float(c["volume"] or 0) for c in cs)
-    vwap = pv/vv if vv else closes[-1]
-    bull = 0; bear = 0
-    bull += 20 if e9[-1] > e21[-1] else 0
-    bear += 20 if e9[-1] < e21[-1] else 0
-    bull += 15 if closes[-1] > vwap else 0
-    bear += 15 if closes[-1] < vwap else 0
-    bull += 10 if rsi > 55 else 0
-    bear += 10 if rsi < 45 else 0
-    bull += 10 if sum(plus_dm[-14:]) > sum(minus_dm[-14:]) else 0
-    bear += 10 if sum(minus_dm[-14:]) > sum(plus_dm[-14:]) else 0
-    bull += 10 if rel_vol >= 1.2 and closes[-1] > closes[-2] else 0
-    bear += 10 if rel_vol >= 1.2 and closes[-1] < closes[-2] else 0
-    recent_high, recent_low = max(highs[-12:-1]), min(lows[-12:-1])
-    bull += 20 if closes[-1] > recent_high else 0
-    bear += 20 if closes[-1] < recent_low else 0
-    # Sideways hard filter: weak EMA separation or repeated overlap suppresses actionable signals.
-    separation = abs(e9[-1]-e21[-1]) / closes[-1] * 100 if closes[-1] else 0
-    sideways = separation < 0.025 and abs(closes[-1]-vwap)/closes[-1]*100 < 0.08
-    score = max(bull, bear)
-    decision = "WAIT"
-    if not sideways and bull >= 75 and bull > bear:
-        decision = "BULLISH BIAS — CE SETUP ONLY AFTER RETEST"
-    elif not sideways and bear >= 75 and bear > bull:
-        decision = "BEARISH BIAS — PE SETUP ONLY AFTER RETEST"
-    return {
-        "status": "ok", "symbol": symbol, "interval": interval,
-        "decision": decision, "score": score, "bull_score": bull, "bear_score": bear,
-        "sideways": sideways, "rsi": round(rsi, 2), "ema9": round(e9[-1], 2),
-        "ema21": round(e21[-1], 2), "vwap_approx": round(vwap, 2),
-        "atr": round(atr, 2), "relative_volume": round(rel_vol, 2),
-        "last_close": closes[-1], "breakout_high": recent_high, "breakdown_low": recent_low,
-        "note": "Bias only, not a confirmed entry. Breakout + retest and option-premium risk checks are required."
-    }
+    return analyze(result["candles"], symbol=symbol, interval=interval)
+
 
 @app.get("/health")
 async def health():

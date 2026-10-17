@@ -4,8 +4,8 @@ A FastAPI website for NIFTY 50 / BANK NIFTY research and paper-trading. It uses 
 
 ## What this build includes
 
-- NIFTY 50 / BANK NIFTY historical candle chart and basic technical analysis.
-- Current-week option-chain lookup; automatically falls back to current-month chain if the weekly chain returns no rows.
+- NIFTY 50 / BANK NIFTY candle chart (historical + today's intraday candles merged) and technical analysis with TradingView-compatible RSI/ATR (Wilder) and a session-anchored VWAP.
+- Option chain for a real expiry date. `current_week` / `current_month` are resolved to actual dates from the contract list, so PCR/OI and the chain table always describe the same expiry.
 - Aggregate PCR calculated from total put OI / total call OI for the same chain expiry.
 - Call/put OI totals and average chain IV from the latest REST option-chain snapshot.
 - Upstox Market Data Feed V3 WebSocket subscription for a bounded near-ATM set of option contracts; live LTP/OI/IV ticks are displayed per contract when the feed returns them.
@@ -47,13 +47,14 @@ Copy `.env.example` values into environment variables. Never paste API secrets i
    - `UPSTOX_API_SECRET`
    - `UPSTOX_REDIRECT_URI=https://YOUR-SERVICE.onrender.com/auth/callback`
    - `UPSTOX_ACCESS_TOKEN` (optional quick-start; replace it as required by Upstox)
+   - `DASHBOARD_PASSWORD` (recommended: browser asks for it; username can be anything)
    - `TRADINGVIEW_WEBHOOK_SECRET` (optional, long random value; enables protected webhook endpoint)
 6. Register the exact same redirect URI in the Upstox developer app, redeploy, then use **Connect Upstox**.
 7. Check `/api/status`, then load live derivatives during market hours.
 
 ### Token note
 
-OAuth callback stores the access token in process memory for this starter build. A restart/redeploy loses it. For production, use a secure durable token/session mechanism consistent with Upstox's current authentication policy. Do not store secrets in frontend JavaScript or public GitHub files.
+Upstox access tokens expire every day (early morning IST). The header pill shows `Upstox token valid` / `expired`; when expired, click **Connect Upstox**. OAuth callback stores the access token in process memory for this starter build. A restart/redeploy loses it. For production, use a secure durable token/session mechanism consistent with Upstox's current authentication policy. Do not store secrets in frontend JavaScript or public GitHub files.
 
 ## API endpoints
 
@@ -79,39 +80,22 @@ Use `BANKNIFTY` for Bank Nifty. Relative expiry keywords such as `current_week` 
 
 ## Optional TradingView → website alerts
 
-This is one-way only. TradingView can send a strategy alert to the website; the website cannot feed its REST values back into Pine.
-
-1. Set `TRADINGVIEW_WEBHOOK_SECRET` in Render to a long random secret.
-2. In TradingView, create an alert on the Pine strategy and use the webhook URL `https://YOUR-SERVICE.onrender.com/api/tradingview/webhook`.
-3. In the alert message, use JSON like the following, replacing the secret locally (never share it in chat):
+Create a TradingView alert with webhook URL `https://YOUR-APP.onrender.com/api/tradingview/webhook` and a JSON message such as:
 
 ```json
-{
-  "secret": "YOUR_LONG_RANDOM_WEBHOOK_SECRET",
-  "source": "TradingView",
-  "ticker": "{{ticker}}",
-  "interval": "{{interval}}",
-  "close": "{{close}}",
-  "alert": "BUY CE confirmation"
-}
+{"secret": "YOUR_TRADINGVIEW_WEBHOOK_SECRET", "symbol": "{{ticker}}", "signal": "BUY_CE", "price": {{close}}}
 ```
 
-For a BUY PE alert, change the `alert` value accordingly and create a separate alert if needed. The endpoint stores the latest alert in process memory and does not execute orders. Do not put your Upstox API key, API secret or access token in the TradingView alert message.
+The latest alert is available at `GET /api/tradingview/last-alert`. (The webhook path is exempt from `DASHBOARD_PASSWORD`; it is protected by its own secret.)
 
+## Revision notes (fixes in this version)
 
-## Paper Trading Dashboard (browser-local)
-- Select a CE/PE contract using the `Use CE` / `Use PE` buttons in the option-chain table.
-- ATR mode calculates ATR from the selected option contract's premium candles. It does not use the index ATR.
-- Manual mode allows user-entered stop-loss and targets.
-- Paper trades are stored in this browser's localStorage. They are not synced across devices or users and are not real broker orders.
-- The dashboard periodically requests the selected option's quote. WebSocket ticks are preferred when fresh; otherwise the quote endpoint labels an Upstox REST snapshot separately.
-- Stop-loss/target exits are simulations based on observed quotes, not guaranteed fill prices. Gaps, spread, latency, fees, taxes and slippage can make real outcomes differ.
-- Quantity is in option units, not lots. Enter the desired unit quantity; the app does not assume a lot size.
-- Public visitors have separate browser-local paper-trade histories. Do not expose API credentials in frontend code or public repositories.
-
-
-## Chart overlays and selected-option premium chart
-- The chart now includes toggleable EMA 9/21, approximate volume-weighted VWAP, and automatically detected recent swing support/resistance levels.
-- The RSI(14), ATR(14), relative volume, support and resistance values are shown beneath the chart. The Market Intelligence panel follows the active chart source.
-- To view an option premium chart, select a CE/PE using the option-chain table, then choose **Selected option premium** in Chart view. The app requests historical candles using that selected contract's Upstox instrument key. If Upstox returns no historical candles for the contract, the chart displays an unavailable message instead of substituting index candles.
-- These chart candles are historical REST data; this UI change does not by itself guarantee a live tick-by-tick chart.
+- **Decision was stuck on WAIT.** Index candles have zero volume, so VWAP equalled the close and its 15 points could never be scored (max 60 vs. the 75 threshold). Scoring is now normalised to the points actually available, VWAP falls back to a labelled session average price when there is no volume, and the bias threshold is 70% of available points.
+- **Live ticks showed `—` for type/strike/OI/IV.** OI/IV are read from the V3 `marketFF` block (not the old V2 `eFeedDetails`), rows are enriched with contract metadata, and each row shows its own tick age.
+- **PCR/OI and the option chain could be for different expiries.** The chain endpoint only accepts real dates; keywords are now resolved server-side and the page loads the expiry list first.
+- **Today's candles were missing during market hours.** The historical endpoint excludes the current session; intraday candles are merged in. Candles are explicitly sorted oldest→newest.
+- **RSI/ATR now use Wilder smoothing** (match TradingView). Premium ATR for paper trades uses the same function.
+- **Chart no longer re-fits all 5 days on every refresh**; it opens on the latest ~1.6 sessions and keeps your zoom. `Reset view` button added.
+- **Option chain** opens on ±10 strikes around ATM with the ATM row highlighted, refreshes every 30 s while the market is open, and shows the lot size.
+- **Paper trading:** default ATR multipliers give 1.5R at Target 1 (was 0.67R), quantity defaults to one lot, stop-loss gaps fill at the observed quote, label bug after switching underlying fixed.
+- **Reliability:** one WebSocket per page (no reconnect storms), shared caches for chain/contracts/candles (fewer Upstox calls, fewer 429s), token validity and market-open status shown, optional password gate, constant-time webhook secret check.
