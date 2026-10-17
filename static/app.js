@@ -8,9 +8,9 @@ function initChart(){
   const el=$("chart");
   chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:el.clientHeight,layout:{background:{color:"#121d2d"},textColor:"#91a4ba"},grid:{vertLines:{color:"#1e2d40"},horzLines:{color:"#1e2d40"}},rightPriceScale:{borderColor:"#27384d"},timeScale:{borderColor:"#27384d",timeVisible:true,secondsVisible:false,tickMarkFormatter:istTickMarkFormatter},localization:{timeFormatter:istCrosshairTimeFormatter},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
   candleSeries=chart.addCandlestickSeries({upColor:"#25c58a",downColor:"#ff667a",borderUpColor:"#25c58a",borderDownColor:"#ff667a",wickUpColor:"#25c58a",wickDownColor:"#ff667a"});
-  ema9Series=chart.addLineSeries({color:"#5aa7ff",lineWidth:2,priceLineVisible:false});
-  ema21Series=chart.addLineSeries({color:"#f3c969",lineWidth:2,priceLineVisible:false});
-  vwapSeries=chart.addLineSeries({color:"#c084fc",lineWidth:1,priceLineVisible:false,lineStyle:LightweightCharts.LineStyle.Dashed});
+  ema9Series=chart.addLineSeries({color:"#25c58a",lineWidth:2,priceLineVisible:false,lastValueVisible:true});
+  ema21Series=chart.addLineSeries({color:"#ff4d5e",lineWidth:2,priceLineVisible:false,lastValueVisible:true});
+  vwapSeries=chart.addLineSeries({color:"#ffffff",lineWidth:2,priceLineVisible:false,lineStyle:LightweightCharts.LineStyle.Solid,lastValueVisible:true});
   window.addEventListener("resize",()=>chart.applyOptions({width:el.clientWidth,height:el.clientHeight}));
 }
 // Keep candle timestamps as true Unix seconds. Lightweight Charts can format numeric
@@ -56,7 +56,25 @@ function clearSRLines(){for(const line of srLines){try{candleSeries.removePriceL
 function rsiValue(closes,n=14){if(closes.length<n+1)return null;let g=0,l=0;for(let i=closes.length-n;i<closes.length;i++){const d=closes[i]-closes[i-1];g+=Math.max(d,0);l+=Math.max(-d,0)}return l===0?100:100-100/(1+g/l)}
 function atrValue(cs,n=14){if(cs.length<n+1)return null;const tr=[];for(let i=1;i<cs.length;i++)tr.push(Math.max(cs[i].high-cs[i].low,Math.abs(cs[i].high-cs[i-1].close),Math.abs(cs[i].low-cs[i-1].close)));return tr.slice(-n).reduce((a,b)=>a+b,0)/Math.min(n,tr.slice(-n).length)}
 function calcVWAP(cs){let pv=0,vol=0;return cs.map(c=>{const v=Number(c.volume)||0;pv+=((c.high+c.low+c.close)/3)*v;vol+=v;return {time:c.time,value:vol?pv/vol:c.close}})}
-function findSR(cs){if(cs.length<7)return {support:null,resistance:null};const start=Math.max(2,cs.length-80);let lows=[],highs=[];for(let i=start;i<cs.length-2;i++){if(cs[i].low<=cs[i-1].low&&cs[i].low<=cs[i-2].low&&cs[i].low<=cs[i+1].low&&cs[i].low<=cs[i+2].low)lows.push(cs[i].low);if(cs[i].high>=cs[i-1].high&&cs[i].high>=cs[i-2].high&&cs[i].high>=cs[i+1].high&&cs[i].high>=cs[i+2].high)highs.push(cs[i].high)}const last=cs.at(-1).close;const supports=lows.filter(v=>v<last).sort((a,b)=>b-a);const resistances=highs.filter(v=>v>last).sort((a,b)=>a-b);return {support:supports[0]??Math.min(...cs.slice(-20).map(c=>c.low)),resistance:resistances[0]??Math.max(...cs.slice(-20).map(c=>c.high))}}
+function findSR(cs){
+  if(cs.length<10)return {support:null,resistance:null};
+  const start=Math.max(2,cs.length-120), end=cs.length-2;
+  const lows=[],highs=[];
+  for(let i=start;i<end;i++){
+    const c=cs[i];
+    if(c.low<=cs[i-1].low&&c.low<=cs[i-2].low&&c.low<=cs[i+1].low&&c.low<=cs[i+2].low)lows.push(c.low);
+    if(c.high>=cs[i-1].high&&c.high>=cs[i-2].high&&c.high>=cs[i+1].high&&c.high>=cs[i+2].high)highs.push(c.high);
+  }
+  const last=cs.at(-1).close;
+  // Only choose levels on the correct side of the latest close. Never label a
+  // recent low above price as support or a recent high below price as resistance.
+  const supportCandidates=lows.filter(v=>v<last).sort((a,b)=>b-a);
+  const resistanceCandidates=highs.filter(v=>v>last).sort((a,b)=>a-b);
+  const recent=cs.slice(-30);
+  const support=supportCandidates[0] ?? Math.max(...recent.map(c=>c.low).filter(v=>v<last));
+  const resistance=resistanceCandidates[0] ?? Math.min(...recent.map(c=>c.high).filter(v=>v>last));
+  return {support:Number.isFinite(support)?support:null,resistance:Number.isFinite(resistance)?resistance:null};
+}
 function renderCandles(candles){
   currentCandles=candles||[];
   const valid=currentCandles.map(c=>({time:toChartTime(c.time),open:+c.open,high:+c.high,low:+c.low,close:+c.close,volume:+c.volume||0})).filter(c=>Number.isFinite(c.time)&&[c.open,c.high,c.low,c.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
@@ -66,7 +84,7 @@ function renderCandles(candles){
   ema9Series.setData(unique.map((c,i)=>({time:c.time,value:e9[i]})));ema21Series.setData(unique.map((c,i)=>({time:c.time,value:e21[i]})));vwapSeries.setData(vw);
   const showEma=$("showEma")?.checked!==false,showVwap=$("showVWAP")?.checked!==false,showSR=$("showSR")?.checked!==false;
   ema9Series.applyOptions({visible:showEma});ema21Series.applyOptions({visible:showEma});vwapSeries.applyOptions({visible:showVwap});clearSRLines();
-  const sr=findSR(unique);if(showSR&&sr.support!==null&&Number.isFinite(sr.support))srLines.push(candleSeries.createPriceLine({price:sr.support,color:"#27c99a",lineWidth:2,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:"Support"}));if(showSR&&sr.resistance!==null&&Number.isFinite(sr.resistance))srLines.push(candleSeries.createPriceLine({price:sr.resistance,color:"#ff7185",lineWidth:2,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:"Resistance"}));
+  const sr=findSR(unique);if(showSR&&sr.support!==null&&Number.isFinite(sr.support))srLines.push(candleSeries.createPriceLine({price:sr.support,color:"#25c58a",lineWidth:2,lineStyle:LightweightCharts.LineStyle.Solid,axisLabelVisible:true,title:"SUPPORT",axisLabelColor:"#167c59",axisLabelTextColor:"#ffffff"}));if(showSR&&sr.resistance!==null&&Number.isFinite(sr.resistance))srLines.push(candleSeries.createPriceLine({price:sr.resistance,color:"#ff4d5e",lineWidth:2,lineStyle:LightweightCharts.LineStyle.Solid,axisLabelVisible:true,title:"RESISTANCE",axisLabelColor:"#b82b3c",axisLabelTextColor:"#ffffff"}));
   chart.timeScale().fitContent();
   if(unique.length){const last=unique.at(-1),rsi=rsiValue(closes),atr=atrValue(unique),volume=last.volume,avgVol=unique.slice(-21,-1).reduce((a,c)=>a+c.volume,0)/Math.max(1,unique.slice(-21,-1).length);$("lastPrice").textContent=fmt(last.close);$("chartSubtitle").textContent=chartSource==="option"&&paperSelected?`${paperSelectedLabel()} · ${getInterval()}-minute premium OHLC`:`${getSymbol()==="NIFTY"?"NIFTY 50":"BANK NIFTY"} · ${getInterval()}-minute OHLC`;
     $("chartRsi").textContent=fmt(rsi);$("chartAtr").textContent=fmt(atr);$("chartSupport").textContent=fmt(sr.support);$("chartResistance").textContent=fmt(sr.resistance);$("chartVolume").textContent=avgVol>0?`${fmt(volume,0)} (${fmt(volume/avgVol,2)}x)`:`${fmt(volume,0)} · ratio N/A`;
@@ -209,6 +227,21 @@ $("loadContracts").addEventListener("click",()=>loadContracts(true));
 $("loadChain").addEventListener("click",()=>loadChain());
 $("chartView").addEventListener("change",refreshChartSource);
 ["showEma","showVWAP","showSR"].forEach(id=>$(id).addEventListener("change",()=>renderCandles(currentCandles)));
+const chartPanel=document.querySelector(".chart-panel");
+const chartWrap=$("chart");
+function resizeChartSoon(){requestAnimationFrame(()=>{if(chart&&chartWrap){chart.applyOptions({width:chartWrap.clientWidth,height:chartWrap.clientHeight});chart.timeScale().fitContent();}})}
+$("chartMaximize").addEventListener("click",()=>{
+  const maximized=chartPanel.classList.toggle("chart-maximized");
+  $("chartMaximize").textContent=maximized?"↙ Restore":"⛶ Maximize";
+  document.body.classList.toggle("chart-modal-open",maximized);
+  resizeChartSoon();
+});
+$("chartMinimize").addEventListener("click",()=>{
+  const collapsed=chartPanel.classList.toggle("chart-collapsed");
+  $("chartMinimize").textContent=collapsed?"＋ Show chart":"− Minimize chart";
+  resizeChartSoon();
+});
+window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.contains("chart-maximized"))$("chartMaximize").click()});
 ["optionTypeFilter","moneynessFilter"].forEach(id=>$(id)?.addEventListener("change",renderFilteredChain));
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
 initChart();checkStatus();refresh();
