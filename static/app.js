@@ -1,6 +1,6 @@
-const FRONTEND_VERSION="1.3.0";
+const FRONTEND_VERSION="1.5.0";
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
-let lastAnalysis=null, lastSR=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
+let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
 function toast(msg){const el=$("toast");el.textContent=msg;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),4500)}
 function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("en-IN",{maximumFractionDigits:n,minimumFractionDigits:n})}
@@ -155,9 +155,19 @@ function renderSignal(){
   gl.innerHTML="";rows.innerHTML="";$("extraInd").innerHTML="";
   if(!a||a.status!=="ok"){$("finalSignal").textContent="WAIT";$("finalSignalSub").textContent=(a&&a.message)||"Waiting for enough candles.";$("confirmBadge").textContent="WAIT";$("confirmBadge").className="pill muted";return}
   const side=a.side,dom=side==="CE"?a.bull_score:a.bear_score,gates=(a.gates||[]).map(g=>({...g}));
-  if(side&&lastSR&&lastSR.atr){
-    const lvl=side==="CE"?lastSR.resistances[0]:lastSR.supports[0],room=lvl?lvl.distance/lastSR.atr:Infinity;
-    gates.push({label:`Room to ${side==="CE"?"resistance R1":"support S1"} ≥ 1 ATR`,pass:room>=1,detail:lvl?`${fmt(lvl.price)} is ${fmt(lvl.distance)} pts (${fmt(room,1)} ATR) away`:"No level in the loaded window"});
+  const isr=lastIndexSR;
+  if(side&&isr&&isr.atr){
+    const lvl=side==="CE"?isr.resistances[0]:isr.supports[0],room=lvl?lvl.distance/isr.atr:Infinity;
+    gates.push({label:`Index room to ${side==="CE"?"resistance R1":"support S1"} ≥ 1 ATR`,pass:room>=1,detail:lvl?`${fmt(lvl.price)} is ${fmt(lvl.distance)} pts (${fmt(room,1)} ATR) away`:"No level in the loaded window"});
+  }
+  const ov=lastOptionVol,optRows=[];
+  if(!ov||ov.none)optRows.push({label:"Option volume (selected contract)",reading:"excluded",detail:"Select a CE/PE contract to add its volume (the index itself has no volume).",cls:"sr-missing"});
+  else if(ov.error)optRows.push({label:`Option volume (${ov.name})`,reading:"excluded",detail:"Option candles unavailable.",cls:"sr-missing"});
+  else{
+    const rel=ov.rel,reading=rel>=1.2?"▲ Expanding":rel>=0.6?"— Normal":"▼ Dry";
+    optRows.push({label:`Option volume (${ov.name})`,reading,detail:`${fmt(rel,2)}× (last 3 bars vs prior 20) · ${Math.round(ov.total).toLocaleString("en-IN")} total`,cls:rel>=1.2?"sr-support":rel<0.6?"sr-resistance":""});
+    if(side&&ov.type===side)gates.push({label:"Option volume not dry (≥ 0.6×)",pass:rel>=0.6,detail:`${fmt(rel,2)}× average — thin volume means wide spreads and unreliable fills`});
+    else if(side)optRows.push({label:"Option volume gate",reading:"skipped",detail:`Selected contract is a ${ov.type}; the signal is ${side}. Select a ${side} to apply this gate.`,cls:"sr-missing"});
   }
   const failed=gates.filter(g=>!g.pass);
   let text="WAIT",sub="No side has enough aligned evidence. Stand aside.",cls="muted",color="var(--yellow)";
@@ -173,7 +183,8 @@ function renderSignal(){
   (a.checks||[]).forEach(c=>{
     const tr=document.createElement("tr"),reading=!c.ok?"excluded":c.bull?"▲ Bullish":c.bear?"▼ Bearish":"— Neutral";
     tr.className=!c.ok?"sr-missing":c.bull?"sr-support":c.bear?"sr-resistance":"";
-    [c.label,String(c.weight),reading,c.detail||""].forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===3)td.style.textAlign="left";tr.appendChild(td)});rows.appendChild(tr)});
+    [c.label,String(c.weight),reading,c.detail||""].forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===3)td.style.textAlign="left";tr.appendChild(td)});rows.appendChild(tr);
+    if(c.key==="volume")optRows.forEach(o=>{const r2=document.createElement("tr");r2.className=o.cls||"";[o.label,"gate",o.reading,o.detail].forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===3)td.style.textAlign="left";r2.appendChild(td)});rows.appendChild(r2)})});
   const extra=[["ADX / +DI / −DI",a.adx?`${fmt(a.adx.adx,1)} / ${fmt(a.adx.plus_di,1)} / ${fmt(a.adx.minus_di,1)}`:"—"],
     ["MACD histogram",a.macd?fmt(a.macd.hist):"—"],["Supertrend",a.supertrend?`${a.supertrend.direction} @ ${fmt(a.supertrend.level)}`:"—"],
     ["Bollinger %B · width",a.bollinger?`${fmt(a.bollinger.percent_b)} · ${fmt(a.bollinger.bandwidth_pct)}%`:"—"],
@@ -222,7 +233,7 @@ function renderSRDashboard(sr,sourceLabel){
   $("srNote").textContent=sr.note||"Levels are zones, not exact prices. Strength = touches + key-level status (PDH/PDL/PDC, day H/L) + recency. Weak (single-touch) zones appear only when fewer than three stronger ones exist on that side. A level price has just broken flips role automatically.";
 }
 function applySR(sr,lastTime,sourceLabel){
-  lastSR=sr;drawSR(sr,lastTime);renderSRDashboard(sr,sourceLabel);if(lastAnalysis)renderSignal();
+  lastSR=sr;if(!(chartSource==="option"&&paperSelected))lastIndexSR=sr;drawSR(sr,lastTime);renderSRDashboard(sr,sourceLabel);if(lastAnalysis)renderSignal();
   $("chartSupport").textContent=fmt(sr?.support);$("chartResistance").textContent=fmt(sr?.resistance);
 }
 async function srFromHigherTf(tf){
@@ -285,8 +296,37 @@ async function api(url){
   if(!res.ok)throw new Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail||data));
   return data;
 }
+// Relative volume of the selected option: average of the last 3 bars vs the prior 20 (a single bar is too noisy).
+function optionRelVolume(cs){
+  if(cs.length<24)return null;
+  const v=cs.map(c=>c.volume),last3=v.slice(-3).reduce((a,b)=>a+b,0)/3,prior=v.slice(-23,-3).reduce((a,b)=>a+b,0)/20;
+  return prior>0?{rel:last3/prior,total:v.reduce((a,b)=>a+b,0)}:null;
+}
+async function loadOptionVolume(){
+  if(!paperSelected){lastOptionVol={none:true};renderSignal();return}
+  const sel=paperSelected,name=`${sel.type} ${sel.strike}`;
+  try{
+    const d=await api(`/api/candles?symbol=${encodeURIComponent(sel.symbol)}&instrument_key=${encodeURIComponent(sel.instrument_key)}&interval=${getInterval()}&days=5`);
+    const r=optionRelVolume(prepCandles(d.candles));
+    if(paperSelected!==sel)return;
+    lastOptionVol=r?{...r,type:sel.type,name}:{error:true,name};
+  }catch{lastOptionVol={error:true,name}}
+  renderSignal();
+}
+// Index analysis + index S/R + option volume. Runs in BOTH chart views so the signal never goes stale
+// or borrows the option-premium chart's support/resistance.
+async function refreshSignalContext(){
+  const sym=getSymbol(),interval=getInterval();
+  const [c,a]=await Promise.all([api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),api(`/api/analysis?symbol=${sym}&interval=${interval}`)]);
+  lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
+  lastAnalysis=a;
+  $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime||"—"):"—";
+  $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";
+  $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
+  renderSignal();
+}
 async function refresh(){
-  if($("chartView").value==="option"){await refreshChartSource();return}
+  if($("chartView").value==="option"){await refreshChartSource();try{await refreshSignalContext()}catch(e){$("analysisNote").textContent=e.message}loadOptionVolume();return}
   $("refreshBtn").disabled=true;$("refreshBtn").textContent="Loading…";
   try{
     const sym=getSymbol(),interval=getInterval();
@@ -294,7 +334,9 @@ async function refresh(){
       api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),
       api(`/api/analysis?symbol=${sym}&interval=${interval}`)
     ]);
+    lastVolumeSource=c.volume_source||null;
     renderCandles(c.candles);
+    if(lastVolumeSource)$("chartNote").textContent+=` Volume and VWAP weights come from ${lastVolumeSource} (the index itself has no volume).`;
     $("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()}`;
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";
     $("regime").textContent=a.status==="ok"?(a.regime||"—"):"—";
@@ -302,12 +344,12 @@ async function refresh(){
     $("bigDecision").textContent=a.decision||"WAIT";$("decisionSub").textContent=marketOpen?"Bias only; confirm retest":"Last session data (market closed) — bias only";
     $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
     $("ema9").textContent=fmt(a.ema9);$("ema21").textContent=fmt(a.ema21);$("vwap").textContent=fmt(a.vwap_approx);
-    $("rsi").textContent=fmt(a.rsi);$("atr").textContent=fmt(a.atr);$("relVol").textContent=a.relative_volume==null?"—":`${fmt(a.relative_volume)}x`;if($("vwapLabel"))$("vwapLabel").textContent=a.vwap_source==="VOLUME_VWAP"?"VWAP (session)":"Session avg price (no volume)";
+    $("rsi").textContent=fmt(a.rsi);$("atr").textContent=fmt(a.atr);$("relVol").textContent=a.relative_volume==null?"—":`${fmt(a.relative_volume)}x`;if($("vwapLabel"))$("vwapLabel").textContent=String(a.vwap_source||"").startsWith("VOLUME_VWAP")?"VWAP (session)":"Session avg price (no volume)";
     $("breakHigh").textContent=fmt(a.breakout_high);$("breakLow").textContent=fmt(a.breakdown_low);
     $("analysisNote").textContent=[a.note||a.message||"Analysis loaded.",a.score_basis].filter(Boolean).join(" · ");
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
     $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";
-    lastAnalysis=a;renderSignal();
+    lastAnalysis=a;renderSignal();loadOptionVolume();
   }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
   finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}
 }
@@ -552,6 +594,7 @@ function selectPaperContract(type,strike,instrumentKey,ltp,expiry,button){
   if(button)button.closest("tr")?.classList.add("chain-selected");
   paperUpdateMode();paperUpdatePreview();
   if($("chartView").value==="option")refreshChartSource();
+  loadOptionVolume();
   paperFetchQuote(true).then(()=>paperUpdatePreview()).catch(()=>{});
   toast(`Selected ${paperSelectedLabel()} for paper trading.`);
 }
