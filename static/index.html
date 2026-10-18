@@ -58,6 +58,31 @@
     </aside>
   </section>
 
+  <section class="panel sr-panel" id="srPanel">
+    <div class="section-head"><div><h2>Support &amp; resistance map</h2><p id="srSubtitle">Nearest three zones each side</p></div>
+      <label class="sr-tf">Levels from<select id="srTf"><option value="chart">Chart timeframe</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></label></div>
+    <div class="table-wrap sr-wrap"><table class="sr-table"><thead><tr><th>Level</th><th>Price</th><th>Zone</th><th>Distance (pts)</th><th>Distance %</th><th>ATR ×</th><th>Touches</th><th>Strength</th><th>Basis</th></tr></thead><tbody id="srRows"><tr><td colspan="9" class="empty">Waiting for candles…</td></tr></tbody></table></div>
+    <div class="sr-posbar" aria-hidden="true"><span>S1</span><div class="sr-track"><i id="srPosFill"></i></div><span>R1</span></div>
+    <div class="sub small" id="srSummary"></div>
+    <div class="notice" id="srNote">Levels are zones, not exact prices.</div>
+  </section>
+
+  <section class="panel confirm-panel" id="confirmPanel">
+    <div class="section-head"><div><h2>Signal confirmation</h2><p>Weighted checks + hard gates · a setup is CONFIRMED only when every gate passes</p></div><span id="confirmBadge" class="pill muted">WAIT</span></div>
+    <div class="confirm-grid">
+      <div>
+        <div class="signal-box"><div class="signal-label">Final signal</div><div id="finalSignal" class="signal-value">WAIT</div><div id="finalSignalSub" class="sub">Waiting for enough candles.</div></div>
+        <h3 class="mini-h">Hard gates</h3><ul id="gateList" class="gate-list"></ul>
+      </div>
+      <div>
+        <h3 class="mini-h">Weighted checks</h3>
+        <div class="table-wrap sr-wrap"><table class="sr-table"><thead><tr><th>Check</th><th>Weight</th><th>Reading</th><th>Detail</th></tr></thead><tbody id="checkRows"></tbody></table></div>
+        <div class="metric-list" id="extraInd"></div>
+      </div>
+    </div>
+    <div class="notice warning">Confirmation lowers false signals; it cannot remove losses or guarantee profit. Validate the rules on your own history (TradingView strategy tester) and keep per-trade risk small.</div>
+  </section>
+
   <section class="panel derivatives-panel">
     <div class="section-head"><div><h2>Live derivatives intelligence</h2><p>Upstox V3 WebSocket ticks + same-expiry option-chain snapshot</p></div><span id="streamStatus" class="pill muted">CONNECTING</span></div>
     <div class="derivatives-grid">

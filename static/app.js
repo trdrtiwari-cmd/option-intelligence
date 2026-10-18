@@ -1,5 +1,5 @@
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
-let marketOpen=false, chartFitKey=null, chainLotSize=null;
+let lastAnalysis=null, lastSR=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
 function toast(msg){const el=$("toast");el.textContent=msg;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),4500)}
 function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("en-IN",{maximumFractionDigits:n,minimumFractionDigits:n})}
@@ -53,7 +53,6 @@ function istCrosshairTimeFormatter(time){
   return `${date} ${timeText} IST`;
 }
 function calcEMA(vals,n){const a=2/(n+1),out=[];vals.forEach((v,i)=>out.push(i===0?v:a*v+(1-a)*out[i-1]));return out}
-function clearSRLines(){for(const line of srLines){try{candleSeries.removePriceLine(line)}catch{}}srLines=[]}
 // RSI / ATR use Wilder smoothing so values line up with TradingView's ta.rsi / ta.atr.
 function rsiValue(closes,n=14){
   if(closes.length<n+1)return null;
@@ -82,38 +81,157 @@ function calcVWAP(cs){
     return {time:c.time,value:vol>0?pv/vol:tp/n,volumeBased:vol>0};
   });
 }
-function findSR(cs){
-  // Confirmed 5-bar swing points, clustered to avoid near-duplicate levels.
-  // Only levels on the correct side of the latest close are retained.
-  if(cs.length<12)return {supports:[],resistances:[],support:null,resistance:null};
-  const last=cs.at(-1).close;
-  const start=Math.max(2,cs.length-160), end=cs.length-2;
-  const recent=cs.slice(-30);
-  const ranges=recent.map(c=>c.high-c.low).filter(v=>Number.isFinite(v)&&v>0);
-  const avgRange=ranges.length?ranges.reduce((a,b)=>a+b,0)/ranges.length:0;
-  const tolerance=Math.max(avgRange*0.35,last*0.00035);
-  const lows=[],highs=[];
-  for(let i=start;i<end;i++){
-    const c=cs[i];
-    if(c.low<=cs[i-1].low&&c.low<=cs[i-2].low&&c.low<=cs[i+1].low&&c.low<=cs[i+2].low)lows.push({price:c.low,index:i});
-    if(c.high>=cs[i-1].high&&c.high>=cs[i-2].high&&c.high>=cs[i+1].high&&c.high>=cs[i+2].high)highs.push({price:c.high,index:i});
-  }
-  function cluster(pivots,side){
-    const valid=pivots.filter(p=>side==="support"?p.price<last:p.price>last).sort((a,b)=>a.price-b.price);
-    const groups=[];
-    for(const p of valid){
-      let g=groups.find(x=>Math.abs(x.price-p.price)<=tolerance);
-      if(!g){g={price:p.price,prices:[],indices:[]};groups.push(g)}
-      g.prices.push(p.price);g.indices.push(p.index);
-      g.price=g.prices.reduce((a,b)=>a+b,0)/g.prices.length;
+// ---------------- Support / resistance engine ----------------
+// Levels are ZONES built from (a) 7-bar swing pivots over the last ~5 sessions, (b) previous-day
+// high / low / close and today's high / low. Nearby candidates are merged (zone width ~0.6 ATR) and
+// scored by touches, key-level status and recency. Nearest 3 per side are returned, each with an origin time.
+const SR_PER_SIDE=3;
+function prepCandles(raw){
+  const valid=(raw||[]).map(c=>({time:toChartTime(c.time),open:+c.open,high:+c.high,low:+c.low,close:+c.close,volume:+c.volume||0})).filter(c=>Number.isFinite(c.time)&&[c.open,c.high,c.low,c.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
+  const unique=[];for(const c of valid){if(!unique.length||unique[unique.length-1].time!==c.time)unique.push(c)}
+  return unique;
+}
+function computeSR(cs,interval,symbol,isIndex){
+  const n=cs.length,empty={supports:[],resistances:[],support:null,resistance:null,last:n?cs[n-1].close:null,atr:null,note:"Not enough candles to map levels."};
+  if(n<30)return empty;
+  const last=cs[n-1].close;
+  const atr=atrValue(cs)||cs.slice(-30).reduce((a,c)=>a+(c.high-c.low),0)/30;
+  const tol=Math.max(atr*0.6,last*0.0004);
+  const perSession=Math.max(1,Math.round(375/interval)),start=Math.max(0,n-perSession*5),L=3;
+  const cands=[];
+  for(let i=Math.max(L,start);i<n-L;i++){
+    let isH=true,isL=true;
+    for(let k=1;k<=L;k++){
+      if(cs[i].high<=cs[i-k].high||cs[i].high<cs[i+k].high)isH=false;
+      if(cs[i].low>=cs[i-k].low||cs[i].low>cs[i+k].low)isL=false;
     }
-    return groups.map(g=>({price:g.price,touches:g.prices.length,lastTouch:Math.max(...g.indices),distance:Math.abs(last-g.price)}))
-      .sort((a,b)=>a.distance-b.distance||b.touches-a.touches||b.lastTouch-a.lastTouch)
-      .filter((g,i,arr)=>arr.findIndex(x=>Math.abs(x.price-g.price)<=tolerance)===i)
-      .slice(0,2).sort((a,b)=>side==="support"?b.price-a.price:a.price-b.price);
+    if(isH)cands.push({price:cs[i].high,idx:i,kind:"Swing",w:2,swing:true});
+    if(isL)cands.push({price:cs[i].low,idx:i,kind:"Swing",w:2,swing:true});
   }
-  const supports=cluster(lows,"support"),resistances=cluster(highs,"resistance");
-  return {supports,resistances,support:supports[0]?.price??null,resistance:resistances[0]?.price??null};
+  // key levels from IST sessions
+  const days=[];for(let i=0;i<n;i++){const d=istDayKey(cs[i].time);if(!days.length||days[days.length-1].d!==d)days.push({d,from:i,to:i});else days[days.length-1].to=i}
+  const extreme=(from,to,hi)=>{let b=from;for(let i=from;i<=to;i++)if(hi?cs[i].high>cs[b].high:cs[i].low<cs[b].low)b=i;return b};
+  if(days.length>=2){
+    const p=days.at(-2),t=days.at(-1),ph=extreme(p.from,p.to,true),pl=extreme(p.from,p.to,false);
+    cands.push({price:cs[ph].high,idx:ph,kind:"PDH",w:3},{price:cs[pl].low,idx:pl,kind:"PDL",w:3},{price:cs[p.to].close,idx:p.to,kind:"PDC",w:2});
+    const th=extreme(t.from,t.to,true),tl=extreme(t.from,t.to,false);
+    if(th<n-1)cands.push({price:cs[th].high,idx:th,kind:"Day H",w:2});
+    if(tl<n-1)cands.push({price:cs[tl].low,idx:tl,kind:"Day L",w:2});
+  }
+  // cluster into zones
+  cands.sort((a,b)=>a.price-b.price);
+  const zones=[];
+  for(const c of cands){
+    let z=zones[zones.length-1];
+    if(!z||Math.abs(c.price-z.mean)>tol){z={items:[],mean:c.price};zones.push(z)}
+    z.items.push(c);z.mean=z.items.reduce((a,x)=>a+x.price,0)/z.items.length;
+  }
+  const step=!isIndex?null:(symbol==="BANKNIFTY"?100:50);
+  const levels=zones.map(z=>{
+    const prices=z.items.map(x=>x.price),totalW=z.items.reduce((a,x)=>a+x.w,0),price=z.items.reduce((a,x)=>a+x.price*x.w,0)/totalW;
+    const lastIdx=Math.max(...z.items.map(x=>x.idx)),firstIdx=Math.min(...z.items.map(x=>x.idx));
+    const kinds=[...new Set(z.items.filter(x=>!x.swing).map(x=>x.kind))],swings=z.items.filter(x=>x.swing).length;
+    const recency=lastIdx>=n-perSession?2:lastIdx>=n-perSession*3?1:0;
+    const round=step&&Math.abs(price-Math.round(price/step)*step)<=tol*0.6;
+    const score=totalW+recency+(round?1:0);
+    const basis=[...kinds,swings?`${swings} swing${swings>1?"s":""}`:null,round?"round no.":null].filter(Boolean).join(" · ");
+    return {price,low:Math.min(...prices),high:Math.max(...prices),score,strength:score>=8?"Strong":score>=5?"Medium":"Weak",touches:z.items.length,basis,originTime:cs[firstIdx].time,lastTime:cs[lastIdx].time,distance:Math.abs(last-price)};
+  });
+  const withMeta=l=>({...l,pct:l.distance/last*100,atrMult:atr?l.distance/atr:null});
+  // Nearest zones first, but weak single-touch zones only fill slots that stronger zones cannot,
+  // so a stray micro-pivot just beside price never displaces a real level.
+  const pick=arr=>{const byDist=arr.sort((a,b)=>a.distance-b.distance);return [...byDist.filter(l=>l.score>=5),...byDist.filter(l=>l.score<5)].slice(0,SR_PER_SIDE).sort((a,b)=>a.distance-b.distance).map(withMeta)};
+  const supports=pick(levels.filter(l=>l.price<=last)),resistances=pick(levels.filter(l=>l.price>last));
+  const notes=[];
+  if(!resistances.length)notes.push("No resistance above price in the loaded window — price is at/near its recent high.");
+  if(!supports.length)notes.push("No support below price in the loaded window — price is at/near its recent low.");
+  return {supports,resistances,support:supports[0]?.price??null,resistance:resistances[0]?.price??null,last,atr,tol,note:notes.join(" ")};
+}
+// ---------------- Signal confirmation (backend checks + S/R room gate) ----------------
+function renderSignal(){
+  const a=lastAnalysis,gl=$("gateList"),rows=$("checkRows");
+  if(!gl||!rows)return;
+  gl.innerHTML="";rows.innerHTML="";$("extraInd").innerHTML="";
+  if(!a||a.status!=="ok"){$("finalSignal").textContent="WAIT";$("finalSignalSub").textContent=(a&&a.message)||"Waiting for enough candles.";$("confirmBadge").textContent="WAIT";$("confirmBadge").className="pill muted";return}
+  const side=a.side,dom=side==="CE"?a.bull_score:a.bear_score,gates=(a.gates||[]).map(g=>({...g}));
+  if(side&&lastSR&&lastSR.atr){
+    const lvl=side==="CE"?lastSR.resistances[0]:lastSR.supports[0],room=lvl?lvl.distance/lastSR.atr:Infinity;
+    gates.push({label:`Room to ${side==="CE"?"resistance R1":"support S1"} ≥ 1 ATR`,pass:room>=1,detail:lvl?`${fmt(lvl.price)} is ${fmt(lvl.distance)} pts (${fmt(room,1)} ATR) away`:"No level in the loaded window"});
+  }
+  const failed=gates.filter(g=>!g.pass);
+  let text="WAIT",sub="No side has enough aligned evidence. Stand aside.",cls="muted",color="var(--yellow)";
+  if(side&&gates.length&&!failed.length){text=`CONFIRMED ${side} SETUP`;sub="Every gate passes. Enter only on a retest that holds, with the stop-loss and size set before entry.";cls="live";color=side==="CE"?"var(--green)":"var(--red)"}
+  else if(side&&dom>=55&&failed.length<=2){text=`WATCH ${side}`;sub="Waiting for: "+failed.map(g=>g.label).join("; ");cls="stale"}
+  $("finalSignal").textContent=text;$("finalSignal").style.color=color;$("finalSignalSub").textContent=sub;
+  $("confirmBadge").textContent=text.split(" SETUP")[0];$("confirmBadge").className="pill "+cls;
+  $("decision").textContent=text;$("bigDecision").textContent=text;$("signalExplanation").textContent=sub;
+  gates.forEach(g=>{const li=document.createElement("li");li.className=g.pass?"gate-pass":"gate-fail";
+    const b=document.createElement("b");b.textContent=g.pass?"✓":"✗";const t=document.createElement("span");t.textContent=` ${g.label}`;const d=document.createElement("small");d.textContent=g.detail||"";
+    li.appendChild(b);li.appendChild(t);li.appendChild(d);gl.appendChild(li)});
+  if(!gates.length){const li=document.createElement("li");li.className="gate-fail";li.textContent="No directional edge: bull and bear scores are tied.";gl.appendChild(li)}
+  (a.checks||[]).forEach(c=>{
+    const tr=document.createElement("tr"),reading=!c.ok?"excluded":c.bull?"▲ Bullish":c.bear?"▼ Bearish":"— Neutral";
+    tr.className=!c.ok?"sr-missing":c.bull?"sr-support":c.bear?"sr-resistance":"";
+    [c.label,String(c.weight),reading,c.detail||""].forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===3)td.style.textAlign="left";tr.appendChild(td)});rows.appendChild(tr)});
+  const extra=[["ADX / +DI / −DI",a.adx?`${fmt(a.adx.adx,1)} / ${fmt(a.adx.plus_di,1)} / ${fmt(a.adx.minus_di,1)}`:"—"],
+    ["MACD histogram",a.macd?fmt(a.macd.hist):"—"],["Supertrend",a.supertrend?`${a.supertrend.direction} @ ${fmt(a.supertrend.level)}`:"—"],
+    ["Bollinger %B · width",a.bollinger?`${fmt(a.bollinger.percent_b)} · ${fmt(a.bollinger.bandwidth_pct)}%`:"—"],
+    ["Volatility squeeze",a.bollinger?(a.bollinger.squeeze?"YES — breakout may follow":"No"):"—"],["Higher timeframe",a.htf?a.htf.state:"unavailable"]];
+  extra.forEach(([k,v])=>{const d=document.createElement("div"),sp=document.createElement("span"),b=document.createElement("b");sp.textContent=k;b.textContent=v;d.appendChild(sp);d.appendChild(b);$("extraInd").appendChild(d)});
+}
+let srSeries=[],srReq=0,srTfCache={key:null,at:0,sr:null};
+function clearSRLines(){
+  for(const s of srSeries){try{chart.removeSeries(s)}catch{}}srSeries=[];
+  for(const line of srLines){try{candleSeries.removePriceLine(line)}catch{}}srLines=[];
+}
+function drawSR(sr,lastTime){
+  clearSRLines();
+  if($("showSR")?.checked===false||!sr)return;
+  const LS=LightweightCharts.LineStyle,styles=[LS.Solid,LS.Dashed,LS.Dotted];
+  const draw=(lv,i,sup)=>{
+    const color=sup?"#25c58a":"#ff4d5e",tag=(sup?"S":"R")+(i+1);
+    // Line starts where the level formed (not full width) and is excluded from auto-scaling.
+    if(lv.originTime<lastTime){
+      const s=chart.addLineSeries({color,lineWidth:lv.strength==="Strong"?3:lv.strength==="Medium"?2:1,lineStyle:styles[i]??LS.Dotted,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false,autoscaleInfoProvider:()=>null});
+      s.setData([{time:lv.originTime,value:lv.price},{time:lastTime,value:lv.price}]);srSeries.push(s);
+    }
+    srLines.push(candleSeries.createPriceLine({price:lv.price,lineVisible:false,axisLabelVisible:true,title:tag,axisLabelColor:sup?"#167c59":"#b82b3c",axisLabelTextColor:"#ffffff"}));
+  };
+  sr.supports.forEach((l,i)=>draw(l,i,true));sr.resistances.forEach((l,i)=>draw(l,i,false));
+}
+function srRow(label,cls,cells){
+  const tr=document.createElement("tr");tr.className=cls;
+  [label,...cells].forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===0)td.className="sr-tag";tr.appendChild(td)});
+  return tr;
+}
+function renderSRDashboard(sr,sourceLabel){
+  const body=$("srRows");if(!body)return;body.innerHTML="";
+  const sub=$("srSubtitle");
+  if(!sr||sr.last==null){body.innerHTML='<tr><td colspan="9" class="empty">Not enough candles to map support / resistance.</td></tr>';$("srSummary").textContent="";return}
+  const f=v=>fmt(v),row=(l,i,sup)=>srRow((sup?"S":"R")+(i+1),sup?"sr-support":"sr-resistance",[f(l.price),`${f(l.low)} – ${f(l.high)}`,`${sup?"−":"+"}${f(l.distance)}`,`${fmt(l.pct)}%`,l.atrMult==null?"—":`${fmt(l.atrMult,1)}×`,String(l.touches),l.strength,l.basis||"—"]);
+  const blank=(t,sup,i)=>srRow((sup?"S":"R")+(i+1),"sr-missing",["—","—","—","—","—","—","—","none in loaded window"]);
+  for(let i=SR_PER_SIDE-1;i>=0;i--)body.appendChild(sr.resistances[i]?row(sr.resistances[i],i,false):blank("R",false,i));
+  const px=srRow("PRICE","sr-price",[f(sr.last),"","","","","","",`ATR ${f(sr.atr)}`]);body.appendChild(px);
+  for(let i=0;i<SR_PER_SIDE;i++)body.appendChild(sr.supports[i]?row(sr.supports[i],i,true):blank("S",true,i));
+  sub.textContent=`Nearest ${SR_PER_SIDE} zones each side · ${sourceLabel} · swing pivots + previous-day levels`;
+  const s1=sr.supports[0],r1=sr.resistances[0];
+  let text="";
+  if(s1&&r1){const span=r1.price-s1.price,pos=span>0?(sr.last-s1.price)/span*100:50;text=`Price sits ${pos.toFixed(0)}% of the way from S1 to R1 · range ${f(span)} pts${sr.atr?` (${fmt(span/sr.atr,1)} ATR)`:""}. ${pos>=70?"Closer to resistance — long entries have less room.":pos<=30?"Closer to support — short entries have less room.":"Mid-range — wait for a break or a reaction at a level."}`;const bar=$("srPosFill");if(bar)bar.style.left=Math.max(0,Math.min(100,pos))+"%"}
+  $("srSummary").textContent=text;
+  $("srNote").textContent=sr.note||"Levels are zones, not exact prices. Strength = touches + key-level status (PDH/PDL/PDC, day H/L) + recency. Weak (single-touch) zones appear only when fewer than three stronger ones exist on that side. A level price has just broken flips role automatically.";
+}
+function applySR(sr,lastTime,sourceLabel){
+  lastSR=sr;drawSR(sr,lastTime);renderSRDashboard(sr,sourceLabel);if(lastAnalysis)renderSignal();
+  $("chartSupport").textContent=fmt(sr?.support);$("chartResistance").textContent=fmt(sr?.resistance);
+}
+async function srFromHigherTf(tf){
+  const optionMode=chartSource==="option"&&paperSelected;
+  const key=`${optionMode?paperSelected.instrument_key:getSymbol()}|${tf}`;
+  if(srTfCache.key===key&&Date.now()-srTfCache.at<60000)return srTfCache.sr;
+  const url=optionMode?`/api/candles?symbol=${encodeURIComponent(paperSelected.symbol)}&instrument_key=${encodeURIComponent(paperSelected.instrument_key)}&interval=${tf}&days=20`:`/api/candles?symbol=${getSymbol()}&interval=${tf}&days=20`;
+  const data=await api(url),cs=prepCandles(data.candles);
+  const sr=computeSR(cs,tf,optionMode?paperSelected.symbol:getSymbol(),!optionMode);
+  srTfCache={key,at:Date.now(),sr};return sr;
 }
 // Show ~1.6 sessions on load / when the source changes, then leave the user's zoom and scroll alone
 // (the old code re-fitted all 5 days on every 60s refresh, squashing the latest session).
@@ -134,18 +252,21 @@ function renderCandles(candles){
   ema9Series.setData(unique.map((c,i)=>({time:c.time,value:e9[i]})));ema21Series.setData(unique.map((c,i)=>({time:c.time,value:e21[i]})));vwapSeries.setData(vw.map(({time,value})=>({time,value})));
   const showEma=$("showEma")?.checked!==false,showVwap=$("showVWAP")?.checked!==false,showSR=$("showSR")?.checked!==false;
   ema9Series.applyOptions({visible:showEma});ema21Series.applyOptions({visible:showEma});vwapSeries.applyOptions({visible:showVwap});clearSRLines();
-  const sr=findSR(unique);
-  if(showSR){
-    sr.supports.forEach((level,i)=>srLines.push(candleSeries.createPriceLine({price:level.price,color:i===0?"#25c58a":"#168f68",lineWidth:i===0?2:1,lineStyle:i===0?LightweightCharts.LineStyle.Solid:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:i===0?"SUPPORT":"S2",axisLabelColor:i===0?"#167c59":"#145c48",axisLabelTextColor:"#ffffff"})));
-    sr.resistances.forEach((level,i)=>srLines.push(candleSeries.createPriceLine({price:level.price,color:i===0?"#ff4d5e":"#d94756",lineWidth:i===0?2:1,lineStyle:i===0?LightweightCharts.LineStyle.Solid:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:i===0?"RESISTANCE":"R2",axisLabelColor:i===0?"#b82b3c":"#8f2634",axisLabelTextColor:"#ffffff"})));
+  const optMode=chartSource==="option"&&paperSelected;
+  const sr=computeSR(unique,getInterval(),optMode?paperSelected.symbol:getSymbol(),!optMode),lastTime=unique.length?unique.at(-1).time:0;
+  const tf=$("srTf")?$("srTf").value:"chart",tfNum=Number(tf);
+  applySR(sr,lastTime,`${getInterval()}-minute ${optMode?"premium":"index"} candles`);
+  if(tf!=="chart"&&tfNum!==getInterval()&&unique.length){
+    const id=++srReq;
+    srFromHigherTf(tfNum).then(h=>{if(id===srReq&&$("srTf").value===tf&&h)applySR(h,lastTime,`${tfNum}-minute candles`)}).catch(()=>{});
   }
   applyChartRange(unique.length);
   const vwapLegend=document.querySelector(".vwap-legend"),vwapIsVol=!!vw.at(-1)?.volumeBased;
   if(vwapLegend)vwapLegend.textContent=vwapIsVol?"━ VWAP":"━ Session avg price (no index volume)";
   if($("vwapLabel"))$("vwapLabel").textContent=vwapIsVol?"VWAP (session)":"Session avg price (no volume)";
   if(unique.length){const last=unique.at(-1),rsi=rsiValue(closes),atr=atrValue(unique),volume=last.volume,avgVol=unique.slice(-21,-1).reduce((a,c)=>a+c.volume,0)/Math.max(1,unique.slice(-21,-1).length);$("lastPrice").textContent=fmt(last.close);$("chartSubtitle").textContent=chartSource==="option"&&paperSelected?`${paperSelectedLabel()} · ${getInterval()}-minute premium OHLC`:`${getSymbol()==="NIFTY"?"NIFTY 50":"BANK NIFTY"} · ${getInterval()}-minute OHLC`;
-    $("chartRsi").textContent=fmt(rsi);$("chartAtr").textContent=fmt(atr);$("chartSupport").textContent=fmt(sr.support);$("chartResistance").textContent=fmt(sr.resistance);$("chartVolume").textContent=avgVol>0?`${fmt(volume,0)} (${fmt(volume/avgVol,2)}x)`:`${fmt(volume,0)} · ratio N/A`;
-    $("chartNote").textContent=chartSource==="option"?`Selected option premium candles · ${unique.length} bars. Indicators and support/resistance use this option's own candles. Historical data may be unavailable for illiquid/expired contracts.`:"Underlying index candles. Support/resistance uses confirmed swing points; only the nearest two levels on each side are shown. Choose Selected option premium, then select CE/PE from the option chain to switch the chart to that contract.";
+    $("chartRsi").textContent=fmt(rsi);$("chartAtr").textContent=fmt(atr);$("chartVolume").textContent=avgVol>0?`${fmt(volume,0)} (${fmt(volume/avgVol,2)}x)`:`${fmt(volume,0)} · ratio N/A`;
+    $("chartNote").textContent=chartSource==="option"?`Selected option premium candles · ${unique.length} bars. Indicators and support/resistance use this option's own candles. Historical data may be unavailable for illiquid/expired contracts.`:"Underlying index candles. Support/resistance zones are listed in the S/R map below; the nearest three per side are drawn. Choose Selected option premium, then select CE/PE from the option chain to switch the chart to that contract.";
     $("ema9").textContent=fmt(e9.at(-1));$("ema21").textContent=fmt(e21.at(-1));$("vwap").textContent=fmt(vw.at(-1)?.value);$("rsi").textContent=fmt(rsi);$("atr").textContent=fmt(atr);$("relVol").textContent=avgVol>0?`${fmt(volume/avgVol,2)}x`:"—";$("breakHigh").textContent=fmt(Math.max(...unique.slice(-20,-1).map(c=>c.high)));$("breakLow").textContent=fmt(Math.min(...unique.slice(-20,-1).map(c=>c.low)));
   }else{$("chartNote").textContent=chartSource==="option"?"No historical candles returned for this option contract. Index candles are not substituted.":"No candle data returned."}
 }
@@ -169,7 +290,7 @@ async function refresh(){
   try{
     const sym=getSymbol(),interval=getInterval();
     const [c,a]=await Promise.all([
-      api(`/api/candles?symbol=${sym}&interval=${interval}&days=5`),
+      api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),
       api(`/api/analysis?symbol=${sym}&interval=${interval}`)
     ]);
     renderCandles(c.candles);
@@ -185,6 +306,7 @@ async function refresh(){
     $("analysisNote").textContent=[a.note||a.message||"Analysis loaded.",a.score_basis].filter(Boolean).join(" · ");
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
     $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";
+    lastAnalysis=a;renderSignal();
   }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
   finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}
 }
@@ -317,6 +439,7 @@ $("loadContracts").addEventListener("click",()=>loadContracts(true));
 $("loadChain").addEventListener("click",()=>loadChain());
 $("chartView").addEventListener("change",refreshChartSource);
 ["showEma","showVWAP","showSR"].forEach(id=>$(id).addEventListener("change",()=>renderCandles(currentCandles)));
+$("srTf").addEventListener("change",()=>{srTfCache={key:null,at:0,sr:null};renderCandles(currentCandles)});
 const chartPanel=document.querySelector(".chart-panel");
 const chartWrap=$("chart");
 function resizeChartSoon(){requestAnimationFrame(()=>{if(chart&&chartWrap){chart.applyOptions({width:chartWrap.clientWidth,height:chartWrap.clientHeight});}})}
