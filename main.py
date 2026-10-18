@@ -1,4 +1,4 @@
-import os, re, base64, secrets, threading, time, asyncio, json, logging
+import os, re, base64, secrets, threading, time, asyncio, json, logging, importlib.util
 from datetime import date, timedelta, datetime, timezone, time as dtime
 from pathlib import Path
 from urllib.parse import urlencode
@@ -56,10 +56,21 @@ class BasicAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Authentication required"})
 
 
-app = FastAPI(title=APP_TITLE, version="1.1.0")
+APP_VERSION = "1.3.0"
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """Static files revalidate on every load (ETag -> cheap 304) so a redeploy is never masked by a stale cached app.js."""
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 if DASHBOARD_PASSWORD:
     app.add_middleware(BasicAuthMiddleware)
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+app.mount("/static", NoCacheStaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 oauth_states = set()
 runtime_token = UPSTOX_ACCESS_TOKEN
@@ -411,18 +422,18 @@ def _tick_view(key, now):
 # ---------------------------------------------------------------- routes
 @app.get("/")
 async def home():
-    return FileResponse(BASE_DIR / "static" / "index.html")
+    return FileResponse(BASE_DIR / "static" / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/status")
 async def status():
     state = await check_token_state()
     return {
-        "app": APP_TITLE, "provider": "Upstox",
+        "app": APP_TITLE, "version": APP_VERSION, "provider": "Upstox",
         "token_configured": bool(runtime_token), "token_state": state,
         "oauth_configured": bool(UPSTOX_API_KEY and UPSTOX_API_SECRET and UPSTOX_REDIRECT_URI),
         "mode": "Upstox REST + optional V3 WebSocket; analysis-only; no orders are placed",
-        "websocket_sdk_available": __import__("importlib").util.find_spec("upstox_client") is not None,
+        "websocket_sdk_available": importlib.util.find_spec("upstox_client") is not None,
         "tradingview_webhook_configured": bool(os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "").strip()),
         "password_protected": bool(DASHBOARD_PASSWORD),
         "market": market_status(),
