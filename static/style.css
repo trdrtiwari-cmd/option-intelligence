@@ -30,3 +30,5 @@
 .gate-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.gate-list li{padding:8px 10px;border-radius:10px;border:1px solid var(--border,#26364d);background:#101c2e;font-size:13px}.gate-list small{display:block;color:var(--muted);margin-top:2px;font-size:11.5px}
 .gate-pass b{color:var(--green)}.gate-fail b{color:var(--red)}.gate-fail{border-color:rgba(255,77,94,.35)!important}.gate-pass{border-color:rgba(37,197,138,.3)!important}
 #extraInd{margin-top:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 18px}
+
+.stale-banner{margin:12px auto;max-width:1400px;font-weight:700}.stale-banner[hidden]{display:none}

@@ -1,3 +1,4 @@
+const FRONTEND_VERSION="1.3.0";
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastAnalysis=null, lastSR=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
@@ -319,6 +320,8 @@ function renderMarketPill(m){
 async function checkStatus(){
   try{
     const s=await api("/api/status"),el=$("apiStatus");
+    $("buildInfo").textContent=`page v${FRONTEND_VERSION} · server v${s.version||"?"}`;
+    if(s.version&&s.version!==FRONTEND_VERSION&&true){const b=$("staleBanner");b.textContent="⚠ This page is out of date (page v"+FRONTEND_VERSION+" vs server v"+s.version+"). Press Ctrl+F5 to load the latest version — the old script is cached in your browser.";b.hidden=false}
     if(s.token_state==="VALID"){el.textContent="Upstox token valid";el.className="pill ok"}
     else if(s.token_state==="EXPIRED"){el.textContent="Upstox token expired — click Connect Upstox";el.className="pill bad"}
     else if(s.token_configured){el.textContent="Upstox token set (could not verify)";el.className="pill muted"}
