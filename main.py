@@ -8,7 +8,8 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from indicators import IST, analyze, normalize_candles, parse_time
+from indicators import IST, analyze, merge_volume, normalize_candles, parse_time
+from instruments import FutureScanner, pick_front_future
 from feed_parser import parse_feed_message
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,7 +57,7 @@ class BasicAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Authentication required"})
 
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.5.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -83,6 +84,9 @@ CHAIN_CACHE = {}
 CONTRACT_CACHE = {}
 CANDLE_CACHE = {}
 TOKEN_CHECK = {"at": 0.0, "token": None, "state": "UNKNOWN"}
+FUTURES = {"day": None, "rows": [], "failed_at": 0.0, "error": None}
+FUT_LOCK = asyncio.Lock()
+INSTRUMENT_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 CHAIN_CACHE_TTL = 12
 CONTRACT_CACHE_TTL = 300
 CANDLE_CACHE_TTL = 8
@@ -217,6 +221,37 @@ async def fetch_candles(key, interval, days):
         for old in sorted(CANDLE_CACHE, key=lambda k: CANDLE_CACHE[k][0])[:20]:
             CANDLE_CACHE.pop(old, None)
     return candles
+
+
+# ---------------------------------------------------------------- index-futures volume proxy
+async def load_futures_rows():
+    """Stream Upstox's public NSE instrument file and keep only FUT records (low memory)."""
+    scanner = FutureScanner()
+    async with httpx.AsyncClient(timeout=90.0, follow_redirects=True) as client:
+        async with client.stream("GET", INSTRUMENT_URL) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError(f"instrument file HTTP {resp.status_code}")
+            async for chunk in resp.aiter_bytes(65536):
+                scanner.feed(chunk)
+                await asyncio.sleep(0)  # keep the event loop responsive
+    if not scanner.rows:
+        raise RuntimeError("no futures records found" + (" (unexpected file format)" if scanner.overflowed else ""))
+    logger.info("Instrument file scanned: %d records, %d futures", scanner.scanned, len(scanner.rows))
+    return scanner.rows
+
+
+async def get_front_future(sym):
+    """Front-month index future for volume. Downloaded at most once per IST day (retry after 15 min on failure)."""
+    today = ist_now().date()
+    async with FUT_LOCK:
+        if FUTURES["day"] != today and time.time() - FUTURES["failed_at"] > 900:
+            try:
+                FUTURES.update(rows=await load_futures_rows(), day=today, error=None)
+            except Exception as exc:
+                FUTURES.update(failed_at=time.time(), error=str(exc)[:200])
+                logger.warning("Futures volume unavailable: %s", exc)
+        rows = FUTURES["rows"]
+    return pick_front_future(rows, sym, INDEX_KEYS[sym], today) if rows else None
 
 
 # ---------------------------------------------------------------- contracts / expiries / chain
@@ -436,6 +471,7 @@ async def status():
         "websocket_sdk_available": importlib.util.find_spec("upstox_client") is not None,
         "tradingview_webhook_configured": bool(os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "").strip()),
         "password_protected": bool(DASHBOARD_PASSWORD),
+        "futures_volume": {"ready": bool(FUTURES["rows"]), "error": FUTURES["error"]},
         "market": market_status(),
     }
 
@@ -486,7 +522,22 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
     if not key:
         raise HTTPException(status_code=400, detail="Unknown symbol or instrument key.")
     data = await fetch_candles(key, interval, days)
-    return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": data}
+    volume_source = None
+    if not instrument_key.strip() and symbol.upper() in INDEX_KEYS:
+        # Indices carry no volume: borrow the front-month future's volume so VWAP / volume checks work.
+        try:
+            fut = await get_front_future(symbol.upper())
+            if fut:
+                merged = merge_volume(data, await fetch_candles(fut["instrument_key"], interval, days))
+                if merged:
+                    data, volume_source = merged, fut["trading_symbol"]
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+            logger.info("Futures candles unavailable: %s", str(exc.detail)[:160])
+        except Exception as exc:
+            logger.info("Futures volume merge skipped: %s", exc)
+    return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": data, "volume_source": volume_source}
 
 
 @app.get("/api/option-contracts")
@@ -715,7 +766,8 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5):
             if exc.status_code == 401:
                 raise
             logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
-    return analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval)
+    return analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval,
+                   volume_source=result.get("volume_source"))
 
 
 @app.get("/health")

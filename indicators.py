@@ -217,7 +217,25 @@ def trend_state(raw_candles):
             "supertrend": "UP" if st[0] == 1 else "DOWN", "close": closes[-1]}
 
 
-def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None):
+def merge_volume(index_raw, fut_raw, min_match=0.5):
+    """Attach futures volume to index candles (matched by timestamp). Returns the merged list, or None when
+    the futures data is empty or lines up with too few index candles (better no volume than wrong volume)."""
+    idx, fut = normalize_candles(index_raw), normalize_candles(fut_raw)
+    if not idx or not fut or sum(c["volume"] for c in fut) <= 0:
+        return None
+    vol = {c["_dt"].timestamp(): c["volume"] for c in fut}
+    matched = sum(1 for c in idx if c["_dt"].timestamp() in vol)
+    if matched / len(idx) < min_match:
+        return None
+    out = []
+    for c in idx:
+        row = {k: v for k, v in c.items() if k != "_dt"}
+        row["volume"] = vol.get(c["_dt"].timestamp(), 0.0)
+        out.append(row)
+    return out
+
+
+def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None):
     cs = normalize_candles(raw_candles)
     if len(cs) < 40:
         return {"status": "insufficient_data", "message": "Not enough candles to calculate indicators.",
@@ -265,9 +283,9 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
          "detail": f"ADX {adx[0]:.1f} · +DI {adx[1]:.1f} · −DI {adx[2]:.1f}" if adx else "n/a"},
         {"key": "breakout", "label": "Breaks last 11-bar range", "weight": 10, "ok": True,
          "bull": last > recent_high, "bear": last < recent_low, "detail": f"Range {f(recent_low)} – {f(recent_high)}"},
-        {"key": "volume", "label": "Volume expansion (≥ 1.2×)", "weight": 5, "ok": has_volume,
+        {"key": "volume", "label": "Volume expansion (≥ 1.2×)" + (" — futures" if volume_source else ""), "weight": 5, "ok": has_volume,
          "bull": rel_vol >= 1.2 and last > closes[-2], "bear": rel_vol >= 1.2 and last < closes[-2],
-         "detail": f"{rel_vol:.2f}× avg" if has_volume else "No volume in feed (index) — excluded"},
+         "detail": (f"{rel_vol:.2f}× avg ({volume_source})" if volume_source else f"{rel_vol:.2f}× avg") if has_volume else "Index has no volume and futures volume is unavailable (excluded) — see option volume row below"},
         {"key": "htf", "label": f"Higher timeframe ({htf_interval or 15}m) alignment", "weight": 18, "ok": htf is not None,
          "bull": bool(htf and htf["state"] == "BULL"), "bear": bool(htf and htf["state"] == "BEAR"),
          "detail": f"{htf['state']} · EMA {htf['ema9']:,.0f}/{htf['ema21']:,.0f} · ST {htf['supertrend']}" if htf else "Unavailable — excluded"},
@@ -312,7 +330,8 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "regime": regime, "sideways": sideways, "checks": checks, "gates": gates,
         "rsi": round(rsi, 2) if rsi is not None else None,
         "ema9": round(e9[-1], 2), "ema21": round(e21[-1], 2),
-        "vwap_approx": round(vwap, 2), "vwap_source": vwap_source,
+        "vwap_approx": round(vwap, 2), "vwap_source": vwap_source + (f" ({volume_source})" if volume_source and vwap_source == "VOLUME_VWAP" else ""),
+        "volume_source": volume_source,
         "atr": round(atr, 2) if atr is not None else None,
         "macd": {"line": round(mc[0], 2), "signal": round(mc[1], 2), "hist": round(mc[2], 2)} if mc else None,
         "adx": {"adx": round(adx[0], 1), "plus_di": round(adx[1], 1), "minus_di": round(adx[2], 1)} if adx else None,
@@ -321,6 +340,6 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "htf": htf,
         "relative_volume": round(rel_vol, 2) if has_volume else None,
         "last_close": last, "breakout_high": recent_high, "breakdown_low": recent_low,
-        "score_basis": f"Scored on {available} of 100 weight" + ("" if has_volume else " (no volume in feed)") + ("" if htf else " (no higher-timeframe data)"),
+        "score_basis": f"Scored on {available} of 100 weight" + ("" if has_volume else " (no volume in feed)") + (f" · volume from {volume_source}" if volume_source else "") + ("" if htf else " (no higher-timeframe data)"),
         "note": "Bias only, not a guarantee. A confirmed signal still needs a retest, room to the next S/R level, and your own risk limits.",
     }

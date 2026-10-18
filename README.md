@@ -111,3 +111,11 @@ This lowers false signals but does not guarantee profit. Validate the rules on y
 ## Updating a deployment
 
 Static files are now served with `Cache-Control: no-cache` and versioned URLs (`app.js?v=…`), so a redeploy reaches the browser on the next load. The footer shows `page vX · server vY`; if they differ, a banner asks you to press Ctrl+F5.
+
+## Volume in the signal
+
+The index has no volume (Upstox sends zero for indices), so the weighted score excludes the volume check. The **selected option's** volume is used instead: its last 3 bars vs the prior 20 become a check row (Expanding >= 1.2x, Normal, Dry < 0.6x). When the selected contract matches the signal side (CE for a CE signal), "Option volume not dry (>= 0.6x)" is also a hard gate, because thin volume means wide spreads and poor fills. The room-to-S/R gate always uses the **index** levels, whichever chart you are viewing, and the index analysis refreshes in both chart views.
+
+## Index volume from the front-month future
+
+Indices have no volume, so the app borrows the volume of the front-month index future (NIFTY / BANKNIFTY) for the index candles. This feeds the session VWAP weights, the relative-volume reading and the "Volume expansion" check in the confirmation engine. The future is found from Upstox's public instrument file (`assets.upstox.com/.../NSE.json.gz`), which is **streamed and filtered** rather than loaded into memory, downloaded at most once per IST day, and rolled to the next month within 3 days of expiry. Futures candles are matched to index candles by timestamp; if fewer than half line up, or the volume is zero, no volume is attached rather than wrong volume. If the download fails it is retried after 15 minutes and everything falls back to the previous behaviour (volume check excluded). `/api/status` shows `futures_volume.ready` / `error`. Option volume remains a separate gate.
