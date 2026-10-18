@@ -99,3 +99,11 @@ The latest alert is available at `GET /api/tradingview/last-alert`. (The webhook
 - **Option chain** opens on ±10 strikes around ATM with the ATM row highlighted, refreshes every 30 s while the market is open, and shows the lot size.
 - **Paper trading:** default ATR multipliers give 1.5R at Target 1 (was 0.67R), quantity defaults to one lot, stop-loss gaps fill at the observed quote, label bug after switching underlying fixed.
 - **Reliability:** one WebSocket per page (no reconnect storms), shared caches for chain/contracts/candles (fewer Upstox calls, fewer 429s), token validity and market-open status shown, optional password gate, constant-time webhook secret check.
+
+## Support / resistance map and signal confirmation (latest revision)
+
+**S/R engine** (`computeSR` in `static/app.js`): levels are *zones*, not single prices. Candidates are 7-bar swing pivots over the last ~5 sessions plus previous-day high / low / close and today's high / low. Candidates within ~0.6 ATR are merged and scored by touches, key-level status and recency (Weak / Medium / Strong). The nearest three zones per side are drawn on the chart as lines that start where the level formed (heavier line = stronger level) and are excluded from auto-scaling, so far-away levels no longer stretch the price axis. Weak single-touch zones only fill a slot when fewer than three stronger zones exist on that side. The *S/R map* panel lists price, zone range, distance (points, %, ATR multiples), touches, strength and basis, and can take its levels from the chart timeframe, 15 min or 30 min candles.
+
+**Confirmation engine** (`indicators.py`): nine weighted checks (EMA 9/21, Supertrend 10/3, session VWAP, MACD 12/26/9, RSI, ADX/DI, 11-bar breakout, volume where available, 15-minute higher-timeframe alignment), plus Bollinger %B / squeeze as context. A signal is **CONFIRMED** only when every hard gate passes: score >= 70, ADX >= 20 with DI agreeing, Supertrend agrees, higher timeframe agrees, not sideways (ADX >= 15), RSI not overextended (< 80 CE / > 20 PE) and at least 1 ATR of room to the next opposing S/R level. If one or two gates fail it shows WATCH with the missing gate; otherwise WAIT.
+
+This lowers false signals but does not guarantee profit. Validate the rules on your own data before risking money.

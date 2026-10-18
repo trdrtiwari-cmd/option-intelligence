@@ -692,9 +692,19 @@ async def option_quote(instrument_key: str):
 
 @app.get("/api/analysis")
 async def analysis(symbol: str = "NIFTY", interval: int = 5):
-    """Transparent technical score from index candles. Not a guarantee and not an order instruction."""
-    result = await candles(symbol=symbol, interval=interval, days=5)
-    return analyze(result["candles"], symbol=symbol, interval=interval)
+    """Transparent confirmation engine from index candles + a higher-timeframe trend read.
+    Not a guarantee and not an order instruction."""
+    result = await candles(symbol=symbol, interval=interval, days=10)
+    htf_interval = 15 if interval < 15 else 30 if interval < 30 else None
+    htf_raw = None
+    if htf_interval:
+        try:
+            htf_raw = (await candles(symbol=symbol, interval=htf_interval, days=10))["candles"]
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+            logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
+    return analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval)
 
 
 @app.get("/health")
