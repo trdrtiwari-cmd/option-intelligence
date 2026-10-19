@@ -57,7 +57,7 @@ class BasicAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Authentication required"})
 
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -87,9 +87,13 @@ TOKEN_CHECK = {"at": 0.0, "token": None, "state": "UNKNOWN"}
 FUTURES = {"day": None, "rows": [], "failed_at": 0.0, "error": None}
 FUT_LOCK = asyncio.Lock()
 INSTRUMENT_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
-CHAIN_CACHE_TTL = 12
+CHAIN_CACHE_TTL = 4
 CONTRACT_CACHE_TTL = 300
-CANDLE_CACHE_TTL = 8
+CANDLE_CACHE_TTL = 3          # merged candles (history + today) - short, so refreshes are near-live
+HIST_CACHE_TTL = 600          # completed past sessions never change intraday: cache them
+HIST_CACHE = {}
+LTP_CACHE = {}
+LTP_CACHE_TTL = 1.5
 FRESH_SECONDS = 15
 STREAM_LOCK = threading.RLock()
 
@@ -196,18 +200,28 @@ def _rows_to_candles(rows):
 
 
 async def fetch_candles(key, interval, days):
-    """Historical + today's intraday candles, merged, ascending, de-duplicated (cached ~8s).
+    """Historical + today's intraday candles, merged, ascending, de-duplicated.
 
-    Upstox's historical endpoint does not include the current session, so the intraday
-    endpoint is merged in; without it the chart goes stale during market hours."""
+    The multi-day history is cached for 10 minutes (past sessions cannot change); only the small
+    intraday call is repeated, so a refresh is fast and can run every few seconds."""
     ck = (key, interval, days)
     hit = CANDLE_CACHE.get(ck)
     if hit and time.time() - hit[0] < CANDLE_CACHE_TTL:
         return hit[1]
     end = ist_now().date()
     start = end - timedelta(days=days)
-    hist = await upstox_get(f"{API_V3}/historical-candle/{key}/minutes/{interval}/{end.isoformat()}/{start.isoformat()}")
-    rows = _rows_to_candles((hist.get("data") or {}).get("candles"))
+    hk = (key, interval, days, end.isoformat())
+    hh = HIST_CACHE.get(hk)
+    if hh and time.time() - hh[0] < HIST_CACHE_TTL:
+        hist_rows = hh[1]
+    else:
+        hist = await upstox_get(f"{API_V3}/historical-candle/{key}/minutes/{interval}/{end.isoformat()}/{start.isoformat()}")
+        hist_rows = _rows_to_candles((hist.get("data") or {}).get("candles"))
+        HIST_CACHE[hk] = (time.time(), hist_rows)
+        if len(HIST_CACHE) > 40:
+            for old in sorted(HIST_CACHE, key=lambda k: HIST_CACHE[k][0])[:15]:
+                HIST_CACHE.pop(old, None)
+    rows = list(hist_rows)
     try:
         intra = await upstox_get(f"{API_V3}/historical-candle/intraday/{key}/minutes/{interval}")
         rows += _rows_to_candles((intra.get("data") or {}).get("candles"))
@@ -359,6 +373,7 @@ def _on_stream_message(message):
                     "ltp": p["ltp"] if p["ltp"] is not None else old.get("ltp"),
                     "oi": p["oi"] if p["oi"] is not None else old.get("oi"),
                     "iv": p["iv"] if p["iv"] is not None else old.get("iv"),
+                    "close_price": p.get("close_price") if p.get("close_price") is not None else old.get("close_price"),
                     "last_trade_time": p["ltt"] or old.get("last_trade_time"),
                     "received_at": utc_now_iso(),
                     "received_ts": now,
@@ -442,6 +457,11 @@ def _start_stream(symbol, instruments):
         with STREAM_LOCK:
             STREAM_ERRORS[symbol] = f"WebSocket unavailable: {exc}. Install/update upstox-python-sdk and verify token/API access."
         logger.warning("Could not start Upstox stream for %s: %s", symbol, exc)
+
+
+def _stream_keys(sym, option_keys=()):
+    """The underlying index is ALWAYS part of the stream so the page gets a real-time index price."""
+    return list(dict.fromkeys([INDEX_KEYS[sym], *option_keys]))
 
 
 def _tick_view(key, now):
@@ -602,7 +622,7 @@ async def live_derivatives(symbol: str = "NIFTY", expiry_date: str = "current_we
                 STREAM_META[c["instrument_key"]] = {
                     "trading_symbol": c.get("trading_symbol"), "strike": c.get("strike_price"),
                     "type": c.get("instrument_type"), "expiry": expiry}
-        _start_stream(sym, [c["instrument_key"] for c in selected])
+        _start_stream(sym, _stream_keys(sym, [c["instrument_key"] for c in selected]))
 
     total_call_oi = total_put_oi = 0.0
     usable_call = usable_put = 0
@@ -681,24 +701,66 @@ async def live_derivatives(symbol: str = "NIFTY", expiry_date: str = "current_we
 async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
     await websocket.accept()
     sym = symbol.upper()
+    if sym not in INDEX_KEYS:
+        await websocket.close(code=4400)
+        return
+    index_key = INDEX_KEYS[sym]
+    loops = 0
     try:
         while True:
+            # (Re)start the stream with at least the index, even before the option chain is loaded.
+            if loops % 20 == 0 and runtime_token and not STREAMS.get(sym):
+                _start_stream(sym, _stream_keys(sym))
+            loops += 1
             now = time.time()
             with STREAM_LOCK:
                 stream_error = STREAM_ERRORS.get(sym)
                 state = STREAMS.get(sym)
-                keys = list(state.get("keys", [])) if state else []
+                keys = [k for k in (state.get("keys", []) if state else []) if k != index_key]
                 recent = [v for v in (_tick_view(k, now) for k in keys) if v]
-            any_fresh = any(x["fresh"] for x in recent)
+                idx = _tick_view(index_key, now)
+            index_tick = None
+            if idx and idx.get("ltp") is not None:
+                index_tick = {"ltp": idx["ltp"], "close_price": idx.get("close_price"), "age_seconds": idx["age_seconds"], "fresh": idx["fresh"]}
+            any_fresh = any(x["fresh"] for x in recent) or bool(index_tick and index_tick["fresh"])
             market = market_status()
-            stream = "LIVE" if any_fresh else ("MARKET CLOSED" if not market["open"] and recent else "STALE/CONNECTING")
+            stream = "LIVE" if any_fresh else ("MARKET CLOSED" if not market["open"] and (recent or index_tick) else "STALE/CONNECTING")
             await websocket.send_json({"type": "ticks", "symbol": sym, "timestamp": utc_now_iso(), "stream": stream,
-                                       "error": stream_error, "ticks": recent})
-            await asyncio.sleep(1)
+                                       "error": stream_error, "index": index_tick, "ticks": recent})
+            await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         return
     except Exception as exc:
         logger.debug("Browser websocket closed: %s", exc)
+
+
+@app.get("/api/index-ltp")
+async def index_ltp(symbol: str = "NIFTY"):
+    """Latest index price: fresh WebSocket tick if there is one, else a REST LTP (cached 1.5 s).
+    The page polls this every few seconds only when the WebSocket is not delivering."""
+    sym = symbol.upper()
+    if sym not in INDEX_KEYS:
+        raise HTTPException(status_code=400, detail="Unknown index symbol.")
+    key = INDEX_KEYS[sym]
+    now = time.time()
+    with STREAM_LOCK:
+        view = _tick_view(key, now)
+    if view and view["fresh"] and view.get("ltp") is not None:
+        return {"status": "LIVE_TICK", "symbol": sym, "ltp": view["ltp"], "close_price": view.get("close_price"),
+                "age_seconds": view["age_seconds"], "source": "Upstox V3 WebSocket"}
+    hit = LTP_CACHE.get(key)
+    if hit and now - hit[0] < LTP_CACHE_TTL:
+        return hit[1]
+    data = await upstox_get(f"{API_BASE}/v2/market-quote/quotes", {"instrument_key": key})
+    qd = (data or {}).get("data") or {}
+    q = next((v for v in qd.values() if isinstance(v, dict)), None) or {}
+    ltp = q.get("last_price")
+    ohlc = q.get("ohlc") or {}
+    out = {"status": "REST_QUOTE" if ltp is not None else "UNAVAILABLE", "symbol": sym, "ltp": ltp,
+           "close_price": ohlc.get("close") if ohlc.get("close") else None, "age_seconds": 0, "source": "Upstox REST quote",
+           "market_open": market_status()["open"]}
+    LTP_CACHE[key] = (now, out)
+    return out
 
 
 @app.post("/api/tradingview/webhook")

@@ -119,3 +119,12 @@ The index has no volume (Upstox sends zero for indices), so the weighted score e
 ## Index volume from the front-month future
 
 Indices have no volume, so the app borrows the volume of the front-month index future (NIFTY / BANKNIFTY) for the index candles. This feeds the session VWAP weights, the relative-volume reading and the "Volume expansion" check in the confirmation engine. The future is found from Upstox's public instrument file (`assets.upstox.com/.../NSE.json.gz`), which is **streamed and filtered** rather than loaded into memory, downloaded at most once per IST day, and rolled to the next month within 3 days of expiry. Futures candles are matched to index candles by timestamp; if fewer than half line up, or the volume is zero, no volume is attached rather than wrong volume. If the download fails it is retried after 15 minutes and everything falls back to the previous behaviour (volume check excluded). `/api/status` shows `futures_volume.ready` / `error`. Option volume remains a separate gate.
+
+## v1.6.0 — real-time data fixes (delay / slow refresh)
+
+- **Index price is now streamed.** The Upstox V3 WebSocket always includes the index (NIFTY 50 / Nifty Bank), even before the option chain loads. Each tick moves the "Last price" box and the forming candle on the chart (labelled `● LIVE tick`). Previously the price only changed when REST candles were re-downloaded.
+- **REST fallback:** if no WebSocket tick arrives for 5 s, the page polls `GET /api/index-ltp` every 3 s (labelled `REST quote (WebSocket idle)`).
+- **Auto refresh is selectable** (5 / 10 / 15 / 30 / 60 s, default 10 s, remembered in the browser). It was a fixed 60 s. Refreshes never overlap.
+- **Faster, lighter refreshes:** the 10-day candle history is cached for 10 min on the server; only the small intraday call is repeated (cache 3 s, was 8 s). Option chain cache 4 s (was 12 s).
+- **Polling intervals:** derivatives 6 s (was 15 s), option-chain table 10 s (was 30 s), paper-trade quotes 4 s (was 15 s). Near-ATM chain rows overlay live WebSocket LTP / OI.
+- The data source is unchanged: Upstox is already a real-time source; no switch to Yahoo / NSE (both are delayed or blocked from cloud hosts).
