@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.5.0";
+const FRONTEND_VERSION="1.6.0";
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
@@ -327,7 +327,7 @@ async function refreshSignalContext(){
 }
 async function refresh(){
   if($("chartView").value==="option"){await refreshChartSource();try{await refreshSignalContext()}catch(e){$("analysisNote").textContent=e.message}loadOptionVolume();return}
-  $("refreshBtn").disabled=true;$("refreshBtn").textContent="Loading…";
+  const manual=!refreshBusy;if(manual){$("refreshBtn").disabled=true;$("refreshBtn").textContent="Loading…"}
   try{
     const sym=getSymbol(),interval=getInterval();
     const [c,a]=await Promise.all([
@@ -409,7 +409,9 @@ function renderFilteredChain(opts={}){
   if(!filtered.length){body.innerHTML=`<tr><td colspan="8" class="empty">No ${moneyFilter} strikes available for this selection. ${optionChainSpot?`Spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}.`:"Underlying spot unavailable; choose All or refresh data."}</td></tr>`;return}
   let atmRow=null;
   filtered.forEach(r=>{
-    const call=r.call_options||{},put=r.put_options||{},cm=call.market_data||{},pm=put.market_data||{};
+    const call=r.call_options||{},put=r.put_options||{},cm0=call.market_data||{},pm0=put.market_data||{};
+    const lc=liveTickMap[call.instrument_key],lp=liveTickMap[put.instrument_key];
+    const cm=lc&&lc.fresh&&lc.ltp!=null?{...cm0,ltp:lc.ltp,oi:lc.oi??cm0.oi}:cm0,pm=lp&&lp.fresh&&lp.ltp!=null?{...pm0,ltp:lp.ltp,oi:lp.oi??pm0.oi}:pm0;
     const tr=document.createElement("tr");
     const strike=Number(r.strike_price);
     if(atmStrike!==null&&Math.abs(strike-atmStrike)<0.001){tr.classList.add("atm-row");atmRow=tr}
@@ -426,7 +428,7 @@ function renderFilteredChain(opts={}){
     ceTd.appendChild(ceBtn);peTd.appendChild(peBtn);tr.appendChild(ceTd);tr.appendChild(peTd);body.appendChild(tr);
   });
   if(wrap){if(scrollToAtm&&atmRow){requestAnimationFrame(()=>{wrap.scrollTop=Math.max(0,atmRow.getBoundingClientRect().top-wrap.getBoundingClientRect().top+wrap.scrollTop-wrap.clientHeight/2+atmRow.clientHeight/2)})}else wrap.scrollTop=keepTop}
-  $("chainStatus").textContent=`Showing ${filtered.length} of ${rows.length} strikes${chainLotSize?` · lot size ${chainLotSize}`:""}${optionChainSpot?` · spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}`:" · spot unavailable"}. ATM row highlighted. Select Use CE/Use PE. Prices are API snapshots (refreshed every 30s while the market is open), not guaranteed live ticks.`;
+  $("chainStatus").textContent=`Showing ${filtered.length} of ${rows.length} strikes${chainLotSize?` · lot size ${chainLotSize}`:""}${optionChainSpot?` · spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}`:" · spot unavailable"}. ATM row highlighted. Select Use CE/Use PE. Near-ATM prices update from live WebSocket ticks; other rows are REST snapshots (refreshed every 10 s while the market is open).`;
 }
 function renderChain(data){
   optionChainRows=data.data||data.chain||[];chainLotSize=data.lot_size||null;
@@ -504,7 +506,21 @@ window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.
 ["optionTypeFilter","moneynessFilter"].forEach(id=>$(id)?.addEventListener("change",renderFilteredChain));
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
 initChart();checkStatus();refresh();
-setInterval(()=>{if(document.visibilityState==="visible"&&marketOpen)refresh()},60000);
+// Auto refresh: user-selectable (default 10 s). Runs only while the tab is visible and the market is open,
+// and never overlaps a still-running refresh. Between refreshes the live index tick moves the last candle.
+let autoTimer=null,refreshBusy=false;
+function startAutoRefresh(){
+  clearInterval(autoTimer);
+  const sec=Number($("refreshEvery").value)||10;
+  try{localStorage.setItem("oi-refresh-sec",String(sec))}catch{}
+  autoTimer=setInterval(async()=>{
+    if(document.visibilityState!=="visible"||!marketOpen||refreshBusy)return;
+    refreshBusy=true;try{await refresh()}finally{refreshBusy=false}
+  },sec*1000);
+}
+try{const saved=localStorage.getItem("oi-refresh-sec");if(saved&&[...$("refreshEvery").options].some(o=>o.value===saved))$("refreshEvery").value=saved}catch{}
+$("refreshEvery").addEventListener("change",startAutoRefresh);startAutoRefresh();
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&marketOpen&&!refreshBusy)refresh()});
 let liveSocket=null, lastDerivatives=null, liveSocketGen=0, liveReconnectTimer=null;
 function renderLiveTicks(ticks){
   const body=$("liveTicksRows");
@@ -518,6 +534,41 @@ function renderLiveTicks(ticks){
     body.appendChild(tr);
   });
 }
+// ---------------- Real-time index price (V3 WebSocket tick -> forming candle) ----------------
+let liveTickMap={},lastChainPaint=0,lastIdxTick=null,restPriceBusy=false;
+function setLivePrice(ltp,closePrice,ageText,srcText){
+  if($("chartView").value!=="index")return;
+  $("lastPrice").textContent=fmt(ltp);
+  if(closePrice>0){const ch=ltp-closePrice,pc=ch/closePrice*100;$("priceChange").textContent=`${ch>=0?"+":""}${fmt(ch)} (${pc>=0?"+":""}${fmt(pc)}%) · ${srcText} ${ageText}`;$("priceChange").style.color=ch>=0?"var(--green)":"var(--red)"}
+  else $("priceChange").textContent=`${srcText} ${ageText}`;
+}
+function applyIndexTick(t){
+  if(!t||!Number.isFinite(Number(t.ltp))||!t.fresh)return;
+  const ltp=Number(t.ltp);lastIdxTick=Date.now();
+  setLivePrice(ltp,Number(t.close_price),`${fmt(t.age_seconds,1)}s ago`,"● LIVE tick");
+  if(chartSource!=="index"||$("chartView").value!=="index"||!currentCandles.length||!marketOpen)return;
+  const step=getInterval()*60,last=currentCandles[currentCandles.length-1],lt=toChartTime(last.time);
+  if(!Number.isFinite(lt))return;
+  const nowSec=Math.floor(Date.now()/1000),k=Math.floor((nowSec-lt)/step);
+  let c;
+  if(k<=0){ // still inside the latest candle: stretch it
+    c={time:lt,open:+last.open,high:Math.max(+last.high,ltp),low:Math.min(+last.low,ltp),close:ltp};
+    last.high=c.high;last.low=c.low;last.close=c.close;
+  }else if(istDayKey(nowSec)===istDayKey(lt)){ // new bar of the same session: open it from the tick
+    const nt=lt+k*step;c={time:nt,open:ltp,high:ltp,low:ltp,close:ltp};
+    currentCandles.push({time:nt,open:ltp,high:ltp,low:ltp,close:ltp,volume:0});
+  }else return; // first bar of a new session: the next REST refresh supplies it
+  try{candleSeries.update(c)}catch{}
+}
+// REST fallback: if the WebSocket is not delivering index ticks, poll the quote every 3 s.
+setInterval(async()=>{
+  if(document.visibilityState!=="visible"||!marketOpen||restPriceBusy)return;
+  if(lastIdxTick&&Date.now()-lastIdxTick<5000)return;
+  restPriceBusy=true;
+  try{const q=await api(`/api/index-ltp?symbol=${getSymbol()}`);
+    if(q.ltp!=null&&Number.isFinite(Number(q.ltp)))setLivePrice(Number(q.ltp),Number(q.close_price),"",q.status==="LIVE_TICK"?"● LIVE tick":"REST quote (WebSocket idle)")}
+  catch{}finally{restPriceBusy=false}
+},3000);
 function connectLiveSocket(){
   // One socket at a time. Old handlers are detached first so closing it cannot schedule a second reconnect.
   clearTimeout(liveReconnectTimer);
@@ -532,6 +583,9 @@ function connectLiveSocket(){
     try{
       const m=JSON.parse(ev.data),ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));
       renderLiveTicks(ticks);
+      applyIndexTick(m.index);
+      ticks.forEach(t=>{if(t.instrument_key)liveTickMap[t.instrument_key]=t});
+      const nowMs=Date.now();if(nowMs-lastChainPaint>2000&&optionChainRows.length){lastChainPaint=nowMs;renderFilteredChain({scroll:false})}
       if(m.stream==="LIVE"){$("streamStatus").textContent="LIVE TICKS";$("streamStatus").className="pill live"}
       else{$("streamStatus").textContent=m.stream||"CONNECTING";$("streamStatus").className="pill stale"}
       if(ticks.length){const ages=ticks.map(t=>t.age_seconds).filter(Number.isFinite);if(ages.length)$("tickAge").textContent=`${fmt(Math.min(...ages),1)}s`}
@@ -562,8 +616,8 @@ async function refreshDerivatives(){
 }
 $("expiry").addEventListener("change",()=>loadChain()); // loadChain also refreshes derivatives for the same expiry
 connectLiveSocket();loadContracts(true);
-setInterval(()=>{if(document.visibilityState==="visible")refreshDerivatives()},15000);
-setInterval(()=>{if(document.visibilityState==="visible"&&marketOpen)refreshChainQuiet()},30000);
+setInterval(()=>{if(document.visibilityState==="visible")refreshDerivatives()},6000);
+setInterval(()=>{if(document.visibilityState==="visible"&&marketOpen)refreshChainQuiet()},10000);
 setInterval(checkStatus,60000);
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&(!liveSocket||liveSocket.readyState>1))connectLiveSocket()});
 
@@ -792,4 +846,4 @@ $("paperRefreshBtn").addEventListener("click",paperRefreshQuotes);
 $("paperExportBtn").addEventListener("click",paperExportCsv);
 $("paperClearBtn").addEventListener("click",()=>{if(!confirm("Clear all CLOSED paper-trade history from this browser? Open trades will be kept."))return;paperSave(paperRead().filter(t=>t.status==="OPEN"));paperRender();});
 $("paperInitialCapital").value=String(paperGetCapital());
-paperUpdateMode();paperRender();setInterval(()=>{if(document.visibilityState==="visible")paperRefreshQuotes()},15000);
+paperUpdateMode();paperRender();setInterval(()=>{if(document.visibilityState==="visible")paperRefreshQuotes()},4000);
