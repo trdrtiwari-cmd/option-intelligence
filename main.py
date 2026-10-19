@@ -57,7 +57,7 @@ class BasicAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Authentication required"})
 
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 
 
 class NoCacheStaticFiles(StaticFiles):

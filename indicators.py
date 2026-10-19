@@ -326,9 +326,30 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     bear = round(sum(c["weight"] for c in checks if c["ok"] and c["bear"]) / available * 100)
 
     separation = abs(e9[-1] - e21[-1]) / last * 100 if last else 0
-    # ADX decides when available; the EMA-distance fallback is only for feeds too short to compute it.
-    sideways = adx[0] < 15 if adx is not None else (separation < 0.025 and abs(last - vwap) / last * 100 < 0.08)
-    regime = "SIDEWAYS" if sideways else "BULLISH" if bull > bear else "BEARISH" if bear > bull else "NEUTRAL"
+    # ---- range / consolidation detector (ADX alone lags: it stays high for ages after a sharp move) ----
+    N = 20
+    chop = {"efficiency": None, "range_atr": None, "crosses": 0, "range_low": None, "range_high": None}
+    if len(cs) > N + 1 and atr:
+        w = closes[-(N + 1):]
+        path = sum(abs(w[i] - w[i - 1]) for i in range(1, len(w)))
+        chop["efficiency"] = abs(w[-1] - w[0]) / path if path else 0.0      # Kaufman efficiency ratio: 1 = straight line, 0 = pure chop
+        chop["range_low"], chop["range_high"] = min(lows[-N:]), max(highs[-N:])
+        chop["range_atr"] = (chop["range_high"] - chop["range_low"]) / atr
+        diffs = [a - b for a, b in zip(e9[-N:], e21[-N:])]
+        chop["crosses"] = sum(1 for i in range(1, len(diffs)) if diffs[i] * diffs[i - 1] < 0)
+    in_range = (chop["efficiency"] is not None and chop["efficiency"] < 0.30 and chop["range_atr"] <= 6.0) or chop["crosses"] >= 3
+    adx_flat = adx[0] < 15 if adx is not None else (separation < 0.025 and abs(last - vwap) / last * 100 < 0.08)
+    sideways = bool(adx_flat or in_range)
+    prior_bias = "BULLISH" if bull > bear else "BEARISH" if bear > bull else "NEUTRAL"
+    regime = "SIDEWAYS" if sideways else prior_bias
+    if in_range:
+        regime_note = (f"Range {chop['range_low']:,.0f}–{chop['range_high']:,.0f} ({chop['range_atr']:.1f} ATR) over last {N} bars · "
+                       f"efficiency {chop['efficiency']:.2f} · {chop['crosses']} EMA crosses · trend bias still {prior_bias.lower()} "
+                       f"(ADX lags). Wait for a close outside the range.")
+    elif adx_flat:
+        regime_note = f"ADX below 15 — no trend strength · bias {prior_bias.lower()}"
+    else:
+        regime_note = "Trending: price is making directional progress"
 
     squeeze = bool(bb and bb[2])
     side = "CE" if bull > bear else "PE" if bear > bull else None
@@ -343,7 +364,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
             {"label": "Supertrend agrees", "pass": by_key["supertrend"][want], "detail": by_key["supertrend"]["detail"]},
             {"label": "Higher timeframe agrees" if htf else "Higher timeframe (unavailable)", "pass": (by_key["htf"][want] if htf else True),
              "detail": by_key["htf"]["detail"]},
-            {"label": "Not sideways", "pass": not sideways, "detail": regime},
+            {"label": "Not sideways / not in a range", "pass": not sideways, "detail": regime_note},
             {"label": "Momentum not overextended (RSI < 70 / > 30)", "pass": rsi is None or (rsi < 70 if side == "CE" else rsi > 30),
              "detail": f"RSI {rsi:.1f}" if rsi is not None else "n/a"},
         ]
@@ -365,7 +386,9 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     return {
         "status": "ok", "symbol": symbol, "interval": interval,
         "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
-        "regime": regime, "sideways": sideways, "checks": checks, "gates": gates,
+        "regime": regime, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
+        "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
+                  "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"]}, "checks": checks, "gates": gates,
         "rsi": round(rsi, 2) if rsi is not None else None,
         "ema9": round(e9[-1], 2), "ema21": round(e21[-1], 2),
         "vwap_approx": round(vwap, 2), "vwap_source": vwap_source + (f" ({volume_source})" if volume_source and vwap_source == "VOLUME_VWAP" else ""),

@@ -152,3 +152,7 @@ Indices have no volume, so the app borrows the volume of the front-month index f
 - **Learning loop**: each paper trade stores the signal, score, failing gates, option volume ratio, spread, index price at entry/exit, regime, higher-timeframe state, MFE/MAE and override flag; all are in the CSV export and an "Entry context" column in the history table.
 
 These rules reduce low-quality entries; they do not make the strategy profitable. Collect 30–50 paper trades with the CSV before trusting any setting, and change one rule at a time.
+
+## v1.7.1 — regime now detects ranges
+
+The old regime said "BEARISH" whenever bear score > bull score and ADX ≥ 15. ADX (and Supertrend / higher timeframe / session VWAP) lag badly after a sharp move, so a market that had been flat for 25+ bars still read "bearish". The regime is now **SIDEWAYS** when ADX < 15 **or** the last 20 closed bars show range behaviour: Kaufman efficiency ratio < 0.30 with the whole range ≤ 6 ATR, or ≥ 3 EMA 9/21 crosses. The card shows the range, its size in ATR, the efficiency and the prior bias; the "Not sideways" hard gate uses it, so entries stay blocked until a close outside the range. Thresholds (20 bars, 0.30, 6 ATR, 3 crosses) are starting values — tune them on your own paper-trade CSV.
