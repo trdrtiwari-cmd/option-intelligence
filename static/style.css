@@ -32,3 +32,9 @@
 #extraInd{margin-top:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 18px}
 
 .stale-banner{margin:12px auto;max-width:1400px;font-weight:700}.stale-banner[hidden]{display:none}
+
+/* v1.7 trade guard */
+.guard-card{margin:12px 0;border:1px solid #29394d;border-radius:10px;padding:10px;background:#0e1826}.guard-card summary{cursor:pointer;font-weight:700;font-size:13px}
+.guard-form{margin-top:10px}.guard-form label.check{flex-direction:row;align-items:center;gap:8px;grid-column:1/-1}.guard-form label.check input{width:auto}
+.gate-warn{border-color:rgba(243,201,105,.35)!important}.gate-warn b{color:var(--yellow)}#guardStatus{margin-top:10px}
+.paper-buy.blocked{background:#71354a;border-color:#8f4960}

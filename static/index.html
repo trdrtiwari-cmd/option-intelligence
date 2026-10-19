@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.6.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.7.0">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -163,6 +163,26 @@
           <label>Target 2 price<input id="paperManualT2" type="number" min="0.01" step="0.05" placeholder="Optional"></label>
           <label>Target 3 price<input id="paperManualT3" type="number" min="0.01" step="0.05" placeholder="Optional"></label>
         </div>
+        <details class="guard-card" open>
+          <summary>Trade guard — entry rules that block bad trades</summary>
+          <div class="paper-form guard-form">
+            <label class="check"><input type="checkbox" id="guardEnforce" checked> Enforce (block entries that break a rule)</label>
+            <label class="check"><input type="checkbox" id="guardTrail" checked> Trail stop (breakeven at +1R)</label>
+            <label>Max trades / day<input id="guardMaxTrades" type="number" min="0" step="1"></label>
+            <label>Daily loss cap (₹)<input id="guardDailyLoss" type="number" min="0" step="500"></label>
+            <label>Stop after N losses in a row<input id="guardMaxLosses" type="number" min="0" step="1"></label>
+            <label>Cooldown after exit (min)<input id="guardCooldown" type="number" min="0" step="1"></label>
+            <label>Max stop (% of premium)<input id="guardMaxSlPct" type="number" min="0" step="1"></label>
+            <label>Max bid-ask spread (%)<input id="guardMaxSpread" type="number" min="0" step="0.5"></label>
+            <label>Min reward : risk (R)<input id="guardMinRR" type="number" min="0" step="0.1"></label>
+            <label>Slippage per side (%)<input id="guardSlip" type="number" min="0" step="0.1"></label>
+            <label>Time stop (min, 0 = off)<input id="guardTimeStop" type="number" min="0" step="5"></label>
+            <label>No entries before (IST)<input id="guardStart" type="time"></label>
+            <label>No entries after (IST)<input id="guardCutoff" type="time"></label>
+            <label>No entries after, expiry day<input id="guardExpiryCutoff" type="time"></label>
+          </div>
+          <ul id="guardStatus" class="gate-list"></ul>
+        </details>
         <button id="paperBuyBtn" class="paper-buy" disabled>BUY SELECTED OPTION (PAPER)</button>
         <div class="notice warning">ATR is calculated from the selected option premium candles, not index ATR. If premium candles or a valid quote are unavailable, ATR mode will not create a trade. Manual entry is allowed, but P&amp;L remains unavailable until a fresh quote is received.</div>
       </div>
@@ -184,10 +204,10 @@
     <div class="section-head paper-table-head"><div><h3>Open paper positions</h3><p>Quotes refresh periodically; automatic SL/target exits use observed quotes, not guaranteed fills.</p></div><button class="secondary" id="paperRefreshBtn">Refresh quotes</button></div>
     <div class="table-wrap"><table><thead><tr><th>Opened</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Last LTP</th><th>SL</th><th>Chosen target</th><th>Unrealized P&amp;L</th><th>Status</th><th>Action</th></tr></thead><tbody id="paperOpenRows"><tr><td colspan="10" class="empty">No open paper trades.</td></tr></tbody></table></div>
     <div class="section-head paper-table-head"><div><h3>Paper trade history</h3><p>Browser-local history; clearing browser storage or using another device will not sync trades.</p></div><div class="paper-actions"><button class="secondary" id="paperExportBtn">Export CSV</button><button class="secondary" id="paperClearBtn">Clear closed history</button></div></div>
-    <div class="table-wrap"><table><thead><tr><th>Opened / Closed</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Realized P&amp;L</th></tr></thead><tbody id="paperHistoryRows"><tr><td colspan="7" class="empty">No closed trades yet.</td></tr></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>Opened / Closed</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Realized P&amp;L</th><th>Entry context</th></tr></thead><tbody id="paperHistoryRows"><tr><td colspan="8" class="empty">No closed trades yet.</td></tr></tbody></table></div>
   </section>
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/app.js?v=1.6.0"></script>
+<script src="/static/app.js?v=1.7.0"></script>
 </body></html>

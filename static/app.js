@@ -1,4 +1,5 @@
-const FRONTEND_VERSION="1.6.0";
+const FRONTEND_VERSION="1.7.0";
+let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
@@ -153,7 +154,7 @@ function renderSignal(){
   const a=lastAnalysis,gl=$("gateList"),rows=$("checkRows");
   if(!gl||!rows)return;
   gl.innerHTML="";rows.innerHTML="";$("extraInd").innerHTML="";
-  if(!a||a.status!=="ok"){$("finalSignal").textContent="WAIT";$("finalSignalSub").textContent=(a&&a.message)||"Waiting for enough candles.";$("confirmBadge").textContent="WAIT";$("confirmBadge").className="pill muted";return}
+  if(!a||a.status!=="ok"){lastGateState=null;$("finalSignal").textContent="WAIT";$("finalSignalSub").textContent=(a&&a.message)||"Waiting for enough candles.";$("confirmBadge").textContent="WAIT";$("confirmBadge").className="pill muted";return}
   const side=a.side,dom=side==="CE"?a.bull_score:a.bear_score,gates=(a.gates||[]).map(g=>({...g}));
   const isr=lastIndexSR;
   if(side&&isr&&isr.atr){
@@ -165,14 +166,17 @@ function renderSignal(){
   else if(ov.error)optRows.push({label:`Option volume (${ov.name})`,reading:"excluded",detail:"Option candles unavailable.",cls:"sr-missing"});
   else{
     const rel=ov.rel,reading=rel>=1.2?"▲ Expanding":rel>=0.6?"— Normal":"▼ Dry";
-    optRows.push({label:`Option volume (${ov.name})`,reading,detail:`${fmt(rel,2)}× (last 3 bars vs prior 20) · ${Math.round(ov.total).toLocaleString("en-IN")} total`,cls:rel>=1.2?"sr-support":rel<0.6?"sr-resistance":""});
+    optRows.push({label:`Option volume (${ov.name})`,reading,detail:`${fmt(rel,2)}× · last-3-bar avg ${fmt(ov.last3,0)} vs prior-20 avg ${fmt(ov.prior,0)} (closed bars only)`,cls:rel>=1.2?"sr-support":rel<0.6?"sr-resistance":""});
     if(side&&ov.type===side)gates.push({label:"Option volume not dry (≥ 0.6×)",pass:rel>=0.6,detail:`${fmt(rel,2)}× average — thin volume means wide spreads and unreliable fills`});
     else if(side)optRows.push({label:"Option volume gate",reading:"skipped",detail:`Selected contract is a ${ov.type}; the signal is ${side}. Select a ${side} to apply this gate.`,cls:"sr-missing"});
   }
   const failed=gates.filter(g=>!g.pass);
   let text="WAIT",sub="No side has enough aligned evidence. Stand aside.",cls="muted",color="var(--yellow)";
   if(side&&gates.length&&!failed.length){text=`CONFIRMED ${side} SETUP`;sub="Every gate passes. Enter only on a retest that holds, with the stop-loss and size set before entry.";cls="live";color=side==="CE"?"var(--green)":"var(--red)"}
-  else if(side&&dom>=55&&failed.length<=2){text=`WATCH ${side}`;sub="Waiting for: "+failed.map(g=>g.label).join("; ");cls="stale"}
+  else if(side&&dom>=55&&failed.length<=2){text=`WATCH ${side}`;sub="No entry yet — waiting for: "+failed.map(g=>g.label).join("; ");cls="stale"}
+  const gstatus=(side&&gates.length&&!failed.length)?"CONFIRMED":(side&&dom>=55&&failed.length<=2)?"WATCH":"WAIT";
+  lastGateState={side,text,status:gstatus,failed:failed.map(g=>g.label),dom,gates:gates.map(g=>({label:g.label,pass:g.pass,detail:g.detail||""}))};
+  if($("decisionSub"))$("decisionSub").textContent=gstatus==="CONFIRMED"?"Gates pass — enter only on a held retest":"No entry — hard gates not met";
   $("finalSignal").textContent=text;$("finalSignal").style.color=color;$("finalSignalSub").textContent=sub;
   $("confirmBadge").textContent=text.split(" SETUP")[0];$("confirmBadge").className="pill "+cls;
   $("decision").textContent=text;$("bigDecision").textContent=text;$("signalExplanation").textContent=sub;
@@ -190,6 +194,7 @@ function renderSignal(){
     ["Bollinger %B · width",a.bollinger?`${fmt(a.bollinger.percent_b)} · ${fmt(a.bollinger.bandwidth_pct)}%`:"—"],
     ["Volatility squeeze",a.bollinger?(a.bollinger.squeeze?"YES — breakout may follow":"No"):"—"],["Higher timeframe",a.htf?a.htf.state:"unavailable"]];
   extra.forEach(([k,v])=>{const d=document.createElement("div"),sp=document.createElement("span"),b=document.createElement("b");sp.textContent=k;b.textContent=v;d.appendChild(sp);d.appendChild(b);$("extraInd").appendChild(d)});
+  renderGuardStatus();
 }
 let srSeries=[],srReq=0,srTfCache={key:null,at:0,sr:null};
 function clearSRLines(){
@@ -296,18 +301,26 @@ async function api(url){
   if(!res.ok)throw new Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail||data));
   return data;
 }
-// Relative volume of the selected option: average of the last 3 bars vs the prior 20 (a single bar is too noisy).
-function optionRelVolume(cs){
-  if(cs.length<24)return null;
-  const v=cs.map(c=>c.volume),last3=v.slice(-3).reduce((a,b)=>a+b,0)/3,prior=v.slice(-23,-3).reduce((a,b)=>a+b,0)/20;
-  return prior>0?{rel:last3/prior,total:v.reduce((a,b)=>a+b,0)}:null;
+// Relative volume of the selected option: average of the last 3 COMPLETED bars vs the prior 20.
+// The still-forming candle is excluded (its partial volume dragged the ratio down and made liquid contracts look "dry"),
+// today's session is preferred as the baseline, and block-trade bars are capped at 3x the median so one spike cannot
+// inflate the baseline.
+function optionRelVolume(cs,intervalMin){
+  let bars=(cs||[]).slice();const nowSec=Date.now()/1000,ivSec=(intervalMin||5)*60;
+  if(bars.length&&bars[bars.length-1].time+ivSec>nowSec)bars=bars.slice(0,-1);
+  const sess=bars.filter(c=>istDayKey(c.time)===istDayKey(nowSec)),use=sess.length>=23?sess:bars;
+  if(use.length<23)return null;
+  const v=use.map(c=>c.volume),last3=v.slice(-3).reduce((a,b)=>a+b,0)/3,priorRaw=v.slice(-23,-3);
+  const sorted=[...priorRaw].sort((a,b)=>a-b),median=(sorted[9]+sorted[10])/2,cap=median>0?median*3:Infinity;
+  const prior=priorRaw.map(x=>Math.min(x,cap)).reduce((a,b)=>a+b,0)/20;
+  return prior>0?{rel:last3/prior,last3,prior,total:v.reduce((a,b)=>a+b,0),bars:use.length,sessionOnly:sess.length>=23}:null;
 }
 async function loadOptionVolume(){
   if(!paperSelected){lastOptionVol={none:true};renderSignal();return}
   const sel=paperSelected,name=`${sel.type} ${sel.strike}`;
   try{
     const d=await api(`/api/candles?symbol=${encodeURIComponent(sel.symbol)}&instrument_key=${encodeURIComponent(sel.instrument_key)}&interval=${getInterval()}&days=5`);
-    const r=optionRelVolume(prepCandles(d.candles));
+    const r=optionRelVolume(prepCandles(d.candles),getInterval());
     if(paperSelected!==sel)return;
     lastOptionVol=r?{...r,type:sel.type,name}:{error:true,name};
   }catch{lastOptionVol={error:true,name}}
@@ -319,7 +332,7 @@ async function refreshSignalContext(){
   const sym=getSymbol(),interval=getInterval();
   const [c,a]=await Promise.all([api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),api(`/api/analysis?symbol=${sym}&interval=${interval}`)]);
   lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
-  lastAnalysis=a;
+  lastAnalysis=a;lastAnalysisAt=Date.now();
   $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime||"—"):"—";
   $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";
   $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
@@ -349,7 +362,7 @@ async function refresh(){
     $("analysisNote").textContent=[a.note||a.message||"Analysis loaded.",a.score_basis].filter(Boolean).join(" · ");
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
     $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";
-    lastAnalysis=a;renderSignal();loadOptionVolume();
+    lastAnalysis=a;lastAnalysisAt=Date.now();renderSignal();loadOptionVolume();
   }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
   finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}
 }
@@ -544,7 +557,7 @@ function setLivePrice(ltp,closePrice,ageText,srcText){
 }
 function applyIndexTick(t){
   if(!t||!Number.isFinite(Number(t.ltp))||!t.fresh)return;
-  const ltp=Number(t.ltp);lastIdxTick=Date.now();
+  const ltp=Number(t.ltp);lastIdxTick=Date.now();lastIdxLtp=ltp;
   setLivePrice(ltp,Number(t.close_price),`${fmt(t.age_seconds,1)}s ago`,"● LIVE tick");
   if(chartSource!=="index"||$("chartView").value!=="index"||!currentCandles.length||!marketOpen)return;
   const step=getInterval()*60,last=currentCandles[currentCandles.length-1],lt=toChartTime(last.time);
@@ -657,11 +670,15 @@ function paperUpdateMode(){
   $("paperAtrSettings").hidden=!atrMode;$("paperManualSettings").hidden=atrMode;
   paperUpdatePreview();
 }
-function paperCalcAtrFromCandles(candles){
-  if(!Array.isArray(candles)||candles.length<15)return null;
-  const cs=candles.map(c=>({t:Date.parse(c.time),high:Number(c.high),low:Number(c.low),close:Number(c.close)}))
+function paperCalcAtrFromCandles(candles,intervalMin){
+  let cs=(candles||[]).map(c=>({t:Date.parse(c.time),high:Number(c.high),low:Number(c.low),close:Number(c.close)}))
     .filter(c=>Number.isFinite(c.t)&&[c.high,c.low,c.close].every(Number.isFinite)).sort((a,b)=>a.t-b.t);
-  return atrValue(cs); // Wilder ATR(14), same as the chart / TradingView
+  const nowSec=Date.now()/1000;
+  if(cs.length&&cs[cs.length-1].t/1000+(intervalMin||5)*60>nowSec)cs=cs.slice(0,-1); // drop the forming bar
+  // Use today's bars when there are enough: overnight gaps in a premium series inflate ATR and therefore the stop distance.
+  const today=cs.filter(c=>istDayKey(c.t/1000)===istDayKey(nowSec)),use=today.length>=15?today:cs;
+  if(use.length<15)return null;
+  return atrValue(use); // Wilder ATR(14)
 }
 async function paperCalculateAtr(){
   if(!paperSelected){toast("पहले option chain से CE या PE select करें.");return}
@@ -669,7 +686,7 @@ async function paperCalculateAtr(){
   try{
     const interval=Number($("paperAtrInterval").value);
     const data=await api(`/api/candles?symbol=${encodeURIComponent(paperSelected.symbol)}&instrument_key=${encodeURIComponent(paperSelected.instrument_key)}&interval=${interval}&days=3`);
-    paperAtr=paperCalcAtrFromCandles(data.candles||[]);
+    paperAtr=paperCalcAtrFromCandles(data.candles||[],interval);
     $("paperAtrValue").textContent=paperAtr?paperMoney(paperAtr):"UNAVAILABLE";
     if(!paperAtr)throw new Error("Not enough option-premium candles for ATR. Try a liquid contract or another timeframe.");
     $("paperRiskNote").textContent=`Premium ATR(${interval}m) = ${paperMoney(paperAtr)}. SL/targets are based on this option's own candles.`;
@@ -684,7 +701,9 @@ function paperRiskPlan(){
     if(!paperAtr)return null;
     const sm=paperNum("paperSlMult"),m1=paperNum("paperT1Mult"),m2=paperNum("paperT2Mult"),m3=paperNum("paperT3Mult");
     if(!sm||!m1||!m2||!m3)return null;
-    return {entry,sl:entry-paperAtr*sm,t1:entry+paperAtr*m1,t2:entry+paperAtr*m2,t3:entry+paperAtr*m3,atr:paperAtr,mode:"ATR"};
+    // Cap the stop at a % of premium (option premiums can move 30% on an ATR); targets keep the same R multiples.
+    const g=guardRead(),rawRisk=paperAtr*sm,cap=g.maxSlPct>0?entry*g.maxSlPct/100:Infinity,risk=Math.min(rawRisk,cap),k=risk/sm;
+    return {entry,sl:entry-risk,t1:entry+k*m1,t2:entry+k*m2,t3:entry+k*m3,atr:paperAtr,mode:"ATR",clamped:rawRisk>cap,rawRisk};
   }
   const sl=paperNum("paperManualSl"),t1=paperNum("paperManualT1");
   const t2=paperNum("paperManualT2"),t3=paperNum("paperManualT3");
@@ -711,10 +730,12 @@ function paperUpdatePreview(){
   else{
     const rr=risk>0?(p.t1-p.entry)/risk:null,lot=paperSelected.lot;
     let note=`${p.mode} plan ready. Risk ${paperMoney(risk)} per unit; max planned loss at selected quantity: ${paperMoney(risk*qty)} (excluding costs/slippage).`;
-    if(rr!==null&&rr<1)note+=` ⚠ Target 1 pays only ${rr.toFixed(2)}R: with "Auto-exit at Target 1" you need a win rate above ${(100/(1+rr)).toFixed(0)}% just to break even.`;
+    if(p.clamped)note+=` Stop tightened from ${paperMoney(p.rawRisk)} to the ${guardRead().maxSlPct}%-of-premium cap; targets scaled to keep the same R multiples.`;
+    if(rr!==null&&rr<1.5)note+=` ⚠ Target 1 pays only ${rr.toFixed(2)}R: with "Auto-exit at Target 1" you need a win rate above ${(100/(1+rr)).toFixed(0)}% just to break even (before costs and slippage).`;
     if(lot&&qty%lot!==0)note+=` ⚠ Quantity is not a multiple of the lot size (${lot}); real exchange orders need whole lots.`;
     $("paperRiskNote").textContent=note;
   }
+  renderGuardStatus();
 }
 async function paperFetchQuote(force){
   if(!paperSelected)return null;
@@ -724,7 +745,7 @@ async function paperFetchQuote(force){
       paperSelected.ltp=Number(q.ltp);paperSelected.quoteStatus=q.status||"UNAVAILABLE";paperSelected.quoteTimestamp=q.timestamp;
       if(!$("paperEntry").dataset.userEdited||force)$("paperEntry").value=paperSelected.ltp.toFixed(2);
       $("paperSelectedContract").textContent=`Selected: ${paperSelectedLabel()} · LTP ${paperMoney(paperSelected.ltp)} · ${paperSelected.quoteStatus} · ${paperTime(q.timestamp)}`;
-      return {price:paperSelected.ltp,status:q.status,timestamp:q.timestamp};
+      return {price:paperSelected.ltp,status:q.status,timestamp:q.timestamp,bid:Number(q.bid)>0?Number(q.bid):null,ask:Number(q.ask)>0?Number(q.ask):null};
     }
   }catch(e){
     paperSelected.quoteStatus="UNAVAILABLE";
@@ -735,31 +756,126 @@ async function paperFetchQuote(force){
 function paperCloseTrade(trade,price,reason){
   trade.status="CLOSED";trade.exit_price=Number(price);trade.exit_time=new Date().toISOString();trade.exit_reason=reason;
   trade.realized_pnl=(trade.exit_price-trade.entry)*trade.qty;
-  trade.last_price=trade.exit_price;
+  trade.last_price=trade.exit_price;trade.ctx_index_exit=lastIdxLtp;
+}
+// ---------------- Trade guard: entry rules that actually BLOCK paper entries ----------------
+const PAPER_GUARD_KEY="option-intelligence-paper-guard-v1";
+const GUARD_FIELDS={guardEnforce:["enforce","checkbox",true],guardMaxTrades:["maxTrades","num",3],guardDailyLoss:["dailyLoss","num",3000],guardMaxLosses:["maxLosses","num",2],guardCooldown:["cooldown","num",15],guardMaxSlPct:["maxSlPct","num",20],guardMaxSpread:["maxSpread","num",3],guardSlip:["slip","num",0.5],guardMinRR:["minRR","num",1.2],guardTimeStop:["timeStop","num",30],guardTrail:["trail","checkbox",true],guardStart:["start","time","09:30"],guardCutoff:["cutoff","time","15:00"],guardExpiryCutoff:["expiryCutoff","time","13:30"]};
+function guardTimeMin(v,d){const m=/^(\d{1,2}):(\d{2})/.exec(v||"")||/^(\d{1,2}):(\d{2})/.exec(d);return Number(m[1])*60+Number(m[2])}
+function hhmm(m){return String(Math.floor(m/60)).padStart(2,"0")+":"+String(m%60).padStart(2,"0")}
+function guardRead(){
+  const g={};
+  for(const [id,[k,type,def]] of Object.entries(GUARD_FIELDS)){
+    const el=$(id);
+    if(type==="checkbox")g[k]=el?el.checked:def;
+    else if(type==="time")g[k]=guardTimeMin(el&&el.value,def);
+    else{const v=el&&el.value!==""?Number(el.value):NaN;g[k]=Number.isFinite(v)&&v>=0?v:def}
+  }
+  return g;
+}
+function guardSave(){const s={};for(const [id,[,type]] of Object.entries(GUARD_FIELDS)){const el=$(id);if(el)s[id]=type==="checkbox"?el.checked:el.value}try{localStorage.setItem(PAPER_GUARD_KEY,JSON.stringify(s))}catch{}}
+function guardInit(){
+  let saved={};try{saved=JSON.parse(localStorage.getItem(PAPER_GUARD_KEY)||"{}")}catch{}
+  for(const [id,[,type,def]] of Object.entries(GUARD_FIELDS)){
+    const el=$(id);if(!el)continue;const v=saved[id]!==undefined?saved[id]:def;
+    if(type==="checkbox")el.checked=!!v;else el.value=v;
+    el.addEventListener("change",()=>{guardSave();paperUpdatePreview()});
+  }
+}
+function istNowParts(){const d=new Date(Date.now()+IST_OFFSET_SECONDS*1000);return {min:d.getUTCHours()*60+d.getUTCMinutes(),date:d.toISOString().slice(0,10)}}
+function tradeDay(iso){const ms=Date.parse(iso);return Number.isFinite(ms)?istDayKey(ms/1000):null}
+function paperGuardCheck(){
+  const g=guardRead(),blocks=[],warns=[],sel=paperSelected,st=lastGateState,now=istNowParts();
+  if(!sel)return {ok:false,blocks:["Select a CE/PE contract first"],warns,g};
+  if(!marketOpen)blocks.push("Market is closed");
+  // 1. the confirmed signal, on the SAME side as the contract
+  if(!st||!st.side)blocks.push("No directional signal (bull/bear tied or not enough data)");
+  else{
+    if(st.status!=="CONFIRMED")blocks.push(`Signal is ${st.text}, not CONFIRMED — failing: ${st.failed.join("; ")||"directional score"}`);
+    if(sel.type!==st.side)blocks.push(`Selected contract is a ${sel.type} but the signal side is ${st.side}`);
+  }
+  // 2. liquidity of the contract being bought
+  const ov=lastOptionVol;
+  if(!ov||ov.none||ov.error)blocks.push("Option volume unavailable — liquidity cannot be verified");
+  else if(ov.rel<0.6&&!(st&&st.failed.some(f=>/Option volume/.test(f))))blocks.push(`Option volume dry (${fmt(ov.rel,2)}× < 0.6×)`);
+  const tick=liveTickMap[sel.instrument_key];
+  if(tick&&tick.fresh&&tick.bid>0&&tick.ask>0){
+    const sp=(tick.ask-tick.bid)/((tick.ask+tick.bid)/2)*100;
+    if(g.maxSpread>0&&sp>g.maxSpread)blocks.push(`Bid-ask spread ${fmt(sp,1)}% is wider than ${g.maxSpread}%`);
+  }else warns.push("Bid/ask not available from the feed — spread not verified");
+  // 3. data freshness
+  if(Date.now()-lastAnalysisAt>90000)blocks.push("Signal analysis is older than 90 s — refresh data");
+  if(!lastIdxTick||Date.now()-lastIdxTick>30000)blocks.push("No live index tick in the last 30 s");
+  if(sel.quoteStatus&&sel.quoteStatus!=="LIVE_TICK")warns.push("Option quote is a REST snapshot, not a live tick");
+  // 4. time windows (expiry-day options lose premium fast after midday)
+  const expiryDay=sel.expiry===now.date,cut=expiryDay?Math.min(g.cutoff,g.expiryCutoff):g.cutoff;
+  if(now.min<g.start)blocks.push(`Before ${hhmm(g.start)} IST — opening volatility`);
+  if(now.min>=cut)blocks.push(`After ${hhmm(cut)} IST${expiryDay?" on expiry day (theta decay)":""} — no new entries`);
+  // 5. account discipline
+  const trades=paperRead(),today=istDayKey(Date.now()/1000);
+  if(trades.some(t=>t.status==="OPEN"))blocks.push("A paper trade is already open (one at a time)");
+  if(g.maxTrades>0&&trades.filter(t=>tradeDay(t.opened_at)===today).length>=g.maxTrades)blocks.push(`Max ${g.maxTrades} trades per day reached`);
+  const closedToday=trades.filter(t=>t.status==="CLOSED"&&tradeDay(t.exit_time)===today).sort((a,b)=>Date.parse(b.exit_time)-Date.parse(a.exit_time));
+  const pnlToday=closedToday.reduce((s,t)=>s+(Number(t.realized_pnl)||0),0);
+  if(g.dailyLoss>0&&pnlToday<=-g.dailyLoss)blocks.push(`Daily loss cap reached (${paperMoney(pnlToday)})`);
+  let streak=0;for(const t of closedToday){if(Number(t.realized_pnl)<0)streak++;else break}
+  if(g.maxLosses>0&&streak>=g.maxLosses)blocks.push(`${streak} consecutive losses — stop for the day`);
+  if(closedToday[0]&&g.cooldown>0){const mins=(Date.now()-Date.parse(closedToday[0].exit_time))/60000;if(mins<g.cooldown)blocks.push(`Cooldown: ${Math.ceil(g.cooldown-mins)} min left after the last exit`)}
+  // 6. reward:risk of the chosen exit
+  const p=paperRiskPlan();
+  if(p){const tg=({t1:p.t1,t2:p.t2,t3:p.t3})[$("paperExitTarget").value]||p.t1,risk=p.entry-p.sl,rr=risk>0?(tg-p.entry)/risk:0;if(rr<g.minRR)blocks.push(`Reward:risk ${rr.toFixed(2)}R is below the ${g.minRR}R minimum`)}
+  else blocks.push("Risk plan incomplete (calculate ATR / enter SL and target)");
+  return {ok:!blocks.length,blocks,warns,g};
+}
+function renderGuardStatus(){
+  const ul=$("guardStatus");if(!ul)return;
+  const c=paperGuardCheck();ul.innerHTML="";
+  const add=(cls,mark,text)=>{const li=document.createElement("li");li.className=cls;const b=document.createElement("b");b.textContent=mark;const s=document.createElement("span");s.textContent=" "+text;li.appendChild(b);li.appendChild(s);ul.appendChild(li)};
+  if(c.ok)add("gate-pass","✓","All entry rules satisfied");
+  c.blocks.forEach(b=>add("gate-fail","✗",b));
+  c.warns.forEach(w=>add("gate-warn","!",w));
+  const btn=$("paperBuyBtn");if(btn){const blocked=!c.ok&&c.g.enforce;btn.textContent=blocked?"ENTRY BLOCKED — see Trade guard":"BUY SELECTED OPTION (PAPER)";btn.classList.toggle("blocked",blocked)}
 }
 async function paperOpenTrade(){
   if(!paperSelected){toast("Option chain से CE/PE select करें.");return}
-  if(!$("paperEntry").value){const q=await paperFetchQuote(true);if(!q){toast("Fresh option quote unavailable. Entry manually भरें या बाद में retry करें.");return}}
-  const p=paperRiskPlan(),qty=paperNum("paperQty");
-  if(!p||!qty||!Number.isInteger(qty)||qty<1){toast("Entry/SL/target/quantity ठीक करें; ATR mode में पहले ATR calculate करें.");return}
-  if(p.sl>=p.entry||p.t1<=p.entry||(p.t2&&p.t2<=p.entry)||(p.t3&&p.t3<=p.entry)){toast("BUY trade में SL entry से नीचे और targets entry से ऊपर होने चाहिए.");return}
-  const trade={
-    id:(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random()),symbol:paperSelected.symbol,type:paperSelected.type,
-    strike:paperSelected.strike,expiry:paperSelected.expiry,instrument_key:paperSelected.instrument_key,
-    qty,entry:p.entry,sl:p.sl,t1:p.t1,t2:p.t2,t3:p.t3,atr:p.atr,risk_mode:p.mode,
-    exit_target:$("paperExitTarget").value,status:"OPEN",opened_at:new Date().toISOString(),
-    last_price:paperSelected.ltp||p.entry,last_quote_status:paperSelected.quoteStatus||"UNAVAILABLE",last_quote_time:paperSelected.quoteTimestamp||null,
-    exit_price:null,exit_time:null,exit_reason:null,realized_pnl:null
-  };
-  const trades=paperRead();
-  const capital=paperGetCapital();
-  const realized=trades.filter(t=>t.status==="CLOSED").reduce((sum,t)=>sum+(Number(t.realized_pnl)||0),0);
-  const committed=trades.filter(t=>t.status==="OPEN").reduce((sum,t)=>sum+(Number(t.entry)||0)*(Number(t.qty)||0),0);
-  const available=capital+realized-committed;
-  const required=p.entry*qty;
-  if(required>available){toast(`Insufficient paper cash. Required ${paperMoney(required)}, available ${paperMoney(Math.max(0,available))}.`);return}
-  trades.unshift(trade);paperSave(trades);paperRender();
-  toast(`Paper BUY opened: ${trade.symbol} ${trade.strike} ${trade.type}${marketOpen?"":" — market is closed, entry uses the last snapshot price"}`);
+  const btn=$("paperBuyBtn");btn.disabled=true;
+  try{
+    // The price in the form can be minutes old. Re-quote at click time and fill like a real order: at the ask, or last price + slippage.
+    const q=await paperFetchQuote(true);
+    if(!q){toast("Fresh option quote unavailable — trade not opened.");return}
+    const g0=guardRead(),fill=q.ask>0?q.ask:q.price*(1+g0.slip/100);
+    $("paperEntry").value=(Math.round(fill/0.05)*0.05).toFixed(2);
+    paperUpdatePreview();
+    const check=paperGuardCheck();let override=false;
+    if(!check.ok){
+      if(check.g.enforce){toast("Entry blocked: "+check.blocks[0]+(check.blocks.length>1?` (+${check.blocks.length-1} more)`:""));renderGuardStatus();return}
+      if(!confirm("Trade guard is OFF, but these rules fail:\n\n• "+check.blocks.join("\n• ")+"\n\nOpen the paper trade anyway?"))return;
+      override=true;
+    }
+    const p=paperRiskPlan(),qty=paperNum("paperQty");
+    if(!p||!qty||!Number.isInteger(qty)||qty<1){toast("Entry/SL/target/quantity ठीक करें; ATR mode में पहले ATR calculate करें.");return}
+    if(p.sl>=p.entry||p.t1<=p.entry||(p.t2&&p.t2<=p.entry)||(p.t3&&p.t3<=p.entry)){toast("BUY trade में SL entry से नीचे और targets entry से ऊपर होने चाहिए.");return}
+    const tick=liveTickMap[paperSelected.instrument_key],spread=tick&&tick.fresh&&tick.bid>0&&tick.ask>0?(tick.ask-tick.bid)/((tick.ask+tick.bid)/2)*100:null;
+    const st=lastGateState,ov=lastOptionVol&&!lastOptionVol.none&&!lastOptionVol.error?lastOptionVol:null,a=lastAnalysis;
+    const trade={
+      id:(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random()),symbol:paperSelected.symbol,type:paperSelected.type,
+      strike:paperSelected.strike,expiry:paperSelected.expiry,instrument_key:paperSelected.instrument_key,
+      qty,entry:p.entry,sl:p.sl,sl_initial:p.sl,t1:p.t1,t2:p.t2,t3:p.t3,atr:p.atr,risk_mode:p.mode,slip:g0.slip,override,mfe:0,mae:0,
+      exit_target:$("paperExitTarget").value,status:"OPEN",opened_at:new Date().toISOString(),
+      last_price:paperSelected.ltp||p.entry,last_quote_status:paperSelected.quoteStatus||"UNAVAILABLE",last_quote_time:paperSelected.quoteTimestamp||null,
+      exit_price:null,exit_time:null,exit_reason:null,realized_pnl:null,
+      // what the dashboard said at entry, so every loss can be traced to the rule it should have respected
+      ctx_signal:st?st.text:"—",ctx_score:st?st.dom:null,ctx_failed:st?st.failed.join("; "):"",ctx_opt_vol:ov?Number(ov.rel.toFixed(2)):null,
+      ctx_spread_pct:spread==null?null:Number(spread.toFixed(2)),ctx_index_entry:lastIdxLtp,ctx_index_exit:null,ctx_regime:a?a.regime:null,ctx_htf:a&&a.htf?a.htf.state:null
+    };
+    const trades=paperRead(),capital=paperGetCapital();
+    const realized=trades.filter(t=>t.status==="CLOSED").reduce((sum,t)=>sum+(Number(t.realized_pnl)||0),0);
+    const committed=trades.filter(t=>t.status==="OPEN").reduce((sum,t)=>sum+(Number(t.entry)||0)*(Number(t.qty)||0),0);
+    const available=capital+realized-committed,required=p.entry*qty;
+    if(required>available){toast(`Insufficient paper cash. Required ${paperMoney(required)}, available ${paperMoney(Math.max(0,available))}.`);return}
+    trades.unshift(trade);paperSave(trades);paperRender();
+    toast(`Paper BUY opened: ${trade.symbol} ${trade.strike} ${trade.type} @ ${paperMoney(trade.entry)}${override?" (guard OVERRIDDEN)":""}`);
+  }finally{btn.disabled=false;paperUpdatePreview()}
 }
 function paperRender(){
   const trades=paperRead(),open=trades.filter(t=>t.status==="OPEN"),closed=trades.filter(t=>t.status==="CLOSED");
@@ -784,10 +900,10 @@ function paperRender(){
     const action=document.createElement("td"),btn=document.createElement("button");btn.className="secondary";btn.textContent="Close";btn.addEventListener("click",()=>paperManualClose(t.id));action.appendChild(btn);tr.appendChild(action);openBody.appendChild(tr);
   });
   const hist=$("paperHistoryRows");hist.innerHTML="";
-  if(!closed.length)hist.innerHTML='<tr><td colspan="7" class="empty">No closed trades yet.</td></tr>';
+  if(!closed.length)hist.innerHTML='<tr><td colspan="8" class="empty">No closed trades yet.</td></tr>';
   closed.slice(0,100).forEach(t=>{
-    const tr=document.createElement("tr"),values=[`${paperTime(t.opened_at)} / ${paperTime(t.exit_time)}`,`${t.symbol} ${t.strike} ${t.type} · ${t.expiry}`,t.qty,paperMoney(t.entry),paperMoney(t.exit_price),t.exit_reason||"Manual",paperMoney(t.realized_pnl)];
-    values.forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===6)td.className=Number(t.realized_pnl)>=0?"pnl-positive":"pnl-negative";tr.appendChild(td)});hist.appendChild(tr);
+    const tr=document.createElement("tr"),values=[`${paperTime(t.opened_at)} / ${paperTime(t.exit_time)}`,`${t.symbol} ${t.strike} ${t.type} · ${t.expiry}`,t.qty,paperMoney(t.entry),paperMoney(t.exit_price),t.exit_reason||"Manual",paperMoney(t.realized_pnl),t.ctx_signal?`${t.ctx_signal} · score ${t.ctx_score??"—"} · opt vol ${t.ctx_opt_vol??"—"}×${t.override?" · OVERRIDE":""} · idx ${fmt(t.ctx_index_entry,0)}→${fmt(t.ctx_index_exit,0)}`:"—"];
+    values.forEach((v,i)=>{const td=document.createElement("td");td.textContent=v;if(i===6)td.className=Number(t.realized_pnl)>=0?"pnl-positive":"pnl-negative";if(i===7){td.className="paper-muted";td.style.textAlign="left";td.style.whiteSpace="normal";td.style.minWidth="220px"}tr.appendChild(td)});hist.appendChild(tr);
   });
 }
 async function paperManualClose(id){
@@ -802,17 +918,29 @@ async function paperManualClose(id){
 async function paperRefreshQuotes(){
   if(paperRefreshBusy)return;paperRefreshBusy=true;
   try{
-    const trades=paperRead(),open=trades.filter(t=>t.status==="OPEN");
+    const trades=paperRead(),open=trades.filter(t=>t.status==="OPEN"),g=guardRead(),now=istNowParts();
     for(const t of open){
       try{
         const q=await api(`/api/option-quote?instrument_key=${encodeURIComponent(t.instrument_key)}`);
         if(!(Number(q.ltp)>0)||q.status==="UNAVAILABLE") {t.last_quote_status="UNAVAILABLE";continue}
         const price=Number(q.ltp);t.last_price=price;t.last_quote_status=q.status;t.last_quote_time=q.timestamp;
-        // Simulated threshold exits only when the backend returned a usable quote.
-        if(price<=t.sl)paperCloseTrade(t,Math.min(price,t.sl),"Stop-loss hit (filled at observed quote)");
-        else {
-          const target=t.exit_target==="t1"?t.t1:t.exit_target==="t2"?t.t2:t.exit_target==="t3"?t.t3:null;
-          if(target&&price>=target)paperCloseTrade(t,target,`Target ${t.exit_target.toUpperCase()} touched (observed quote)`);
+        // excursion tracking: shows whether stops are too tight / targets too far
+        t.mfe=Math.max(t.mfe||0,price-t.entry);t.mae=Math.min(t.mae||0,price-t.entry);
+        // market-type exits (stop / time / square-off) are filled slightly worse than the observed quote
+        const slipExit=p=>Math.max(0.05,Number((p*(1-(t.slip??0.5)/100)).toFixed(2)));
+        const target=t.exit_target==="t1"?t.t1:t.exit_target==="t2"?t.t2:t.exit_target==="t3"?t.t3:null;
+        const slInit=t.sl_initial??t.sl,risk=t.entry-slInit;
+        if(price<=t.sl)paperCloseTrade(t,slipExit(price),t.sl>slInit?"Trailing stop hit (observed quote)":"Stop-loss hit (filled at observed quote)");
+        else if(target&&price>=target)paperCloseTrade(t,target,`Target ${t.exit_target.toUpperCase()} touched (observed quote)`);
+        else{
+          // trailing: breakeven after +1R; lock half of the T1 gain once T1 is touched (matters when exiting at T2/T3)
+          if(g.trail&&risk>0){
+            if(price>=t.t1)t.sl=Math.max(t.sl,t.entry+(t.t1-t.entry)*0.5);
+            else if(price>=t.entry+risk)t.sl=Math.max(t.sl,t.entry);
+          }
+          const elapsedMin=(Date.now()-Date.parse(t.opened_at))/60000,progress=risk>0?(price-t.entry)/risk:0;
+          if(g.timeStop>0&&elapsedMin>=g.timeStop&&progress<0.3)paperCloseTrade(t,slipExit(price),`Time stop (${g.timeStop} min, no progress)`);
+          else if(now.min>=15*60+20&&tradeDay(t.opened_at)===istDayKey(Date.now()/1000))paperCloseTrade(t,slipExit(price),"End-of-day square-off (15:20)");
         }
       }catch{t.last_quote_status="UNAVAILABLE"}
     }
@@ -821,7 +949,7 @@ async function paperRefreshQuotes(){
 }
 function paperExportCsv(){
   const trades=paperRead();if(!trades.length){toast("No paper trades to export.");return}
-  const cols=["symbol","type","strike","expiry","qty","entry","sl","t1","t2","t3","risk_mode","opened_at","status","last_price","exit_price","exit_time","exit_reason","realized_pnl"];
+  const cols=["symbol","type","strike","expiry","qty","entry","sl_initial","sl","t1","t2","t3","risk_mode","slip","opened_at","status","last_price","exit_price","exit_time","exit_reason","realized_pnl","mfe","mae","override","ctx_signal","ctx_score","ctx_failed","ctx_opt_vol","ctx_spread_pct","ctx_index_entry","ctx_index_exit","ctx_regime","ctx_htf"];
   const esc=v=>`"${String(v??"").replace(/"/g,'""')}"`;
   const csv=[cols.join(","),...trades.map(t=>cols.map(k=>esc(t[k])).join(","))].join("\r\n");
   const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="option-intelligence-paper-trades.csv";a.click();URL.revokeObjectURL(url);
@@ -846,4 +974,4 @@ $("paperRefreshBtn").addEventListener("click",paperRefreshQuotes);
 $("paperExportBtn").addEventListener("click",paperExportCsv);
 $("paperClearBtn").addEventListener("click",()=>{if(!confirm("Clear all CLOSED paper-trade history from this browser? Open trades will be kept."))return;paperSave(paperRead().filter(t=>t.status==="OPEN"));paperRender();});
 $("paperInitialCapital").value=String(paperGetCapital());
-paperUpdateMode();paperRender();setInterval(()=>{if(document.visibilityState==="visible")paperRefreshQuotes()},4000);
+guardInit();paperUpdateMode();paperRender();setInterval(()=>{if(document.visibilityState==="visible")paperRefreshQuotes()},4000);setInterval(()=>{if(document.visibilityState==="visible")renderGuardStatus()},3000);
