@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.7.0";
+const FRONTEND_VERSION="1.7.1";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -334,7 +334,7 @@ async function refreshSignalContext(){
   lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
   lastAnalysis=a;lastAnalysisAt=Date.now();
   $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime||"—"):"—";
-  $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";
+  $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
   $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
   renderSignal();
 }
@@ -361,7 +361,7 @@ async function refresh(){
     $("breakHigh").textContent=fmt(a.breakout_high);$("breakLow").textContent=fmt(a.breakdown_low);
     $("analysisNote").textContent=[a.note||a.message||"Analysis loaded.",a.score_basis].filter(Boolean).join(" · ");
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
-    $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";
+    $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
     lastAnalysis=a;lastAnalysisAt=Date.now();renderSignal();loadOptionVolume();
   }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
   finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}

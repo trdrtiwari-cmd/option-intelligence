@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.7.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.7.1">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -26,7 +26,7 @@
   <section class="stats">
     <div class="stat panel"><div class="label">Last price</div><div id="lastPrice" class="value">—</div><div id="priceChange" class="sub">Index / selected contract</div></div>
     <div class="stat panel"><div class="label">Directional score</div><div id="score" class="value">—</div><div class="sub">0–100 · not win probability</div></div>
-    <div class="stat panel"><div class="label">Market regime</div><div id="regime" class="value">—</div><div class="sub">Trend / sideways filter</div></div>
+    <div class="stat panel"><div class="label">Market regime</div><div id="regime" class="value">—</div><div class="sub" id="regimeSub">Trend / sideways filter</div></div>
     <div class="stat panel"><div class="label">Decision</div><div id="decision" class="value compact">WAIT</div><div id="decisionSub" class="sub">Bias only; confirm retest</div></div>
   </section>
 
@@ -209,5 +209,5 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/app.js?v=1.7.0"></script>
+<script src="/static/app.js?v=1.7.1"></script>
 </body></html>
