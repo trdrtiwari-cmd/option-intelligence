@@ -47,12 +47,13 @@ def normalize_iv(iv):
 
 
 def parse_feed_message(message):
-    """Return (current_ts, {instrument_key: {ltp, ltt, oi, iv, close_price}})."""
+    """Return (current_ts, {instrument_key: {ltp, ltt, oi, iv, close_price, bid, ask, bid_qty, ask_qty, vtt}})."""
     if not isinstance(message, dict):
         return None, {}
     out = {}
     for key, feed in (message.get("feeds") or {}).items():
         ltp = ltt = oi = iv = cp = None
+        bid = ask = bid_qty = ask_qty = vtt = None
         for block in _blocks(feed):
             ltpc = block.get("ltpc") if isinstance(block.get("ltpc"), dict) else {}
             if ltp is None:
@@ -66,7 +67,20 @@ def parse_feed_message(message):
             if iv is None:
                 greeks = block.get("optionGreeks") if isinstance(block.get("optionGreeks"), dict) else {}
                 iv = normalize_iv(block.get("iv") if block.get("iv") is not None else greeks.get("iv"))
+            # Best bid / ask (market depth level 1) and day volume - used for the spread and liquidity gates.
+            level = block.get("marketLevel") if isinstance(block.get("marketLevel"), dict) else {}
+            book = level.get("bidAskQuote")
+            if isinstance(book, list) and book and isinstance(book[0], dict) and (bid is None or ask is None):
+                top = book[0]
+                b, a = _num(top.get("bidP")), _num(top.get("askP"))
+                if b is not None and b > 0 and bid is None:
+                    bid, bid_qty = b, _num(top.get("bidQ"))
+                if a is not None and a > 0 and ask is None:
+                    ask, ask_qty = a, _num(top.get("askQ"))
+            if vtt is None:
+                vtt = _num(block.get("vtt"))
         if ltp is None and oi is None and iv is None:
             continue
-        out[key] = {"ltp": ltp, "ltt": ltt, "oi": oi, "iv": iv, "close_price": cp}
+        out[key] = {"ltp": ltp, "ltt": ltt, "oi": oi, "iv": iv, "close_price": cp,
+                    "bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "vtt": vtt}
     return message.get("currentTs") or message.get("current_ts"), out

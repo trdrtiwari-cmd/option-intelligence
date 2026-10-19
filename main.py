@@ -57,7 +57,7 @@ class BasicAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Authentication required"})
 
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -374,6 +374,13 @@ def _on_stream_message(message):
                     "oi": p["oi"] if p["oi"] is not None else old.get("oi"),
                     "iv": p["iv"] if p["iv"] is not None else old.get("iv"),
                     "close_price": p.get("close_price") if p.get("close_price") is not None else old.get("close_price"),
+                    # level-1 order book: keep the last seen values, but remember WHEN the book was last updated
+                    "bid": p.get("bid") if p.get("bid") is not None else old.get("bid"),
+                    "ask": p.get("ask") if p.get("ask") is not None else old.get("ask"),
+                    "bid_qty": p.get("bid_qty") if p.get("bid_qty") is not None else old.get("bid_qty"),
+                    "ask_qty": p.get("ask_qty") if p.get("ask_qty") is not None else old.get("ask_qty"),
+                    "vtt": p.get("vtt") if p.get("vtt") is not None else old.get("vtt"),
+                    "book_ts": now if (p.get("bid") is not None and p.get("ask") is not None) else old.get("book_ts"),
                     "last_trade_time": p["ltt"] or old.get("last_trade_time"),
                     "received_at": utc_now_iso(),
                     "received_ts": now,
@@ -795,8 +802,12 @@ async def option_quote(instrument_key: str):
     with STREAM_LOCK:
         view = _tick_view(key, now)
     if view and view["fresh"] and view.get("ltp") is not None:
+        book_age = round(now - view["book_ts"], 1) if view.get("book_ts") else None
+        book_ok = book_age is not None and book_age <= 15 and (view.get("bid") or 0) > 0 and (view.get("ask") or 0) > 0
         return {"status": "LIVE_TICK", "instrument_key": key, "ltp": view["ltp"], "timestamp": view.get("received_at"),
-                "age_seconds": view["age_seconds"], "source": "Upstox V3 WebSocket"}
+                "age_seconds": view["age_seconds"], "source": "Upstox V3 WebSocket",
+                "bid": view.get("bid") if book_ok else None, "ask": view.get("ask") if book_ok else None,
+                "book_age_seconds": book_age}
     data = await upstox_get(f"{API_BASE}/v2/market-quote/ltp", {"instrument_key": key})
     quote_data = (data or {}).get("data") or {}
     quote = quote_data.get(key)
@@ -829,7 +840,7 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5):
                 raise
             logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
     return analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval,
-                   volume_source=result.get("volume_source"))
+                   volume_source=result.get("volume_source"))  # the still-forming candle is ignored inside analyze()
 
 
 @app.get("/health")

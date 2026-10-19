@@ -128,3 +128,27 @@ Indices have no volume, so the app borrows the volume of the front-month index f
 - **Faster, lighter refreshes:** the 10-day candle history is cached for 10 min on the server; only the small intraday call is repeated (cache 3 s, was 8 s). Option chain cache 4 s (was 12 s).
 - **Polling intervals:** derivatives 6 s (was 15 s), option-chain table 10 s (was 30 s), paper-trade quotes 4 s (was 15 s). Near-ATM chain rows overlay live WebSocket LTP / OI.
 - The data source is unchanged: Upstox is already a real-time source; no switch to Yahoo / NSE (both are delayed or blocked from cloud hosts).
+
+## v1.7.0 — loss-analysis fixes (paper trades were entered against failing gates)
+
+**Root causes found in v1.6.0**
+
+1. The paper-trade **BUY button never looked at the signal gates**. A "WATCH PE" with two failing hard gates could still be bought.
+2. The **option-volume ratio included the still-forming candle** (partial volume), so liquid contracts could read "dry", and a single block-trade bar could distort the baseline.
+3. The **entry price was whatever LTP was fetched when the contract was selected** (could be minutes old), so stop and targets were measured from a stale entry.
+4. Signals were calculated on the **forming candle**, so they could appear and vanish within one bar.
+5. Premium-ATR stops could be ~30% of premium (ATR included the forming bar and overnight gaps), while the chosen target was about 1R, so reward:risk was ≈ 1:1 and needed a >50% win rate before costs.
+6. No daily loss cap, no cooldown, no expiry-day cut-off, no trailing stop, no time stop.
+
+**What changed**
+
+- **Trade guard (paper trading panel)** — entries are blocked unless: signal is CONFIRMED on the same side as the contract; option volume is known and not dry; bid-ask spread within limit (when the feed provides it); data fresh (analysis ≤ 90 s, index tick ≤ 30 s); inside the time window (expiry-day cut-off 13:30 by default); one open trade at a time; max trades/day; daily loss cap; stop after N consecutive losses; cooldown; minimum reward:risk. Every rule is editable; "Enforce" can be switched off (then a confirmation lists the failing rules and the trade is tagged OVERRIDE).
+- **Fresh fill at click time**: the app re-quotes and fills at the ask (or last price + slippage). Stop / time-stop / square-off exits are filled with slippage too.
+- **Max stop = % of premium** (default 20%); targets keep the same R multiples. Premium ATR uses closed bars of the current session only.
+- **Trailing stop** (breakeven at +1R, half of T1 gain locked after T1), **time stop** (default 30 min without 0.3R progress), **15:20 square-off**.
+- **Closed candles only** for the confirmation engine (no repainting) and for the option-volume ratio; baseline uses today's session and caps block-trade spikes.
+- **New hard gates**: *Not chasing* (≤ 1 ATR beyond EMA 9) and *Pullback-and-resume trigger* (price retested EMA 9 within 6 bars and the last closed bar resumes the trend). RSI overextension limits tightened to 70 / 30.
+- **Feed**: level-1 bid/ask and day volume are parsed from the V3 `full` feed (`marketLevel.bidAskQuote`, `vtt`). If your account's feed does not include them, the spread rule shows a warning instead of blocking.
+- **Learning loop**: each paper trade stores the signal, score, failing gates, option volume ratio, spread, index price at entry/exit, regime, higher-timeframe state, MFE/MAE and override flag; all are in the CSV export and an "Entry context" column in the history table.
+
+These rules reduce low-quality entries; they do not make the strategy profitable. Collect 30–50 paper trades with the CSV before trusting any setting, and change one rule at a time.

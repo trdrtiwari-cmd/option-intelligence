@@ -47,6 +47,37 @@ def normalize_candles(rows):
     return out
 
 
+def drop_forming(cs, interval, now=None):
+    """Ignore the candle that is still being formed. Its partial range / volume makes every indicator
+    (and every gate) flicker intra-bar and produces signals that vanish by the bar close ("repainting").
+    Returns (candles, dropped?)."""
+    if not cs or not interval:
+        return cs, False
+    now = now or datetime.now(timezone.utc)
+    if cs[-1]["_dt"] + timedelta(minutes=interval) > now:
+        return cs[:-1], True
+    return cs, False
+
+
+def pullback_resume(cs, e9, atr, side, lookback=6, tol=0.25):
+    """Entry trigger: price recently pulled back to (within `tol` ATR of) EMA 9 and the last CLOSED bar
+    resumes the trend (closes in the trade direction and beyond EMA 9). Returns (ok, detail)."""
+    n = len(cs)
+    if n < lookback + 2 or not atr:
+        return False, "n/a"
+    last = cs[-1]
+    window = range(n - 1 - lookback, n - 1)
+    if side == "PE":
+        touched = any(cs[i]["high"] >= e9[i] - tol * atr for i in window)
+        resumed = last["close"] < last["open"] and last["close"] < e9[-1]
+    else:
+        touched = any(cs[i]["low"] <= e9[i] + tol * atr for i in window)
+        resumed = last["close"] > last["open"] and last["close"] > e9[-1]
+    detail = (f"{'pullback to EMA 9 seen' if touched else f'no pullback to EMA 9 in last {lookback} bars (extended move)'}"
+              f" · last closed bar {'resumes' if resumed else 'does NOT resume'} the trend")
+    return touched and resumed, detail
+
+
 def ema(values, n):
     if not values:
         return []
@@ -201,9 +232,9 @@ def bollinger(closes, n=20, k=2.0):
     return pct_b, bw, rank <= 0.2
 
 
-def trend_state(raw_candles):
-    """Higher-timeframe read: BULL / BEAR / MIXED from EMA 9/21 + Supertrend."""
-    cs = normalize_candles(raw_candles)
+def trend_state(raw_candles, interval=None, now=None):
+    """Higher-timeframe read: BULL / BEAR / MIXED from EMA 9/21 + Supertrend (closed candles only)."""
+    cs, _ = drop_forming(normalize_candles(raw_candles), interval, now)
     if len(cs) < 40:
         return None
     closes = [c["close"] for c in cs]
@@ -235,8 +266,8 @@ def merge_volume(index_raw, fut_raw, min_match=0.5):
     return out
 
 
-def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None):
-    cs = normalize_candles(raw_candles)
+def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None):
+    cs, forming_dropped = drop_forming(normalize_candles(raw_candles), interval, now)
     if len(cs) < 40:
         return {"status": "insufficient_data", "message": "Not enough candles to calculate indicators.",
                 "score": 0, "bull_score": 0, "bear_score": 0, "decision": "WAIT", "signal": "WAIT", "regime": "NEUTRAL",
@@ -254,7 +285,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     adx = adx_wilder(cs)
     st = supertrend(cs)
     bb = bollinger(closes)
-    htf = trend_state(htf_raw) if htf_raw else None
+    htf = trend_state(htf_raw, htf_interval, now) if htf_raw else None
 
     has_volume = sum(volumes[-21:]) > 0
     prior = volumes[-21:-1]
@@ -313,9 +344,16 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
             {"label": "Higher timeframe agrees" if htf else "Higher timeframe (unavailable)", "pass": (by_key["htf"][want] if htf else True),
              "detail": by_key["htf"]["detail"]},
             {"label": "Not sideways", "pass": not sideways, "detail": regime},
-            {"label": "Momentum not overextended (RSI < 80 / > 20)", "pass": rsi is None or (rsi < 80 if side == "CE" else rsi > 20),
+            {"label": "Momentum not overextended (RSI < 70 / > 30)", "pass": rsi is None or (rsi < 70 if side == "CE" else rsi > 30),
              "detail": f"RSI {rsi:.1f}" if rsi is not None else "n/a"},
         ]
+        if atr:
+            # Anti-chase gates: most of the day's losses came from entering after the move had already happened.
+            stretch = (last - e9[-1]) if side == "CE" else (e9[-1] - last)
+            gates.append({"label": "Not chasing (≤ 1 ATR beyond EMA 9)", "pass": stretch <= 1.0 * atr,
+                          "detail": f"{stretch:+.1f} pts beyond EMA 9 ({stretch / atr:+.2f} ATR)"})
+            ok_pb, pb_detail = pullback_resume(cs, e9, atr, side)
+            gates.append({"label": "Pullback-and-resume trigger (retest holds)", "pass": ok_pb, "detail": pb_detail})
     failed = [g for g in gates if not g["pass"]]
     if side and not failed:
         signal, decision = f"CONFIRMED_{side}", f"CONFIRMED {side} SETUP — enter only on a retest that holds"
@@ -340,6 +378,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "htf": htf,
         "relative_volume": round(rel_vol, 2) if has_volume else None,
         "last_close": last, "breakout_high": recent_high, "breakdown_low": recent_low,
+        "forming_candle_ignored": forming_dropped, "last_closed_bar": cs[-1]["time"],
         "score_basis": f"Scored on {available} of 100 weight" + ("" if has_volume else " (no volume in feed)") + (f" · volume from {volume_source}" if volume_source else "") + ("" if htf else " (no higher-timeframe data)"),
-        "note": "Bias only, not a guarantee. A confirmed signal still needs a retest, room to the next S/R level, and your own risk limits.",
+        "note": "Bias only, not a guarantee. Calculated on CLOSED candles only. A confirmed signal still needs room to the next S/R level and your own risk limits.",
     }
