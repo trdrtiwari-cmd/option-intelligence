@@ -17,10 +17,13 @@ MAX_BUFFER = 4 * 1024 * 1024
 class FutureScanner:
     """Feed it gzip bytes as they arrive; `.rows` collects every FUT record."""
 
-    def __init__(self):
+    def __init__(self, eq_symbols=()):
         self._d = zlib.decompressobj(16 + zlib.MAX_WBITS)
         self._buf = b""
         self.rows = []
+        self.indices = []      # NSE_INDEX rows (sector index keys)
+        self.equities = []     # NSE_EQ rows, only for `eq_symbols` (offline fallback for the breadth list)
+        self._eq_symbols = set(eq_symbols or ())
         self.scanned = 0
         self.overflowed = False
 
@@ -38,6 +41,21 @@ class FutureScanner:
                     continue
                 if row.get("instrument_type") == "FUT":
                     self.rows.append(row)
+            elif b'"INDEX"' in raw:
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if row.get("instrument_type") == "INDEX" and row.get("segment") == "NSE_INDEX":
+                    self.indices.append(row)
+            elif self._eq_symbols and b'"EQ"' in raw:
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if (row.get("instrument_type") == "EQ" and row.get("segment") == "NSE_EQ"
+                        and row.get("trading_symbol") in self._eq_symbols):
+                    self.equities.append(row)
         self._buf = self._buf[last:]
         if len(self._buf) > MAX_BUFFER:  # not flat records (format changed) - stop growing
             self._buf = b""

@@ -14,6 +14,22 @@ A FastAPI website for NIFTY 50 / BANK NIFTY research and paper-trading. It uses 
 - Optional authenticated TradingView webhook receiver. This receives Pine alerts only; it does not inject external API values into Pine Script or place orders.
 - No broker orders, no automatic execution.
 
+## Data Check dashboard (v1.8) — open `/dashboard`
+
+A separate page that turns five market checks into one signal table plus detail cards:
+
+| Data check | How the signal is decided |
+|---|---|
+| Advance / decline ratio | Stocks up vs down from the selected universe (Nifty 50 / 100 / 500 / Bank). Ratio ≥ 1.5 bullish, ≤ 0.67 bearish. |
+| Sector heat map | 12 major sector indices, % change vs previous close. Bullish/bearish when ≥ 2/3 of sectors are green/red. |
+| Option premium % change | ATM CE and PE % change vs previous close. CE up & PE down by ≥ 3 points = bullish (reverse = bearish). Both up = volatility spike, both down = premium decay (caution). |
+| Option premium graph | CE and PE premium candles for the session. Each leg is RISING / FALLING / FLAT (close vs 9-EMA and 3 bars ago). |
+| Index price Up / Mid / Down | Five ±1 checks: opening range, session average price, previous close, day open, previous-day high/low. Score ≥ +3 UP, ≤ −3 DOWN, else MID. |
+
+An overall confluence line counts the bullish / bearish checks. All thresholds are in `THRESHOLDS` at the top of `dashboard_data.py`.
+Endpoints: `GET /dashboard`, `GET /api/dashboard/summary`, `GET /api/dashboard/premium-graph`.
+Breadth uses NSE's own constituent CSV (so index rebalances are picked up automatically); if it cannot be downloaded, Nifty 50 falls back to a built-in list that may be outdated. Unit tests: `python tests/test_dashboard_data.py`.
+
 ## Data semantics — read carefully
 
 1. **WebSocket live:** per-contract LTP/OI/IV only for contracts subscribed around the underlying's ATM strike. The default subscription is limited to the 12 nearest strikes (calls and puts) to keep it bounded.
@@ -152,3 +168,7 @@ Indices have no volume, so the app borrows the volume of the front-month index f
 - **Learning loop**: each paper trade stores the signal, score, failing gates, option volume ratio, spread, index price at entry/exit, regime, higher-timeframe state, MFE/MAE and override flag; all are in the CSV export and an "Entry context" column in the history table.
 
 These rules reduce low-quality entries; they do not make the strategy profitable. Collect 30–50 paper trades with the CSV before trusting any setting, and change one rule at a time.
+
+## v1.7.1 — regime now detects ranges
+
+The old regime said "BEARISH" whenever bear score > bull score and ADX ≥ 15. ADX (and Supertrend / higher timeframe / session VWAP) lag badly after a sharp move, so a market that had been flat for 25+ bars still read "bearish". The regime is now **SIDEWAYS** when ADX < 15 **or** the last 20 closed bars show range behaviour: Kaufman efficiency ratio < 0.30 with the whole range ≤ 6 ATR, or ≥ 3 EMA 9/21 crosses. The card shows the range, its size in ATR, the efficiency and the prior bias; the "Not sideways" hard gate uses it, so entries stay blocked until a close outside the range. Thresholds (20 bars, 0.30, 6 ATR, 3 crosses) are starting values — tune them on your own paper-trade CSV.

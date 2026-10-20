@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from indicators import IST, analyze, merge_volume, normalize_candles, parse_time
 from instruments import FutureScanner, pick_front_future
 from feed_parser import parse_feed_message
+import dashboard_data as dd
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_TITLE = "Option Intelligence"
@@ -57,7 +58,7 @@ class BasicAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Authentication required"})
 
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -84,7 +85,7 @@ CHAIN_CACHE = {}
 CONTRACT_CACHE = {}
 CANDLE_CACHE = {}
 TOKEN_CHECK = {"at": 0.0, "token": None, "state": "UNKNOWN"}
-FUTURES = {"day": None, "rows": [], "failed_at": 0.0, "error": None}
+FUTURES = {"day": None, "rows": [], "idx": [], "eq": [], "failed_at": 0.0, "error": None}
 FUT_LOCK = asyncio.Lock()
 INSTRUMENT_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 CHAIN_CACHE_TTL = 4
@@ -240,7 +241,7 @@ async def fetch_candles(key, interval, days):
 # ---------------------------------------------------------------- index-futures volume proxy
 async def load_futures_rows():
     """Stream Upstox's public NSE instrument file and keep only FUT records (low memory)."""
-    scanner = FutureScanner()
+    scanner = FutureScanner(eq_symbols=dd.FALLBACK_NIFTY50)
     async with httpx.AsyncClient(timeout=90.0, follow_redirects=True) as client:
         async with client.stream("GET", INSTRUMENT_URL) as resp:
             if resp.status_code != 200:
@@ -250,22 +251,28 @@ async def load_futures_rows():
                 await asyncio.sleep(0)  # keep the event loop responsive
     if not scanner.rows:
         raise RuntimeError("no futures records found" + (" (unexpected file format)" if scanner.overflowed else ""))
-    logger.info("Instrument file scanned: %d records, %d futures", scanner.scanned, len(scanner.rows))
-    return scanner.rows
+    logger.info("Instrument file scanned: %d records, %d futures, %d indices", scanner.scanned, len(scanner.rows), len(scanner.indices))
+    return scanner
 
 
-async def get_front_future(sym):
-    """Front-month index future for volume. Downloaded at most once per IST day (retry after 15 min on failure)."""
+async def ensure_instruments():
+    """Instrument file (futures + index rows), downloaded at most once per IST day (retry after 15 min on failure)."""
     today = ist_now().date()
     async with FUT_LOCK:
         if FUTURES["day"] != today and time.time() - FUTURES["failed_at"] > 900:
             try:
-                FUTURES.update(rows=await load_futures_rows(), day=today, error=None)
+                sc = await load_futures_rows()
+                FUTURES.update(rows=sc.rows, idx=sc.indices, eq=sc.equities, day=today, error=None)
             except Exception as exc:
                 FUTURES.update(failed_at=time.time(), error=str(exc)[:200])
-                logger.warning("Futures volume unavailable: %s", exc)
-        rows = FUTURES["rows"]
-    return pick_front_future(rows, sym, INDEX_KEYS[sym], today) if rows else None
+                logger.warning("Instrument file unavailable: %s", exc)
+        return FUTURES["rows"]
+
+
+async def get_front_future(sym):
+    """Front-month index future for volume."""
+    rows = await ensure_instruments()
+    return pick_front_future(rows, sym, INDEX_KEYS[sym], ist_now().date()) if rows else None
 
 
 # ---------------------------------------------------------------- contracts / expiries / chain
@@ -841,6 +848,234 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5):
             logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
     return analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval,
                    volume_source=result.get("volume_source"))  # the still-forming candle is ignored inside analyze()
+
+
+
+# ================================================================ Data Check dashboard (v1.8)
+QUOTE_CACHE = {}
+QUOTE_TTL = 5
+UNIVERSE_CACHE = {}
+UNIVERSE_TTL = 12 * 3600
+CSV_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+               "Accept": "text/csv,*/*;q=0.8", "Referer": "https://www.niftyindices.com/"}
+
+
+@app.get("/dashboard")
+async def dashboard_page():
+    return FileResponse(BASE_DIR / "static" / "dashboard.html", headers={"Cache-Control": "no-cache"})
+
+
+async def _fetch_constituents(universe):
+    """Constituent list from NSE's own CSV (always current after a rebalance). Nifty 50 falls back to a built-in list."""
+    hit = UNIVERSE_CACHE.get(universe)
+    if hit and time.time() - hit["at"] < UNIVERSE_TTL:
+        return hit
+    cfg = dd.UNIVERSES[universe]
+    errors = []
+    for base in ("https://nsearchives.nseindia.com/content/indices/", "https://www.niftyindices.com/IndexConstituent/"):
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=CSV_HEADERS) as client:
+                r = await client.get(base + cfg["file"])
+            if r.status_code == 200:
+                rows = dd.parse_constituents_csv(r.text)
+                if len(rows) >= 10:
+                    entry = {"at": time.time(), "rows": rows, "source": "NSE constituent list (live CSV)"}
+                    UNIVERSE_CACHE[universe] = entry
+                    return entry
+                errors.append(f"{base}: only {len(rows)} rows parsed")
+            else:
+                errors.append(f"{base}: HTTP {r.status_code}")
+        except Exception as exc:
+            errors.append(f"{base}: {str(exc)[:80]}")
+    if hit:  # stale list is better than none
+        return {**hit, "source": hit["source"] + " (stale - refresh failed)"}
+    if universe == "nifty50":
+        await ensure_instruments()
+        by_sym = {r.get("trading_symbol"): r for r in FUTURES["eq"]}
+        rows = [{"symbol": sym, "name": sym, "industry": "", "isin": "", "key": by_sym[sym]["instrument_key"]}
+                for sym in dd.FALLBACK_NIFTY50 if sym in by_sym]
+        if len(rows) >= 30:
+            entry = {"at": time.time() - UNIVERSE_TTL + 900, "rows": rows,
+                     "source": f"Built-in fallback list ({len(rows)} of 50 resolved) - may be outdated"}
+            UNIVERSE_CACHE[universe] = entry
+            return entry
+    raise HTTPException(status_code=502, detail="Could not load " + cfg["label"] + " constituents: " + " | ".join(errors))
+
+
+async def _quotes(keys, ttl=QUOTE_TTL):
+    """Upstox full quotes for many instruments (chunks of 100, run concurrently). Cached for a few seconds."""
+    keys = list(dict.fromkeys(k for k in keys if k))
+    ck = hash(tuple(keys))
+    hit = QUOTE_CACHE.get(ck)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    chunks = [keys[i:i + 100] for i in range(0, len(keys), 100)]
+    sem = asyncio.Semaphore(4)
+
+    async def one(chunk):
+        async with sem:
+            return await upstox_get(f"{API_BASE}/v2/market-quote/quotes", {"instrument_key": ",".join(chunk)})
+
+    parts = await asyncio.gather(*(one(c) for c in chunks), return_exceptions=True)
+    out, first_err = {}, None
+    for p in parts:
+        if isinstance(p, Exception):
+            first_err = first_err or p
+            continue
+        out.update(dd.quotes_by_key(p))
+    if not out and first_err:
+        raise first_err
+    QUOTE_CACHE[ck] = (time.time(), out)
+    if len(QUOTE_CACHE) > 30:
+        for old in sorted(QUOTE_CACHE, key=lambda k: QUOTE_CACHE[k][0])[:10]:
+            QUOTE_CACHE.pop(old, None)
+    return out
+
+
+def _err_text(exc):
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        hint = detail.get("hint")
+        return hint or json.dumps(detail.get("upstox_error", detail))[:200]
+    return str(detail or exc)[:200]
+
+
+async def _dash_breadth(universe):
+    uni = await _fetch_constituents(universe)
+    quotes = await _quotes([c["key"] for c in uni["rows"]])
+    return dd.advance_decline(uni["rows"], quotes, dd.UNIVERSES[universe]["label"], uni["source"])
+
+
+async def _dash_sectors():
+    await ensure_instruments()
+    keys, missing = dd.resolve_sector_keys(FUTURES["idx"]) if FUTURES["idx"] else ({}, [])
+    if not keys:  # instrument file unavailable: try the usual names; wrong ones just come back empty
+        keys, missing = dict(dd.SECTOR_FALLBACK_KEYS), []
+    quotes = await _quotes(list(keys.values()))
+    return dd.sector_heatmap(keys, quotes, missing)
+
+
+def _fresh_option_ticks():
+    now = time.time()
+    out = {}
+    with STREAM_LOCK:
+        for key, t in LIVE_TICKS.items():
+            if now - t.get("received_ts", 0) <= FRESH_SECONDS and t.get("ltp"):
+                out[key] = (t["ltp"], t.get("close_price"))
+    return out
+
+
+async def _dash_option_premium(sym, expiry_req):
+    expiry = await resolve_expiry(sym, expiry_req)
+    entry = await get_chain(sym, expiry)
+    rows = entry["rows"]
+    if not rows:
+        return dd.unavailable(f"No option-chain rows for {expiry}")
+    out = dd.build_option_premium(rows, rows[0].get("underlying_spot_price"), _fresh_option_ticks(), steps=2)
+    out["expiry"] = expiry
+    out["snapshot_age_seconds"] = round(time.time() - entry["cached_at"], 1)
+    return out
+
+
+async def _dash_zone(sym):
+    result = await candles(symbol=sym, interval=5, days=6)
+    cs = normalize_candles(result["candles"])
+    price = None
+    with STREAM_LOCK:
+        view = _tick_view(INDEX_KEYS[sym], time.time())
+    if view and view["fresh"] and view.get("ltp") is not None:
+        price = view["ltp"]
+    else:
+        try:
+            q = await index_ltp(symbol=sym)
+            price = q.get("ltp")
+        except Exception:
+            price = None
+    label = "Nifty" if sym == "NIFTY" else "Bank Nifty"
+    return dd.index_zone(cs, price, label)
+
+
+@app.get("/api/dashboard/summary")
+async def dashboard_summary(symbol: str = "NIFTY", universe: str = "", expiry: str = "current_week", interval: int = 5, offset: int = 0):
+    sym = symbol.upper()
+    _check_graph_args(sym, interval, offset)
+    universe = universe or ("niftybank" if sym == "BANKNIFTY" else "nifty50")
+    if universe not in dd.UNIVERSES:
+        raise HTTPException(status_code=400, detail="universe must be one of: " + ", ".join(dd.UNIVERSES))
+    if expiry not in RELATIVE_EXPIRIES and not DATE_RE.fullmatch(expiry):
+        raise HTTPException(status_code=400, detail="Invalid expiry.")
+
+    async def safe(coro):
+        try:
+            return await coro
+        except HTTPException as exc:
+            return dd.unavailable(_err_text(exc))
+        except Exception as exc:
+            logger.warning("Dashboard block failed: %s", exc)
+            return dd.unavailable(f"{type(exc).__name__}: {str(exc)[:150]}")
+
+    breadth, sectors, premium, zone, graph = await asyncio.gather(
+        safe(_dash_breadth(universe)), safe(_dash_sectors()), safe(_dash_option_premium(sym, expiry)), safe(_dash_zone(sym)),
+        safe(_dash_graph(sym, expiry, interval, offset)))
+    blocks = {"breadth": breadth, "sectors": sectors, "premium": premium, "zone": zone, "graph": graph}
+    sigs = {k: v.get("signal") for k, v in blocks.items()}
+    market = market_status()
+    return {"symbol": sym, "universe": universe, "generated_at": utc_now_iso(), "market": market, **blocks,
+            "overall": dd.overall_bias(sigs), "final": dd.final_signal(blocks, market["open"]),
+            "note": "Signals are rule-based reads of live data, not trade instructions. Quotes are REST snapshots (a few seconds old)."
+                    + ("" if market["open"] else " Market is closed: values show the last session.")}
+
+
+async def _dash_graph(sym, expiry, interval, offset):
+    """CE and PE premium candles for the latest session. offset = strikes away from ATM (+ = OTM, - = ITM)."""
+    exp = await resolve_expiry(sym, expiry)
+    entry = await get_chain(sym, exp)
+    rows = sorted((r for r in entry["rows"] if r.get("strike_price") is not None), key=lambda r: float(r["strike_price"]))
+    if not rows:
+        return dd.unavailable(f"No option-chain rows for {exp}")
+    spot = float(rows[0].get("underlying_spot_price") or 0)
+    atm_i = min(range(len(rows)), key=lambda i: abs(float(rows[i]["strike_price"]) - spot))
+    ce_row = rows[min(len(rows) - 1, max(0, atm_i + offset))]
+    pe_row = rows[min(len(rows) - 1, max(0, atm_i - offset))]
+    ce_key = (ce_row.get("call_options") or {}).get("instrument_key")
+    pe_key = (pe_row.get("put_options") or {}).get("instrument_key")
+    if not ce_key or not pe_key:
+        return dd.unavailable("Selected strike has no CE/PE instrument key")
+
+    async def get(key):
+        try:
+            return normalize_candles(await fetch_candles(key, interval, 4))
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+            return []
+
+    ce_c, pe_c = await asyncio.gather(get(ce_key), get(pe_key))
+    out = dd.build_premium_graph(
+        ce_c, pe_c,
+        {"strike": float(ce_row["strike_price"]), "key": ce_key, "prev_close": ((ce_row.get("call_options") or {}).get("market_data") or {}).get("close_price")},
+        {"strike": float(pe_row["strike_price"]), "key": pe_key, "prev_close": ((pe_row.get("put_options") or {}).get("market_data") or {}).get("close_price")})
+    out.update({"expiry": exp, "interval": interval, "offset": offset, "atm_strike": float(rows[atm_i]["strike_price"])})
+    return out
+
+
+def _check_graph_args(sym, interval, offset):
+    if sym not in INDEX_KEYS:
+        raise HTTPException(status_code=400, detail="Unknown index symbol.")
+    if interval not in (1, 3, 5, 15):
+        raise HTTPException(status_code=400, detail="interval must be 1, 3, 5 or 15.")
+    if not -3 <= offset <= 3:
+        raise HTTPException(status_code=400, detail="offset must be between -3 and 3.")
+
+
+@app.get("/api/dashboard/premium-graph")
+async def dashboard_premium_graph(symbol: str = "NIFTY", expiry: str = "current_week", interval: int = 5, offset: int = 0):
+    sym = symbol.upper()
+    _check_graph_args(sym, interval, offset)
+    try:
+        return await _dash_graph(sym, expiry, interval, offset)
+    except HTTPException as exc:
+        return dd.unavailable(_err_text(exc))
 
 
 @app.get("/health")
