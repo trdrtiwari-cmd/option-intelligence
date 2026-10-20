@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Option Intelligence</title>
+  <link rel="stylesheet" href="/static/style.css?v=1.7.0">
+  <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
+  <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
+</head>
+<body>
+<header class="topbar">
+  <div><div class="brand">OPTION <span>INTELLIGENCE</span></div><div class="sub">Intraday options research terminal</div></div>
+  <div class="top-actions"><span id="marketStatus" class="pill muted">Market status…</span><span id="apiStatus" class="pill muted">Checking API…</span><a class="button secondary" href="/api/login" id="connectBtn">Connect Upstox</a></div>
+</header>
+<main>
+  <div id="staleBanner" class="notice warning stale-banner" hidden></div>
+  <section class="toolbar panel">
+    <label>Underlying<select id="symbol"><option value="NIFTY">NIFTY 50</option><option value="BANKNIFTY">BANK NIFTY</option></select></label>
+    <label>Timeframe<select id="interval"><option value="5">5 minutes</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></label>
+    <label>Chart view<select id="chartView"><option value="index">Underlying index</option><option value="option">Selected option premium</option></select></label>
+    <label>Auto refresh<select id="refreshEvery"><option value="5">5 s</option><option value="10" selected>10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></label>
+    <button id="refreshBtn">Refresh data</button>
+    <span id="lastUpdated" class="sub">Waiting for data</span>
+  </section>
+
+  <section class="stats">
+    <div class="stat panel"><div class="label">Last price</div><div id="lastPrice" class="value">—</div><div id="priceChange" class="sub">Index / selected contract</div></div>
+    <div class="stat panel"><div class="label">Directional score</div><div id="score" class="value">—</div><div class="sub">0–100 · not win probability</div></div>
+    <div class="stat panel"><div class="label">Market regime</div><div id="regime" class="value">—</div><div class="sub">Trend / sideways filter</div></div>
+    <div class="stat panel"><div class="label">Decision</div><div id="decision" class="value compact">WAIT</div><div id="decisionSub" class="sub">Bias only; confirm retest</div></div>
+  </section>
+
+  <section class="layout">
+    <div class="panel chart-panel">
+      <div class="section-head chart-section-head"><div><h2>Market candles</h2><p id="chartSubtitle">NIFTY 50 · 5-minute OHLC</p><div class="chart-line-legend"><span class="ema9-legend">━ EMA 9</span><span class="ema21-legend">━ EMA 21</span><span class="vwap-legend">━ VWAP</span><span class="green">● Bull candle</span><span class="red">● Bear candle</span></div></div><div class="chart-actions"><button type="button" class="secondary" id="chartFit" title="Zoom back to the latest sessions">⤢ Reset view</button><button type="button" class="secondary" id="chartMinimize">− Minimize chart</button><button type="button" id="chartMaximize">⛶ Maximize</button></div></div>
+      <div class="chart-tools" aria-label="Chart overlays">
+        <label><input type="checkbox" id="showEma" checked> EMA 9/21</label>
+        <label><input type="checkbox" id="showVWAP" checked> VWAP</label>
+        <label><input type="checkbox" id="showSR" checked> Auto S/R</label>
+      </div>
+      <div id="chart" class="chart"></div>
+      <div class="chart-indicators" id="chartIndicators">
+        <div><span>RSI (14)</span><b id="chartRsi">—</b></div>
+        <div><span>ATR (14)</span><b id="chartAtr">—</b></div>
+        <div><span>Support</span><b id="chartSupport">—</b></div>
+        <div><span>Resistance</span><b id="chartResistance">—</b></div>
+        <div><span>Volume</span><b id="chartVolume">—</b></div>
+      </div>
+      <div class="chart-note" id="chartNote">Historical candles. Select an option contract to view its premium candles.</div>
+    </div>
+    <aside class="panel intelligence">
+      <div class="section-head"><div><h2>Market intelligence</h2><p>Indicators calculated from available candles</p></div></div>
+      <div class="metric-list">
+        <div><span>EMA 9</span><b id="ema9">—</b></div><div><span>EMA 21</span><b id="ema21">—</b></div>
+        <div><span id="vwapLabel">VWAP (session)</span><b id="vwap">—</b></div><div><span>RSI (14)</span><b id="rsi">—</b></div>
+        <div><span>ATR (14)</span><b id="atr">—</b></div><div><span>Relative volume</span><b id="relVol">—</b></div>
+        <div><span>Breakout reference</span><b id="breakHigh">—</b></div><div><span>Breakdown reference</span><b id="breakLow">—</b></div>
+      </div>
+      <div class="notice" id="analysisNote">Load data to calculate analysis.</div>
+    </aside>
+  </section>
+
+  <section class="panel sr-panel" id="srPanel">
+    <div class="section-head"><div><h2>Support &amp; resistance map</h2><p id="srSubtitle">Nearest three zones each side</p></div>
+      <label class="sr-tf">Levels from<select id="srTf"><option value="chart">Chart timeframe</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></label></div>
+    <div class="table-wrap sr-wrap"><table class="sr-table"><thead><tr><th>Level</th><th>Price</th><th>Zone</th><th>Distance (pts)</th><th>Distance %</th><th>ATR ×</th><th>Touches</th><th>Strength</th><th>Basis</th></tr></thead><tbody id="srRows"><tr><td colspan="9" class="empty">Waiting for candles…</td></tr></tbody></table></div>
+    <div class="sr-posbar" aria-hidden="true"><span>S1</span><div class="sr-track"><i id="srPosFill"></i></div><span>R1</span></div>
+    <div class="sub small" id="srSummary"></div>
+    <div class="notice" id="srNote">Levels are zones, not exact prices.</div>
+  </section>
+
+  <section class="panel confirm-panel" id="confirmPanel">
+    <div class="section-head"><div><h2>Signal confirmation</h2><p>Weighted checks + hard gates · a setup is CONFIRMED only when every gate passes</p></div><span id="confirmBadge" class="pill muted">WAIT</span></div>
+    <div class="confirm-grid">
+      <div>
+        <div class="signal-box"><div class="signal-label">Final signal</div><div id="finalSignal" class="signal-value">WAIT</div><div id="finalSignalSub" class="sub">Waiting for enough candles.</div></div>
+        <h3 class="mini-h">Hard gates</h3><ul id="gateList" class="gate-list"></ul>
+      </div>
+      <div>
+        <h3 class="mini-h">Weighted checks</h3>
+        <div class="table-wrap sr-wrap"><table class="sr-table"><thead><tr><th>Check</th><th>Weight</th><th>Reading</th><th>Detail</th></tr></thead><tbody id="checkRows"></tbody></table></div>
+        <div class="metric-list" id="extraInd"></div>
+      </div>
+    </div>
+    <div class="notice warning">Confirmation lowers false signals; it cannot remove losses or guarantee profit. Validate the rules on your own history (TradingView strategy tester) and keep per-trade risk small.</div>
+  </section>
+
+  <section class="panel derivatives-panel">
+    <div class="section-head"><div><h2>Live derivatives intelligence</h2><p>Upstox V3 WebSocket ticks + same-expiry option-chain snapshot</p></div><span id="streamStatus" class="pill muted">CONNECTING</span></div>
+    <div class="derivatives-grid">
+      <div class="deriv-card"><span>Aggregate PCR</span><strong id="livePCR">UNAVAILABLE</strong><small id="pcrStatus">Waiting for option chain</small></div>
+      <div class="deriv-card"><span>Total Call OI</span><strong id="liveCallOI">UNAVAILABLE</strong><small id="oiStatus">REST snapshot pending</small></div>
+      <div class="deriv-card"><span>Total Put OI</span><strong id="livePutOI">UNAVAILABLE</strong><small>Same selected expiry</small></div>
+      <div class="deriv-card"><span>Average chain IV</span><strong id="liveIV">UNAVAILABLE</strong><small id="ivStatus">REST snapshot pending</small></div>
+      <div class="deriv-card"><span>WebSocket tick age</span><strong id="tickAge">—</strong><small id="streamError">No tick received yet</small></div>
+    </div>
+    <div class="sub small" id="derivTimestamp">Data timestamp: unavailable</div>
+    <div class="table-wrap"><table><thead><tr><th>Live contract</th><th>Type</th><th>Strike</th><th>LTP</th><th>OI</th><th>IV %</th><th>Tick age</th></tr></thead><tbody id="liveTicksRows"><tr><td colspan="7" class="empty">Waiting for fresh WebSocket ticks. Values older than 15 seconds are marked stale.</td></tr></tbody></table></div>
+    <div class="notice warning">PCR and total OI are REST option-chain snapshots refreshed periodically; only rows marked fresh are confirmed WebSocket ticks. Missing/stale fields remain UNAVAILABLE.</div>
+  </section>
+
+  <section class="layout lower">
+    <div class="panel">
+      <div class="section-head"><div><h2>Option chain</h2><p>Current weekly expiry where available; monthly/manual expiry can also be selected</p></div></div>
+      <div class="option-controls"><label>Expiry<select id="expiry"><option value="">Click Load expiries</option></select></label><button id="loadContracts">Load expiries</button><button id="loadChain" class="secondary">Load chain</button><label>Option type<select id="optionTypeFilter"><option value="BOTH">CE + PE</option><option value="CE">Call (CE)</option><option value="PE">Put (PE)</option></select></label><label>Moneyness<select id="moneynessFilter"><option value="NEAR" selected>Near ATM (±10 strikes)</option><option value="ALL">All strikes</option><option value="ITM">ITM</option><option value="ATM">ATM</option><option value="OTM">OTM</option></select></label></div>
+      <div class="table-wrap"><table><thead><tr><th>Strike</th><th>Call LTP</th><th>Call OI</th><th>PCR</th><th>Put OI</th><th>Put LTP</th><th>Select CE</th><th>Select PE</th></tr></thead><tbody id="chainRows"><tr><td colspan="8" class="empty">Load option chain to view available data.</td></tr></tbody></table></div>
+      <div class="sub small" id="chainStatus">Data is shown only when returned by Upstox.</div>
+    </div>
+    <div class="panel">
+      <div class="section-head"><div><h2>Trade decision engine</h2><p>Buy-only framework · no automatic orders</p></div></div>
+      <div class="signal-box"><div class="signal-label">Suggested bias</div><div id="bigDecision" class="signal-value">WAIT</div><div id="signalExplanation" class="sub">Awaiting sufficient market data.</div></div>
+      <div class="metric-list">
+        <div><span>Bull score</span><b id="bullScore">—</b></div><div><span>Bear score</span><b id="bearScore">—</b></div>
+        <div><span>Option premium entry</span><b>Manual confirmation</b></div><div><span>Stop-loss / targets</span><b>Set before entry</b></div>
+      </div>
+      <div class="notice warning">This version does not calculate a validated option-premium entry/SL/target and does not place orders. Do not trade from a directional score alone.</div>
+    </div>
+  </section>
+
+  <section class="panel paper-panel" id="paperTrading">
+    <div class="section-head">
+      <div><h2>Paper Trading Dashboard</h2><p>Virtual trades only · no real orders · history stored in this browser</p></div>
+      <span class="pill muted" id="paperStatus">PAPER MODE</span>
+    </div>
+    <div class="paper-form-card paper-capital-card">
+      <h3>Paper account settings</h3>
+      <div class="capital-controls">
+        <label>Initial paper capital (₹)<input id="paperInitialCapital" type="number" min="1" step="1000" value="100000" inputmode="decimal"></label>
+        <button type="button" id="paperSaveCapital">Save starting balance</button>
+        <span id="paperCapitalNote" class="sub small">Starting balance is saved in this browser only.</span>
+      </div>
+    </div>
+    <div class="paper-stats">
+      <div class="deriv-card"><span>Initial capital</span><strong id="paperInitialDisplay">₹1,00,000.00</strong></div>
+      <div class="deriv-card"><span>Available cash</span><strong id="paperAvailableCash">₹1,00,000.00</strong></div>
+      <div class="deriv-card"><span>Account equity (MTM)</span><strong id="paperEquity">₹1,00,000.00</strong></div>
+      <div class="deriv-card"><span>Open trades</span><strong id="paperOpenCount">0</strong></div>
+      <div class="deriv-card"><span>Open P&amp;L (MTM)</span><strong id="paperOpenPnl">₹0.00</strong></div>
+      <div class="deriv-card"><span>Realized P&amp;L</span><strong id="paperRealizedPnl">₹0.00</strong></div>
+      <div class="deriv-card"><span>Closed trades</span><strong id="paperClosedCount">0</strong></div>
+    </div>
+    <div class="paper-grid">
+      <div class="paper-form-card">
+        <h3>1. Select option &amp; configure risk</h3>
+        <div id="paperSelectedContract" class="selected-contract">Select CE or PE using the option-chain table above.</div>
+        <div class="paper-form">
+          <label>Risk mode<select id="paperRiskMode"><option value="atr">ATR-based (option premium)</option><option value="manual">Manual SL / targets</option></select></label>
+          <label>Quantity (units<span id="paperLotHint"></span>)<input id="paperQty" type="number" min="1" step="1" value="1"></label>
+          <label>Entry price<input id="paperEntry" type="number" min="0.05" step="0.05" placeholder="Auto from selected option LTP"></label>
+          <label>Exit target<select id="paperExitTarget"><option value="t1">Auto-exit at Target 1</option><option value="t2">Auto-exit at Target 2</option><option value="t3">Auto-exit at Target 3</option><option value="manual">Manual exit only</option></select></label>
+        </div>
+        <div id="paperAtrSettings" class="paper-form">
+          <label>ATR timeframe<select id="paperAtrInterval"><option value="1">1 minute</option><option value="3">3 minutes</option><option value="5" selected>5 minutes</option><option value="15">15 minutes</option></select></label>
+          <label>SL ATR multiplier<input id="paperSlMult" type="number" min="0.1" step="0.1" value="1"></label>
+          <label>Target 1 ATR multiplier<input id="paperT1Mult" type="number" min="0.1" step="0.1" value="1.5"></label>
+          <label>Target 2 ATR multiplier<input id="paperT2Mult" type="number" min="0.1" step="0.1" value="2.5"></label>
+          <label>Target 3 ATR multiplier<input id="paperT3Mult" type="number" min="0.1" step="0.1" value="3.5"></label>
+          <div class="atr-readout"><span>Option premium ATR</span><strong id="paperAtrValue">UNAVAILABLE</strong><button type="button" class="secondary" id="paperCalcAtr">Calculate ATR</button></div>
+        </div>
+        <div id="paperManualSettings" class="paper-form" hidden>
+          <label>Stop-loss price<input id="paperManualSl" type="number" min="0.01" step="0.05" placeholder="e.g. 110"></label>
+          <label>Target 1 price<input id="paperManualT1" type="number" min="0.01" step="0.05" placeholder="e.g. 130"></label>
+          <label>Target 2 price<input id="paperManualT2" type="number" min="0.01" step="0.05" placeholder="Optional"></label>
+          <label>Target 3 price<input id="paperManualT3" type="number" min="0.01" step="0.05" placeholder="Optional"></label>
+        </div>
+        <details class="guard-card" open>
+          <summary>Trade guard — entry rules that block bad trades</summary>
+          <div class="paper-form guard-form">
+            <label class="check"><input type="checkbox" id="guardEnforce" checked> Enforce (block entries that break a rule)</label>
+            <label class="check"><input type="checkbox" id="guardTrail" checked> Trail stop (breakeven at +1R)</label>
+            <label>Max trades / day<input id="guardMaxTrades" type="number" min="0" step="1"></label>
+            <label>Daily loss cap (₹)<input id="guardDailyLoss" type="number" min="0" step="500"></label>
+            <label>Stop after N losses in a row<input id="guardMaxLosses" type="number" min="0" step="1"></label>
+            <label>Cooldown after exit (min)<input id="guardCooldown" type="number" min="0" step="1"></label>
+            <label>Max stop (% of premium)<input id="guardMaxSlPct" type="number" min="0" step="1"></label>
+            <label>Max bid-ask spread (%)<input id="guardMaxSpread" type="number" min="0" step="0.5"></label>
+            <label>Min reward : risk (R)<input id="guardMinRR" type="number" min="0" step="0.1"></label>
+            <label>Slippage per side (%)<input id="guardSlip" type="number" min="0" step="0.1"></label>
+            <label>Time stop (min, 0 = off)<input id="guardTimeStop" type="number" min="0" step="5"></label>
+            <label>No entries before (IST)<input id="guardStart" type="time"></label>
+            <label>No entries after (IST)<input id="guardCutoff" type="time"></label>
+            <label>No entries after, expiry day<input id="guardExpiryCutoff" type="time"></label>
+          </div>
+          <ul id="guardStatus" class="gate-list"></ul>
+        </details>
+        <button id="paperBuyBtn" class="paper-buy" disabled>BUY SELECTED OPTION (PAPER)</button>
+        <div class="notice warning">ATR is calculated from the selected option premium candles, not index ATR. If premium candles or a valid quote are unavailable, ATR mode will not create a trade. Manual entry is allowed, but P&amp;L remains unavailable until a fresh quote is received.</div>
+      </div>
+      <div class="paper-form-card">
+        <h3>2. Risk preview</h3>
+        <div class="metric-list">
+          <div><span>Selected contract</span><b id="paperPreviewContract">—</b></div>
+          <div><span>Entry</span><b id="paperPreviewEntry">—</b></div>
+          <div><span>Stop-loss</span><b id="paperPreviewSl">—</b></div>
+          <div><span>Target 1</span><b id="paperPreviewT1">—</b></div>
+          <div><span>Target 2</span><b id="paperPreviewT2">—</b></div>
+          <div><span>Target 3</span><b id="paperPreviewT3">—</b></div>
+          <div><span>Risk per unit</span><b id="paperPreviewRisk">—</b></div>
+          <div><span>Potential T1 reward/risk</span><b id="paperPreviewRR">—</b></div>
+        </div>
+        <div id="paperRiskNote" class="notice">Select an option contract to preview risk.</div>
+      </div>
+    </div>
+    <div class="section-head paper-table-head"><div><h3>Open paper positions</h3><p>Quotes refresh periodically; automatic SL/target exits use observed quotes, not guaranteed fills.</p></div><button class="secondary" id="paperRefreshBtn">Refresh quotes</button></div>
+    <div class="table-wrap"><table><thead><tr><th>Opened</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Last LTP</th><th>SL</th><th>Chosen target</th><th>Unrealized P&amp;L</th><th>Status</th><th>Action</th></tr></thead><tbody id="paperOpenRows"><tr><td colspan="10" class="empty">No open paper trades.</td></tr></tbody></table></div>
+    <div class="section-head paper-table-head"><div><h3>Paper trade history</h3><p>Browser-local history; clearing browser storage or using another device will not sync trades.</p></div><div class="paper-actions"><button class="secondary" id="paperExportBtn">Export CSV</button><button class="secondary" id="paperClearBtn">Clear closed history</button></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Opened / Closed</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Realized P&amp;L</th><th>Entry context</th></tr></thead><tbody id="paperHistoryRows"><tr><td colspan="8" class="empty">No closed trades yet.</td></tr></tbody></table></div>
+  </section>
+  <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
+</main>
+<div id="toast" class="toast" role="status"></div>
+<script src="/static/app.js?v=1.7.0"></script>
+</body></html>
