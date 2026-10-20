@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Data Check Dashboard · Option Intelligence</title>
+  <link rel="stylesheet" href="/static/style.css?v=1.8.0">
+  <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
+  <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
+</head>
+<body>
+<header class="topbar">
+  <div><div class="brand">OPTION <span>INTELLIGENCE</span></div><div class="sub">Data Check dashboard · market confirmation signals</div></div>
+  <div class="top-actions"><span id="marketStatus" class="pill muted">Market status…</span><a class="button secondary" href="/">← Main terminal</a></div>
+</header>
+<main>
+  <section class="toolbar panel">
+    <label>Underlying<select id="symbol"><option value="NIFTY">NIFTY 50</option><option value="BANKNIFTY">BANK NIFTY</option></select></label>
+    <label>Breadth universe<select id="universe"><option value="nifty50">Nifty 50</option><option value="nifty100">Nifty 100</option><option value="nifty500">Nifty 500</option><option value="niftybank">Nifty Bank (12)</option></select></label>
+    <label>Option expiry<select id="expiry"><option value="current_week">Current week</option><option value="next_week">Next week</option><option value="current_month">Current month</option></select></label>
+    <label>Premium strike<select id="offset"><option value="0">ATM</option><option value="1">1 step OTM</option><option value="2">2 steps OTM</option><option value="-1">1 step ITM</option><option value="-2">2 steps ITM</option></select></label>
+    <label>Graph timeframe<select id="interval"><option value="5">5 minutes</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="15">15 minutes</option></select></label>
+    <label>Auto refresh<select id="refreshEvery"><option value="5">5 s</option><option value="10" selected>10 s</option><option value="15">15 s</option><option value="30">30 s</option></select></label>
+    <button id="refreshBtn">Refresh now</button>
+    <span id="lastUpdated" class="sub">Waiting for data</span>
+  </section>
+
+  <section class="panel dc-final" id="finalBox">
+    <div class="dc-final-top">
+      <div><div class="signal-label">Final signal</div><div id="finalAction" class="dc-final-action">—</div><div id="finalLevel" class="sub">Loading…</div></div>
+      <div class="dc-score"><div class="sub">Weighted score (−100 bearish … +100 bullish)</div><div class="dc-score-track"><i id="finalMarker"></i></div><div id="finalScore" class="dc-score-num">—</div></div>
+      <div class="dc-counts"><span class="dc-chip BULLISH" id="cntBull">0 bullish</span><span class="dc-chip BEARISH" id="cntBear">0 bearish</span><span class="dc-chip NEUTRAL" id="cntNeu">0 neutral</span></div>
+    </div>
+    <p id="finalHeadline" class="dc-headline"></p>
+    <div class="dc-final-grid">
+      <div><h4>Why (checks that agree)</h4><ul id="finalReasons" class="dc-ul"></ul></div>
+      <div><h4>Against / conflicts</h4><ul id="finalAgainst" class="dc-ul"></ul></div>
+      <div><h4>Cautions</h4><ul id="finalCautions" class="dc-ul"></ul></div>
+      <div><h4>What to do</h4><ul id="finalPlan" class="dc-ul"></ul></div>
+      <div><h4>What would invalidate it</h4><ul id="finalInval" class="dc-ul"></ul></div>
+      <div><h4>Score breakdown</h4><div id="finalContrib" class="dc-contrib"></div></div>
+    </div>
+    <div class="sub small" id="finalDisclaimer"></div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head"><div><h2>Data check → signals</h2><p>Each row feeds the final signal above · click a row to jump to its detail card</p></div></div>
+    <div class="table-wrap dc-table-wrap"><table class="dc-table"><thead><tr><th>#</th><th>Data check</th><th>Reading</th><th>Signal</th></tr></thead>
+      <tbody id="summaryRows"></tbody></table></div>
+  </section>
+
+  <section class="dc-grid">
+    <div class="panel" id="card-breadth">
+      <div class="section-head"><div><h2>1 · Advance / decline ratio</h2><p id="breadthSub">—</p></div><span id="breadthChip" class="dc-chip">—</span></div>
+      <div id="breadthBody" class="empty">Loading…</div>
+    </div>
+    <div class="panel" id="card-sectors">
+      <div class="section-head"><div><h2>2 · Sector heat map</h2><p id="sectorSub">Major sector indices · % change vs previous close</p></div><span id="sectorChip" class="dc-chip">—</span></div>
+      <div id="sectorBody" class="empty">Loading…</div>
+    </div>
+    <div class="panel" id="card-premium">
+      <div class="section-head"><div><h2>3 · Option premium % change</h2><p id="premiumSub">—</p></div><span id="premiumChip" class="dc-chip">—</span></div>
+      <div id="premiumBody" class="empty">Loading…</div>
+    </div>
+    <div class="panel" id="card-zone">
+      <div class="section-head"><div><h2 id="zoneTitle">5 · Nifty price zone</h2><p id="zoneSub">—</p></div><span id="zoneChip" class="dc-chip">—</span></div>
+      <div id="zoneBody" class="empty">Loading…</div>
+    </div>
+  </section>
+
+  <section class="panel" id="card-graph">
+    <div class="section-head"><div><h2>4 · Option premium graph — calls vs puts</h2><p id="graphSub">—</p></div>
+      <div class="chart-actions"><label class="dc-inline">View<select id="graphMode"><option value="premium">Premium (₹)</option><option value="pct">% from open</option></select></label><span id="graphChip" class="dc-chip">—</span></div></div>
+    <div class="chart-line-legend"><span class="green" id="legendCe">━ CE</span><span class="red" id="legendPe">━ PE</span></div>
+    <div id="graph" class="chart"></div>
+    <div class="chart-note" id="graphNote">—</div>
+  </section>
+
+  <div class="notice warning" id="dcNote">Signals are rule-based reads of live data, not trade instructions.</div>
+  <footer><span id="buildInfo">dashboard v1.8.0</span> · Research only · Not investment advice</footer>
+</main>
+<div id="toast" class="toast" role="status"></div>
+<script src="/static/dashboard.js?v=1.8.0"></script>
+</body></html>
