@@ -333,7 +333,7 @@ async function refreshSignalContext(){
   const [c,a]=await Promise.all([api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),api(`/api/analysis?symbol=${sym}&interval=${interval}`)]);
   lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
   lastAnalysis=a;lastAnalysisAt=Date.now();
-  $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime||"—"):"—";
+  $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
   $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
   $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
   renderSignal();
@@ -352,7 +352,7 @@ async function refresh(){
     if(lastVolumeSource)$("chartNote").textContent+=` Volume and VWAP weights come from ${lastVolumeSource} (the index itself has no volume).`;
     $("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()}`;
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";
-    $("regime").textContent=a.status==="ok"?(a.regime||"—"):"—";
+    $("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
     $("decision").textContent=a.decision||"WAIT";
     $("bigDecision").textContent=a.decision||"WAIT";$("decisionSub").textContent=marketOpen?"Bias only; confirm retest":"Last session data (market closed) — bias only";
     $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
