@@ -266,11 +266,80 @@ def merge_volume(index_raw, fut_raw, min_match=0.5):
     return out
 
 
+def efficiency_ratio(vals):
+    """Kaufman efficiency ratio: 1 = straight line, 0 = pure chop."""
+    path = sum(abs(vals[i] - vals[i - 1]) for i in range(1, len(vals)))
+    return abs(vals[-1] - vals[0]) / path if path else 0.0
+
+
+def count_ema_crosses(e9, e21, atr, n=20, dead_band=0.1):
+    """EMA 9/21 crossovers in the last n bars. Wiggles inside +/- dead_band*ATR of the other EMA are
+    ignored, so a single clean trend change is not counted as several crosses."""
+    band = dead_band * (atr or 0)
+    state, crosses = 0, 0
+    for a, b in zip(e9[-n:], e21[-n:]):
+        d = a - b
+        cur = 1 if d > band else -1 if d < -band else 0
+        if cur == 0:
+            continue
+        if state and cur != state:
+            crosses += 1
+        state = cur
+    return crosses
+
+
+def directional_structure(cs, e9, e21, atr, vwap, n=20):
+    """Is price actually TRENDING right now (even if ADX / Supertrend / score still lag)?
+    Returns {direction: +1 / -1 / 0, evidence: [...], broke_out: +1 / -1 / 0, ...}.
+    Core requirement: EMA 9 vs 21 and the close are on the same side (EMA 21).
+    Then it needs ONE hard proof (a still-running directional move, or a close beyond the prior range)
+    plus at least one more confirmation (swing structure, or VWAP + EMA 21 slope)."""
+    out = {"direction": 0, "evidence": [], "broke_out": 0, "eff_short": None, "net_atr": None}
+    if len(cs) < n + 4 or not atr:
+        return out
+    closes = [c["close"] for c in cs]
+    highs = [c["high"] for c in cs]
+    lows = [c["low"] for c in cs]
+    last = closes[-1]
+    eff20, eff8 = efficiency_ratio(closes[-(n + 1):]), efficiency_ratio(closes[-9:])
+    net20, net8 = closes[-1] - closes[-(n + 1)], closes[-1] - closes[-9]
+    ref = cs[-(n + 3):-3]                       # the range as it stood before the last 3 bars
+    ref_hi, ref_lo = max(c["high"] for c in ref), min(c["low"] for c in ref)
+    recent = closes[-3:]
+    broke = 1 if (max(recent) > ref_hi and last > e21[-1]) else -1 if (min(recent) < ref_lo and last < e21[-1]) else 0
+    out.update(broke_out=broke, eff_short=round(eff8, 2), net_atr=round(net20 / atr, 1))
+    for d, word in ((1, "up"), (-1, "down")):
+        if not (d * (e9[-1] - e21[-1]) > 0 and d * (last - e21[-1]) > 0):
+            continue
+        ev, hard = [], False
+        slow = eff20 >= 0.35 and d * net20 >= 2.0 * atr and d * net8 >= 1.0 * atr     # sustained move that is still running
+        fast = eff8 >= 0.55 and d * net8 >= 2.5 * atr                                 # sharp burst (bigger than a range leg)
+        if slow or fast:
+            span, bars = (net20, n) if slow else (net8, 8)
+            ev.append(f"{abs(span) / atr:.1f} ATR move {word} in {bars} bars (efficiency {eff20 if slow else eff8:.2f})")
+            hard = True
+        if broke == d:
+            ev.append(f"closed {'above' if d == 1 else 'below'} the prior {n}-bar range")
+            hard = True
+        if d == 1:
+            struct = min(lows[-5:]) > min(lows[-10:-5]) and max(highs[-5:]) > max(highs[-10:-5])
+        else:
+            struct = max(highs[-5:]) < max(highs[-10:-5]) and min(lows[-5:]) < min(lows[-10:-5])
+        if struct:
+            ev.append("higher highs / higher lows" if d == 1 else "lower highs / lower lows")
+        if d * (last - vwap) > 0 and d * (e21[-1] - e21[-4]) > 0.1 * atr:
+            ev.append(f"{'above' if d == 1 else 'below'} VWAP with EMA 21 sloping {word}")
+        if hard and len(ev) >= 2:
+            out["direction"], out["evidence"] = d, ev
+            break
+    return out
+
+
 def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None):
     cs, forming_dropped = drop_forming(normalize_candles(raw_candles), interval, now)
     if len(cs) < 40:
         return {"status": "insufficient_data", "message": "Not enough candles to calculate indicators.",
-                "score": 0, "bull_score": 0, "bear_score": 0, "decision": "WAIT", "signal": "WAIT", "regime": "NEUTRAL",
+                "score": 0, "bull_score": 0, "bear_score": 0, "decision": "WAIT", "signal": "WAIT", "regime": "NEUTRAL", "regime_label": "NEUTRAL", "regime_phase": None,
                 "checks": [], "gates": [], "symbol": symbol, "interval": interval}
     closes = [c["close"] for c in cs]
     highs = [c["high"] for c in cs]
@@ -326,29 +395,41 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     bear = round(sum(c["weight"] for c in checks if c["ok"] and c["bear"]) / available * 100)
 
     separation = abs(e9[-1] - e21[-1]) / last * 100 if last else 0
-    # ---- range / consolidation detector (ADX alone lags: it stays high for ages after a sharp move) ----
+    # ---- regime: trend vs range. ADX / Supertrend / score all LAG, so price structure decides first ----
     N = 20
     chop = {"efficiency": None, "range_atr": None, "crosses": 0, "range_low": None, "range_high": None}
     if len(cs) > N + 1 and atr:
         w = closes[-(N + 1):]
-        path = sum(abs(w[i] - w[i - 1]) for i in range(1, len(w)))
-        chop["efficiency"] = abs(w[-1] - w[0]) / path if path else 0.0      # Kaufman efficiency ratio: 1 = straight line, 0 = pure chop
+        chop["efficiency"] = efficiency_ratio(w)                                 # Kaufman efficiency ratio
         chop["range_low"], chop["range_high"] = min(lows[-N:]), max(highs[-N:])
         chop["range_atr"] = (chop["range_high"] - chop["range_low"]) / atr
-        diffs = [a - b for a, b in zip(e9[-N:], e21[-N:])]
-        chop["crosses"] = sum(1 for i in range(1, len(diffs)) if diffs[i] * diffs[i - 1] < 0)
-    in_range = (chop["efficiency"] is not None and chop["efficiency"] < 0.30 and chop["range_atr"] <= 6.0) or chop["crosses"] >= 3
+        chop["crosses"] = count_ema_crosses(e9, e21, atr, N)                     # with a dead band, no noise crosses
+    ds = directional_structure(cs, e9, e21, atr, vwap, N)
+    trend_dir = ds["direction"]
+    eff = chop["efficiency"]
+    # crossing EMAs alone no longer means "range": the market must also lack directional progress
+    in_range = trend_dir == 0 and eff is not None and ((eff < 0.30 and chop["range_atr"] <= 6.0) or (chop["crosses"] >= 3 and eff < 0.40))
     adx_flat = adx[0] < 15 if adx is not None else (separation < 0.025 and abs(last - vwap) / last * 100 < 0.08)
-    sideways = bool(adx_flat or in_range)
+    sideways = bool(trend_dir == 0 and (adx_flat or in_range))
     prior_bias = "BULLISH" if bull > bear else "BEARISH" if bear > bull else "NEUTRAL"
-    regime = "SIDEWAYS" if sideways else prior_bias
-    if in_range:
-        regime_note = (f"Range {chop['range_low']:,.0f}–{chop['range_high']:,.0f} ({chop['range_atr']:.1f} ATR) over last {N} bars · "
-                       f"efficiency {chop['efficiency']:.2f} · {chop['crosses']} EMA crosses · trend bias still {prior_bias.lower()} "
-                       f"(ADX lags). Wait for a close outside the range.")
-    elif adx_flat:
-        regime_note = f"ADX below 15 — no trend strength · bias {prior_bias.lower()}"
+    regime_phase = None
+    if trend_dir:
+        regime = "BULLISH" if trend_dir == 1 else "BEARISH"
+        regime_label = "UPTREND" if trend_dir == 1 else "DOWNTREND"
+        regime_phase = ("BREAKOUT" if trend_dir == 1 else "BREAKDOWN") if ds["broke_out"] == trend_dir else "TREND"
+        regime_note = f"{regime_label} ({regime_phase.lower()}): " + " · ".join(ds["evidence"])
+        if adx is not None and adx[0] < 20:
+            regime_note += f" · ADX {adx[0]:.0f} still lagging, so entry gates may stay closed"
+    elif sideways:
+        regime, regime_label = "SIDEWAYS", "SIDEWAYS"
+        if in_range:
+            regime_note = (f"Range {chop['range_low']:,.0f}–{chop['range_high']:,.0f} ({chop['range_atr']:.1f} ATR) over last {N} bars · "
+                           f"efficiency {chop['efficiency']:.2f} · {chop['crosses']} EMA crosses · no directional break yet. "
+                           f"Wait for a close outside the range.")
+        else:
+            regime_note = f"ADX below 15 and no directional break — no trend strength · bias {prior_bias.lower()}"
     else:
+        regime, regime_label = prior_bias, prior_bias
         regime_note = "Trending: price is making directional progress"
 
     squeeze = bool(bb and bb[2])
@@ -386,9 +467,10 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     return {
         "status": "ok", "symbol": symbol, "interval": interval,
         "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
-        "regime": regime, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
+        "regime": regime, "regime_label": regime_label, "regime_phase": regime_phase, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
+        "trend_evidence": ds["evidence"],
         "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
-                  "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"]}, "checks": checks, "gates": gates,
+                  "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"], "broke_out": ds["broke_out"]}, "checks": checks, "gates": gates,
         "rsi": round(rsi, 2) if rsi is not None else None,
         "ema9": round(e9[-1], 2), "ema21": round(e21[-1], 2),
         "vwap_approx": round(vwap, 2), "vwap_source": vwap_source + (f" ({volume_source})" if volume_source and vwap_source == "VOLUME_VWAP" else ""),

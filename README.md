@@ -172,3 +172,16 @@ These rules reduce low-quality entries; they do not make the strategy profitable
 ## v1.7.1 — regime now detects ranges
 
 The old regime said "BEARISH" whenever bear score > bull score and ADX ≥ 15. ADX (and Supertrend / higher timeframe / session VWAP) lag badly after a sharp move, so a market that had been flat for 25+ bars still read "bearish". The regime is now **SIDEWAYS** when ADX < 15 **or** the last 20 closed bars show range behaviour: Kaufman efficiency ratio < 0.30 with the whole range ≤ 6 ATR, or ≥ 3 EMA 9/21 crosses. The card shows the range, its size in ATR, the efficiency and the prior bias; the "Not sideways" hard gate uses it, so entries stay blocked until a close outside the range. Thresholds (20 bars, 0.30, 6 ATR, 3 crosses) are starting values — tune them on your own paper-trade CSV.
+
+## v1.8.2 — regime no longer calls a downtrend "sideways"
+
+**Bug:** the v1.7.1 range rule treated **≥ 3 EMA 9/21 crosses** (or ADX < 15) as SIDEWAYS regardless of what price was doing. After a spike and rounded top the EMAs cross several times, then price breaks down — the card kept saying SIDEWAYS ("7.0 ATR · efficiency 0.49 · 3 EMA crosses") while NIFTY was making new lows. ADX lags, so it could not rescue the call.
+
+**Fix (`indicators.py`):**
+- New `directional_structure()` runs *before* the range test. It needs the EMA 9/21 + close on the same side of EMA 21, one hard proof (a sustained move that is still running — efficiency ≥ 0.35 and ≥ 2 ATR over 20 bars with ≥ 1 ATR in the last 8 — or a sharp ≥ 2.5 ATR burst in 8 bars, or a close beyond the prior 20-bar range) **plus** one more confirmation (lower highs/lows or higher highs/lows, or price on the right side of VWAP with EMA 21 sloping the same way).
+- If that is met the regime is **DOWNTREND / UPTREND** (phase `BREAKDOWN` / `BREAKOUT` / `TREND`) and the "Not sideways" gate passes. The card lists the evidence and warns when ADX is still lagging.
+- SIDEWAYS now needs *no* directional proof: (efficiency < 0.30 and range ≤ 6 ATR) or (≥ 3 EMA crosses **and** efficiency < 0.40), or ADX < 15.
+- EMA crosses are counted with a 0.1 ATR dead band so noise wiggles are not crosses.
+- API adds `regime_label`, `regime_phase`, `trend_evidence`, `range.broke_out`. `regime` keeps BULLISH / BEARISH / SIDEWAYS so colours and the paper-trade CSV are unchanged.
+
+The ADX ≥ 20, Supertrend and higher-timeframe gates are untouched, so an early breakdown can show DOWNTREND while the decision still says WATCH/WAIT until those lagging gates agree. That is intentional protection; relax them only after reviewing your paper-trade CSV. Tests: `python tests/test_regime.py`.
