@@ -149,12 +149,41 @@ function computeSR(cs,interval,symbol,isIndex){
   if(!supports.length)notes.push("No support below price in the loaded window — price is at/near its recent low.");
   return {supports,resistances,support:supports[0]?.price??null,resistance:resistances[0]?.price??null,last,atr,tol,note:notes.join(" ")};
 }
+// ---------------- v1.9: signal generation time + Data Check dashboard read ----------------
+function renderSignalTime(a){
+  const box=$("signalTimeBox");if(!box)return;
+  const t=a&&a.timing;
+  if(!t||!t.generated_at_text||!a.side){box.hidden=true;return}
+  box.hidden=false;
+  const stateTxt={FRESH:"OPEN — fresh signal",LATE:"CLOSED — late, don't chase",EXPIRED:"CLOSED — expired, wait for a new signal",UNKNOWN:"UNKNOWN — age can't be verified",FORMING:"Not confirmed yet"}[t.state]||"—";
+  $("stGenerated").textContent=`${t.generated_at_text} (${t.side||a.side})`+(t.estimated?" · est.":"");
+  $("stAge").textContent=t.age_minutes==null?"—":`${fmt(t.age_minutes,0)} min · ${fmt(t.age_bars,1)} bars`;
+  $("stPrice").textContent=t.signal_price==null?"—":`${fmt(t.signal_price)} → ${fmt(t.price_now)}${t.moved_atr==null?"":` (${t.moved_atr>=0?"+":""}${fmt(t.moved_atr,2)} ATR)`}`;
+  const st=$("stState");st.textContent=stateTxt;st.className=t.state==="FRESH"?"fresh":t.state==="LATE"?"late":t.state==="EXPIRED"||t.state==="UNKNOWN"?"expired":"";
+  const r=t.rules||{};
+  $("stNote").textContent=[`Rule: enter within ${r.fresh_minutes} min of the signal and before price moves ${r.max_chase_atr} ATR.`,
+    t.lean_since_text?`${a.side} lean building since ${t.lean_since_text}.`:"",
+    t.estimated?"Time is an estimate (server restarted or signal older than the replay window); the older time is used on purpose.":"",
+    t.basis?`Basis: ${t.basis}.`:""].filter(Boolean).join(" ");
+}
+function renderDashChecks(a){
+  const ul=$("dashChecks"),sm=$("dashSummary");if(!ul||!sm)return;
+  ul.innerHTML="";
+  const d=a&&a.dashboard;
+  if(!d){sm.textContent="Dashboard read unavailable — the terminal cannot confirm a signal without it.";return}
+  sm.textContent=d.available?`${d.action} · score ${d.score>=0?"+":""}${fmt(d.score,0)} · ${d.agree??0} of ${d.checks_available??0} checks agree${a.final?` · final: ${a.final.action}`:""}`:(d.headline||"Dashboard unavailable");
+  (d.checks||[]).forEach(c=>{
+    const li=document.createElement("li");li.className=c.state==="BULLISH"?"dc-bull":c.state==="BEARISH"?"dc-bear":"dc-flat";
+    const b=document.createElement("b");b.textContent=c.state==="BULLISH"?"▲":c.state==="BEARISH"?"▼":c.state==="UNAVAILABLE"?"·":"—";
+    const t=document.createElement("span");t.textContent=` ${c.name}: ${c.label}`;const sm2=document.createElement("small");sm2.textContent=c.detail||"";
+    li.appendChild(b);li.appendChild(t);li.appendChild(sm2);ul.appendChild(li)});
+}
 // ---------------- Signal confirmation (backend checks + S/R room gate) ----------------
 function renderSignal(){
   const a=lastAnalysis,gl=$("gateList"),rows=$("checkRows");
   if(!gl||!rows)return;
   gl.innerHTML="";rows.innerHTML="";$("extraInd").innerHTML="";
-  if(!a||a.status!=="ok"){lastGateState=null;$("finalSignal").textContent="WAIT";$("finalSignalSub").textContent=(a&&a.message)||"Waiting for enough candles.";$("confirmBadge").textContent="WAIT";$("confirmBadge").className="pill muted";return}
+  if(!a||a.status!=="ok"){lastGateState=null;renderSignalTime(null);renderDashChecks(null);$("finalSignal").textContent="WAIT";$("finalSignalSub").textContent=(a&&a.message)||"Waiting for enough candles.";$("confirmBadge").textContent="WAIT";$("confirmBadge").className="pill muted";return}
   const side=a.side,dom=side==="CE"?a.bull_score:a.bear_score,gates=(a.gates||[]).map(g=>({...g}));
   const isr=lastIndexSR;
   if(side&&isr&&isr.atr){
@@ -175,8 +204,12 @@ function renderSignal(){
   if(side&&gates.length&&!failed.length){text=`CONFIRMED ${side} SETUP`;sub="Every gate passes. Enter only on a retest that holds, with the stop-loss and size set before entry.";cls="live";color=side==="CE"?"var(--green)":"var(--red)"}
   else if(side&&dom>=55&&failed.length<=2){text=`WATCH ${side}`;sub="No entry yet — waiting for: "+failed.map(g=>g.label).join("; ");cls="stale"}
   const gstatus=(side&&gates.length&&!failed.length)?"CONFIRMED":(side&&dom>=55&&failed.length<=2)?"WATCH":"WAIT";
-  lastGateState={side,text,status:gstatus,failed:failed.map(g=>g.label),dom,gates:gates.map(g=>({label:g.label,pass:g.pass,detail:g.detail||""}))};
-  if($("decisionSub"))$("decisionSub").textContent=gstatus==="CONFIRMED"?"Gates pass — enter only on a held retest":"No entry — hard gates not met";
+  const fin=a.final||null;
+  if(fin&&gstatus!=="CONFIRMED"&&(fin.level==="STALE"||fin.level==="CONFLICT")){text=fin.action;sub=fin.headline;cls="stale";color="var(--yellow)"}
+  lastGateState={side,text,status:gstatus,failed:failed.map(g=>g.label),dom,gates:gates.map(g=>({label:g.label,pass:g.pass,detail:g.detail||""})),timing:a.timing||null,final:fin};
+  const tm=a.timing&&a.timing.generated_at_text?a.timing:null;
+  if($("decisionSub"))$("decisionSub").textContent=(gstatus==="CONFIRMED"?"Gates pass — enter only on a held retest":"No entry — hard gates not met")+(tm&&side?` · signal ${tm.generated_at_text}`:"");
+  renderSignalTime(a);renderDashChecks(a);
   $("finalSignal").textContent=text;$("finalSignal").style.color=color;$("finalSignalSub").textContent=sub;
   $("confirmBadge").textContent=text.split(" SETUP")[0];$("confirmBadge").className="pill "+cls;
   $("decision").textContent=text;$("bigDecision").textContent=text;$("signalExplanation").textContent=sub;
@@ -792,6 +825,7 @@ function paperGuardCheck(){
   if(!st||!st.side)blocks.push("No directional signal (bull/bear tied or not enough data)");
   else{
     if(st.status!=="CONFIRMED")blocks.push(`Signal is ${st.text}, not CONFIRMED — failing: ${st.failed.join("; ")||"directional score"}`);
+    if(st.timing&&st.timing.generated_at_text&&st.timing.state&&st.timing.state!=="FRESH"&&st.timing.state!=="FORMING")blocks.push(`Signal generated ${st.timing.generated_at_text} is ${st.timing.state} (${fmt(st.timing.age_minutes,0)} min old) — entering now is the wrong time`);
     if(sel.type!==st.side)blocks.push(`Selected contract is a ${sel.type} but the signal side is ${st.side}`);
   }
   // 2. liquidity of the contract being bought
@@ -866,7 +900,7 @@ async function paperOpenTrade(){
       exit_price:null,exit_time:null,exit_reason:null,realized_pnl:null,
       // what the dashboard said at entry, so every loss can be traced to the rule it should have respected
       ctx_signal:st?st.text:"—",ctx_score:st?st.dom:null,ctx_failed:st?st.failed.join("; "):"",ctx_opt_vol:ov?Number(ov.rel.toFixed(2)):null,
-      ctx_spread_pct:spread==null?null:Number(spread.toFixed(2)),ctx_index_entry:lastIdxLtp,ctx_index_exit:null,ctx_regime:a?a.regime:null,ctx_htf:a&&a.htf?a.htf.state:null
+      ctx_spread_pct:spread==null?null:Number(spread.toFixed(2)),ctx_index_entry:lastIdxLtp,ctx_index_exit:null,ctx_regime:a?(a.regime_label||a.regime):null,ctx_signal_at:a&&a.timing?a.timing.generated_at_text||null:null,ctx_signal_age_min:a&&a.timing?a.timing.age_minutes??null:null,ctx_dash:a&&a.dashboard&&a.dashboard.available?`${a.dashboard.side||"-"} ${a.dashboard.level}`:"unavailable",ctx_htf:a&&a.htf?a.htf.state:null
     };
     const trades=paperRead(),capital=paperGetCapital();
     const realized=trades.filter(t=>t.status==="CLOSED").reduce((sum,t)=>sum+(Number(t.realized_pnl)||0),0);
@@ -949,7 +983,7 @@ async function paperRefreshQuotes(){
 }
 function paperExportCsv(){
   const trades=paperRead();if(!trades.length){toast("No paper trades to export.");return}
-  const cols=["symbol","type","strike","expiry","qty","entry","sl_initial","sl","t1","t2","t3","risk_mode","slip","opened_at","status","last_price","exit_price","exit_time","exit_reason","realized_pnl","mfe","mae","override","ctx_signal","ctx_score","ctx_failed","ctx_opt_vol","ctx_spread_pct","ctx_index_entry","ctx_index_exit","ctx_regime","ctx_htf"];
+  const cols=["symbol","type","strike","expiry","qty","entry","sl_initial","sl","t1","t2","t3","risk_mode","slip","opened_at","status","last_price","exit_price","exit_time","exit_reason","realized_pnl","mfe","mae","override","ctx_signal","ctx_score","ctx_failed","ctx_opt_vol","ctx_spread_pct","ctx_index_entry","ctx_index_exit","ctx_regime","ctx_signal_at","ctx_signal_age_min","ctx_dash","ctx_htf"];
   const esc=v=>`"${String(v??"").replace(/"/g,'""')}"`;
   const csv=[cols.join(","),...trades.map(t=>cols.map(k=>esc(t[k])).join(","))].join("\r\n");
   const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="option-intelligence-paper-trades.csv";a.click();URL.revokeObjectURL(url);

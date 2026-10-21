@@ -63,3 +63,17 @@
 .dc-headline{font-size:15px;line-height:1.55;margin:14px 0;padding:12px;border-radius:10px;background:#101b2a;border:1px solid #29394d}
 .dc-final-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}@media(max-width:900px){.dc-final-grid{grid-template-columns:1fr}}
 .dc-final-grid h4{margin:0 0 6px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}.dc-ul{margin:0;padding-left:18px;font-size:12.5px;line-height:1.5}.dc-ul li{margin-bottom:5px}.dc-ul .dc-none{color:var(--muted);list-style:none;margin-left:-18px}
+
+/* v1.9 signal time + dashboard checks in the terminal */
+.signal-time{margin:10px 0;padding:10px 12px;border:1px solid var(--line,#26324a);border-radius:10px;background:rgba(255,255,255,.03)}
+.signal-time[hidden]{display:none}
+.signal-time .st-row{display:flex;justify-content:space-between;gap:12px;font-size:13px;padding:2px 0}
+.signal-time .st-row span{color:var(--muted,#8b97ad)}
+.signal-time .st-row b.fresh{color:var(--green)}
+.signal-time .st-row b.late{color:var(--yellow)}
+.signal-time .st-row b.expired{color:var(--red)}
+.mini-link{font-size:11px;font-weight:400;margin-left:6px;color:var(--muted,#8b97ad)}
+.dash-checks li{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline}
+.dash-checks .dc-bull b{color:var(--green)}
+.dash-checks .dc-bear b{color:var(--red)}
+.dash-checks .dc-flat b{color:var(--yellow)}

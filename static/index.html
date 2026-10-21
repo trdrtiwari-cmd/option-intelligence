@@ -74,7 +74,17 @@
     <div class="confirm-grid">
       <div>
         <div class="signal-box"><div class="signal-label">Final signal</div><div id="finalSignal" class="signal-value">WAIT</div><div id="finalSignalSub" class="sub">Waiting for enough candles.</div></div>
-        <h3 class="mini-h">Hard gates</h3><ul id="gateList" class="gate-list"></ul>
+        <div class="signal-time" id="signalTimeBox" hidden>
+          <div class="st-row"><span>Signal generated</span><b id="stGenerated">—</b></div>
+          <div class="st-row"><span>Age</span><b id="stAge">—</b></div>
+          <div class="st-row"><span>Price at signal → now</span><b id="stPrice">—</b></div>
+          <div class="st-row"><span>Entry window</span><b id="stState">—</b></div>
+          <div class="sub small" id="stNote"></div>
+        </div>
+        <h3 class="mini-h">Data Check dashboard <a href="/dashboard" target="_blank" class="mini-link">open ↗</a></h3>
+        <div class="sub small" id="dashSummary">Waiting for the dashboard read…</div>
+        <ul id="dashChecks" class="gate-list dash-checks"></ul>
+        <h3 class="mini-h">Hard gates (terminal + dashboard + timing)</h3><ul id="gateList" class="gate-list"></ul>
       </div>
       <div>
         <h3 class="mini-h">Weighted checks</h3>

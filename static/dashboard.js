@@ -50,6 +50,10 @@ function renderFinal(d) {
   const color = f.state === "BULLISH" ? "var(--green)" : f.state === "BEARISH" ? "var(--red)" : f.state === "UNAVAILABLE" ? "var(--muted)" : "var(--yellow)";
   $("finalAction").textContent = f.action; $("finalAction").style.color = color;
   $("finalLevel").textContent = f.score === null ? f.level : `${f.level} · ${f.agree ?? 0} agree / ${f.oppose ?? 0} oppose of ${f.available} checks with data`;
+  const ft = f.timing;
+  $("finalTime").textContent = ft ? `Signal since ${ft.since_text} · ${ft.age_minutes < 1 ? "just now" : Math.round(ft.age_minutes) + " min ago"}` +
+    (ft.exact ? "" : ` (est. — watching since ${ft.observed_from}; may be older)`) +
+    (ft.price_at_change ? ` · index ${Number(ft.price_at_change).toLocaleString("en-IN", {maximumFractionDigits: 2})} then` : "") : "";
   $("finalScore").textContent = f.score === null ? "—" : (f.score > 0 ? "+" : "") + f.score.toFixed(0);
   $("finalScore").style.color = color;
   $("finalMarker").style.left = f.score === null ? "50%" : Math.max(0, Math.min(100, (f.score + 100) / 2)) + "%";
@@ -64,7 +68,7 @@ function renderFinal(d) {
   f.contributions.forEach(c => {
     const row = el("div", "dc-check"); const left = el("div"); left.appendChild(el("span", "", c.name)); left.appendChild(el("small", "", `weight ${c.weight}`)); row.appendChild(left);
     const right = el("div"); right.style.textAlign = "right"; const chipEl = el("span", "dc-chip " + c.state, c.label); right.appendChild(chipEl);
-    right.appendChild(el("small", "", c.points === null ? "no data" : (c.points > 0 ? "+" : "") + c.points + " pts")); row.appendChild(right); box.appendChild(row);
+    right.appendChild(el("small", "", (c.points === null ? "no data" : (c.points > 0 ? "+" : "") + c.points + " pts") + (c.timing ? ` · since ${c.timing.since_text.slice(0, 5)}${c.timing.exact ? "" : "*"}` : ""))); row.appendChild(right); box.appendChild(row);
   });
   $("finalDisclaimer").textContent = f.disclaimer;
   $("cntBull").textContent = `${o.bull} bullish`; $("cntBear").textContent = `${o.bear} bearish`; $("cntNeu").textContent = `${o.neutral + o.caution} neutral / caution`;
