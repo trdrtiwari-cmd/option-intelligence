@@ -185,3 +185,22 @@ The old regime said "BEARISH" whenever bear score > bull score and ADX ≥ 15. A
 - API adds `regime_label`, `regime_phase`, `trend_evidence`, `range.broke_out`. `regime` keeps BULLISH / BEARISH / SIDEWAYS so colours and the paper-trade CSV are unchanged.
 
 The ADX ≥ 20, Supertrend and higher-timeframe gates are untouched, so an early breakdown can show DOWNTREND while the decision still says WATCH/WAIT until those lagging gates agree. That is intentional protection; relax them only after reviewing your paper-trade CSV. Tests: `python tests/test_regime.py`.
+
+## v1.9.0 — signal time + Data Check dashboard in the final signal
+
+**1. Every signal now shows when it was generated.** The Signal confirmation panel has a *Signal generated* box: generation time (IST, the close of the candle where the signal began), age in minutes/bars, price at the signal vs now (in ATR) and whether the entry window is OPEN, LATE or EXPIRED. The Decision card also shows the time. The technical start time is found by **replaying `analyze()` on the closed candles of the same session** and walking back while the signal is unchanged, so it survives server restarts and never repaints. The dashboard side has no candle history, so the server remembers when it last changed; after a restart that time is marked *est.* and the **older** (more conservative) technical time is used.
+
+**2. The Data Check dashboard now votes on the final signal.** `/api/analysis` fetches the dashboard's five checks (breadth, sectors, option premium %, premium graph, index zone → `final_signal`), cached 8 s, and adds three hard gates after the technical ones:
+
+| Gate | Passes when |
+|---|---|
+| Data Check dashboard agrees | dashboard side = terminal side and level is CONFIRMED or BIAS (unavailable data = fail) |
+| Entry time window | market open and 09:30 ≤ IST time < 15:00 |
+| Signal fresh | age ≤ 3 candles (15 min on 5m) **and** price moved ≤ 1 ATR from the signal price; > 12 candles = EXPIRED |
+
+Results: **CONFIRMED** only when the terminal's gates, the dashboard, the time window and freshness all pass. Terminal confirmed but dashboard opposite → **CONFLICT**. Terminal confirmed but too old / price already ran → **STALE … don't chase**. A dashboard read alone never creates an entry. The paper-trade guard also blocks entries on a non-fresh signal, and every paper trade stores `ctx_signal_at`, `ctx_signal_age_min` and `ctx_dash` in the CSV so you can see which entry times lose money.
+
+New API fields on `/api/analysis`: `final`, `timing`, `dashboard`, `signal_technical`; `decision` now holds the fused action. If the dashboard cannot be loaded the signal is capped at WATCH (fail-safe), and a fusion error never breaks the analysis. All rules are constants at the top of `signal_fusion.py` (`FRESH_BARS`, `EXPIRE_BARS`, `MAX_CHASE_ATR`, `ENTRY_START_MIN`, `ENTRY_CUTOFF_MIN`) — tune them on your paper-trade CSV. Tests: `python tests/test_fusion.py`.
+
+### v1.9.1 — signal time on the Data Check dashboard
+The dashboard's own final signal now shows *Signal since HH:MM:SS IST · N min ago* plus the index price when it last changed, and every row of the score breakdown shows when that check last changed (`*` = estimated: the server started watching after the change, so it may be older). The main terminal and `/dashboard` share the same tracker, so both pages show the same time. The dashboard has no candle history to replay, so these times are the moment this server first saw the state change — with the page closed and nothing polling, changes are not seen.

@@ -12,6 +12,7 @@ from indicators import IST, analyze, merge_volume, normalize_candles, parse_time
 from instruments import FutureScanner, pick_front_future
 from feed_parser import parse_feed_message
 import dashboard_data as dd
+import signal_fusion as sf
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_TITLE = "Option Intelligence"
@@ -832,22 +833,69 @@ async def option_quote(instrument_key: str):
             "note": "REST snapshot; not a confirmed WebSocket tick."}
 
 
+SIGNAL_TRACKER = sf.SignalTracker()
+FUSION_CACHE = {}
+FUSION_TTL = 8          # seconds the dashboard read is reused between terminal refreshes
+
+
+async def _dashboard_final_for(sym, interval):
+    """Data Check dashboard final signal for the main terminal. Cached briefly; never raises (None = unavailable)."""
+    hit = FUSION_CACHE.get(sym)
+    if hit and time.time() - hit["at"] < FUSION_TTL:
+        return hit["final"]
+    try:
+        blocks = await asyncio.wait_for(
+            _dashboard_blocks(sym, "", "current_week", interval if interval in (1, 3, 5, 15) else 5, 0), timeout=12)
+        final = dd.final_signal(blocks, market_status()["open"])
+        _stamp_dashboard_times(sym, blocks, final)
+        FUSION_CACHE[sym] = {"at": time.time(), "final": final}
+        return final
+    except Exception as exc:
+        logger.info("Dashboard signal unavailable for the terminal: %s", str(exc)[:160])
+        return hit["final"] if hit and time.time() - hit["at"] < 60 else None
+
+
 @app.get("/api/analysis")
 async def analysis(symbol: str = "NIFTY", interval: int = 5):
-    """Transparent confirmation engine from index candles + a higher-timeframe trend read.
+    """Transparent confirmation engine from index candles + a higher-timeframe trend read, fused with the Data Check
+    dashboard signal and stamped with the time the signal was generated (v1.9).
     Not a guarantee and not an order instruction."""
-    result = await candles(symbol=symbol, interval=interval, days=10)
-    htf_interval = 15 if interval < 15 else 30 if interval < 30 else None
-    htf_raw = None
-    if htf_interval:
-        try:
-            htf_raw = (await candles(symbol=symbol, interval=htf_interval, days=10))["candles"]
-        except HTTPException as exc:
-            if exc.status_code == 401:
-                raise
-            logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
-    return analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval,
-                   volume_source=result.get("volume_source"))  # the still-forming candle is ignored inside analyze()
+    sym = symbol.upper()
+    dash_task = asyncio.create_task(_dashboard_final_for(sym, interval)) if sym in INDEX_KEYS else None
+    try:
+        result = await candles(symbol=symbol, interval=interval, days=10)
+        htf_interval = 15 if interval < 15 else 30 if interval < 30 else None
+        htf_raw = None
+        if htf_interval:
+            try:
+                htf_raw = (await candles(symbol=symbol, interval=htf_interval, days=10))["candles"]
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    raise
+                logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
+        a = analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval,
+                    volume_source=result.get("volume_source"))  # the still-forming candle is ignored inside analyze()
+        dash = await dash_task if dash_task else None
+    except BaseException:
+        if dash_task:
+            dash_task.cancel()
+        raise
+    if a.get("status") != "ok":
+        return a
+    try:
+        market = market_status()
+        replay = sf.replay_signal_start(result["candles"], interval, a, htf_raw=htf_raw, htf_interval=htf_interval,
+                                        volume_source=result.get("volume_source"))
+        track = SIGNAL_TRACKER.update(sym, sf.dash_key(dash), a.get("last_close"), time.time())
+        fused = sf.fuse(a, dash, replay, track, datetime.now(IST), market["open"], interval)
+        a["gates"] = (a.get("gates") or []) + fused["gates"]
+        a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],
+                  "signal_technical": a.get("signal"), "decision_technical": a.get("decision"),
+                  "decision": fused["final"]["action"]})
+    except Exception as exc:          # fusion must never take the whole analysis down
+        logger.warning("Signal fusion failed: %s", exc)
+        a["fusion_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+    return a
 
 
 
@@ -995,6 +1043,32 @@ async def _dash_zone(sym):
     return dd.index_zone(cs, price, label)
 
 
+async def _safe_block(coro):
+    try:
+        return await coro
+    except HTTPException as exc:
+        return dd.unavailable(_err_text(exc))
+    except Exception as exc:
+        logger.warning("Dashboard block failed: %s", exc)
+        return dd.unavailable(f"{type(exc).__name__}: {str(exc)[:150]}")
+
+
+async def _dashboard_blocks(sym, universe, expiry, interval, offset):
+    """The five Data Check blocks (each degrades to UNAVAILABLE on its own). Shared by /dashboard and the main terminal."""
+    universe = universe or ("niftybank" if sym == "BANKNIFTY" else "nifty50")
+    breadth, sectors, premium, zone, graph = await asyncio.gather(
+        _safe_block(_dash_breadth(universe)), _safe_block(_dash_sectors()), _safe_block(_dash_option_premium(sym, expiry)),
+        _safe_block(_dash_zone(sym)), _safe_block(_dash_graph(sym, expiry, interval, offset)))
+    return {"breadth": breadth, "sectors": sectors, "premium": premium, "zone": zone, "graph": graph}
+
+
+DASH_TRACKER = sf.SignalTracker()
+
+
+def _stamp_dashboard_times(sym, blocks, final):
+    sf.stamp_dashboard_times(DASH_TRACKER, sym, blocks, final, time.time())
+
+
 @app.get("/api/dashboard/summary")
 async def dashboard_summary(symbol: str = "NIFTY", universe: str = "", expiry: str = "current_week", interval: int = 5, offset: int = 0):
     sym = symbol.upper()
@@ -1005,23 +1079,13 @@ async def dashboard_summary(symbol: str = "NIFTY", universe: str = "", expiry: s
     if expiry not in RELATIVE_EXPIRIES and not DATE_RE.fullmatch(expiry):
         raise HTTPException(status_code=400, detail="Invalid expiry.")
 
-    async def safe(coro):
-        try:
-            return await coro
-        except HTTPException as exc:
-            return dd.unavailable(_err_text(exc))
-        except Exception as exc:
-            logger.warning("Dashboard block failed: %s", exc)
-            return dd.unavailable(f"{type(exc).__name__}: {str(exc)[:150]}")
-
-    breadth, sectors, premium, zone, graph = await asyncio.gather(
-        safe(_dash_breadth(universe)), safe(_dash_sectors()), safe(_dash_option_premium(sym, expiry)), safe(_dash_zone(sym)),
-        safe(_dash_graph(sym, expiry, interval, offset)))
-    blocks = {"breadth": breadth, "sectors": sectors, "premium": premium, "zone": zone, "graph": graph}
+    blocks = await _dashboard_blocks(sym, universe, expiry, interval, offset)
     sigs = {k: v.get("signal") for k, v in blocks.items()}
     market = market_status()
+    final = dd.final_signal(blocks, market["open"])
+    _stamp_dashboard_times(sym, blocks, final)
     return {"symbol": sym, "universe": universe, "generated_at": utc_now_iso(), "market": market, **blocks,
-            "overall": dd.overall_bias(sigs), "final": dd.final_signal(blocks, market["open"]),
+            "overall": dd.overall_bias(sigs), "final": final,
             "note": "Signals are rule-based reads of live data, not trade instructions. Quotes are REST snapshots (a few seconds old)."
                     + ("" if market["open"] else " Market is closed: values show the last session.")}
 
