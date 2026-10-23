@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.8.0";
+const FRONTEND_VERSION="1.9.1";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -7,6 +7,7 @@ function toast(msg){const el=$("toast");el.textContent=msg;el.classList.add("sho
 function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("en-IN",{maximumFractionDigits:n,minimumFractionDigits:n})}
 function getSymbol(){return $("symbol").value}
 function getInterval(){return Number($("interval").value)}
+function getMode(){const m=$("signalMode");return m?m.value:"standard"}
 function initChart(){
   const el=$("chart");
   chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:el.clientHeight,layout:{background:{color:"#121d2d"},textColor:"#91a4ba"},grid:{vertLines:{color:"#1e2d40"},horzLines:{color:"#1e2d40"}},rightPriceScale:{borderColor:"#27384d"},timeScale:{borderColor:"#27384d",timeVisible:true,secondsVisible:false,tickMarkFormatter:istTickMarkFormatter},localization:{timeFormatter:istCrosshairTimeFormatter},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
@@ -188,7 +189,8 @@ function renderSignal(){
   const isr=lastIndexSR;
   if(side&&isr&&isr.atr){
     const lvl=side==="CE"?isr.resistances[0]:isr.supports[0],room=lvl?lvl.distance/isr.atr:Infinity;
-    gates.push({label:`Index room to ${side==="CE"?"resistance R1":"support S1"} ≥ 1 ATR`,pass:room>=1,detail:lvl?`${fmt(lvl.price)} is ${fmt(lvl.distance)} pts (${fmt(room,1)} ATR) away`:"No level in the loaded window"});
+    const needRoom=(a.mode_rules&&a.mode_rules.room_atr)||1;
+    gates.push({label:`Index room to ${side==="CE"?"resistance R1":"support S1"} ≥ ${needRoom} ATR`,pass:room>=needRoom,detail:lvl?`${fmt(lvl.price)} is ${fmt(lvl.distance)} pts (${fmt(room,1)} ATR) away`:"No level in the loaded window"});
   }
   const ov=lastOptionVol,optRows=[];
   if(!ov||ov.none)optRows.push({label:"Option volume (selected contract)",reading:"excluded",detail:"Select a CE/PE contract to add its volume (the index itself has no volume).",cls:"sr-missing"});
@@ -363,7 +365,7 @@ async function loadOptionVolume(){
 // or borrows the option-premium chart's support/resistance.
 async function refreshSignalContext(){
   const sym=getSymbol(),interval=getInterval();
-  const [c,a]=await Promise.all([api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),api(`/api/analysis?symbol=${sym}&interval=${interval}`)]);
+  const [c,a]=await Promise.all([api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}`)]);
   lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
   lastAnalysis=a;lastAnalysisAt=Date.now();
   $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
@@ -378,7 +380,7 @@ async function refresh(){
     const sym=getSymbol(),interval=getInterval();
     const [c,a]=await Promise.all([
       api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),
-      api(`/api/analysis?symbol=${sym}&interval=${interval}`)
+      api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}`)
     ]);
     lastVolumeSource=c.volume_source||null;
     renderCandles(c.candles);
@@ -528,6 +530,7 @@ $("symbol").addEventListener("change",()=>{
   loadContracts(true); // expiry list -> chain -> derivatives for that real expiry
 });
 $("interval").addEventListener("change",refresh);
+(function(){const m=$("signalMode");if(!m)return;try{const v=localStorage.getItem("oi-signal-mode");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-signal-mode",m.value)}catch{}refresh()})})();
 $("loadContracts").addEventListener("click",()=>loadContracts(true));
 $("loadChain").addEventListener("click",()=>loadChain());
 $("chartView").addEventListener("change",refreshChartSource);
@@ -900,7 +903,7 @@ async function paperOpenTrade(){
       exit_price:null,exit_time:null,exit_reason:null,realized_pnl:null,
       // what the dashboard said at entry, so every loss can be traced to the rule it should have respected
       ctx_signal:st?st.text:"—",ctx_score:st?st.dom:null,ctx_failed:st?st.failed.join("; "):"",ctx_opt_vol:ov?Number(ov.rel.toFixed(2)):null,
-      ctx_spread_pct:spread==null?null:Number(spread.toFixed(2)),ctx_index_entry:lastIdxLtp,ctx_index_exit:null,ctx_regime:a?(a.regime_label||a.regime):null,ctx_signal_at:a&&a.timing?a.timing.generated_at_text||null:null,ctx_signal_age_min:a&&a.timing?a.timing.age_minutes??null:null,ctx_dash:a&&a.dashboard&&a.dashboard.available?`${a.dashboard.side||"-"} ${a.dashboard.level}`:"unavailable",ctx_htf:a&&a.htf?a.htf.state:null
+      ctx_spread_pct:spread==null?null:Number(spread.toFixed(2)),ctx_index_entry:lastIdxLtp,ctx_index_exit:null,ctx_regime:a?(a.regime_label||a.regime):null,ctx_mode:a?a.mode||null:null,ctx_signal_at:a&&a.timing?a.timing.generated_at_text||null:null,ctx_signal_age_min:a&&a.timing?a.timing.age_minutes??null:null,ctx_dash:a&&a.dashboard&&a.dashboard.available?`${a.dashboard.side||"-"} ${a.dashboard.level}`:"unavailable",ctx_htf:a&&a.htf?a.htf.state:null
     };
     const trades=paperRead(),capital=paperGetCapital();
     const realized=trades.filter(t=>t.status==="CLOSED").reduce((sum,t)=>sum+(Number(t.realized_pnl)||0),0);
@@ -983,7 +986,7 @@ async function paperRefreshQuotes(){
 }
 function paperExportCsv(){
   const trades=paperRead();if(!trades.length){toast("No paper trades to export.");return}
-  const cols=["symbol","type","strike","expiry","qty","entry","sl_initial","sl","t1","t2","t3","risk_mode","slip","opened_at","status","last_price","exit_price","exit_time","exit_reason","realized_pnl","mfe","mae","override","ctx_signal","ctx_score","ctx_failed","ctx_opt_vol","ctx_spread_pct","ctx_index_entry","ctx_index_exit","ctx_regime","ctx_signal_at","ctx_signal_age_min","ctx_dash","ctx_htf"];
+  const cols=["symbol","type","strike","expiry","qty","entry","sl_initial","sl","t1","t2","t3","risk_mode","slip","opened_at","status","last_price","exit_price","exit_time","exit_reason","realized_pnl","mfe","mae","override","ctx_signal","ctx_score","ctx_failed","ctx_opt_vol","ctx_spread_pct","ctx_index_entry","ctx_index_exit","ctx_regime","ctx_mode","ctx_signal_at","ctx_signal_age_min","ctx_dash","ctx_htf"];
   const esc=v=>`"${String(v??"").replace(/"/g,'""')}"`;
   const csv=[cols.join(","),...trades.map(t=>cols.map(k=>esc(t[k])).join(","))].join("\r\n");
   const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="option-intelligence-paper-trades.csv";a.click();URL.revokeObjectURL(url);

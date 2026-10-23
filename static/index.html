@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.8.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.9.1">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -17,6 +17,7 @@
   <section class="toolbar panel">
     <label>Underlying<select id="symbol"><option value="NIFTY">NIFTY 50</option><option value="BANKNIFTY">BANK NIFTY</option></select></label>
     <label>Timeframe<select id="interval"><option value="5">5 minutes</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></label>
+    <label>Signal mode<select id="signalMode"><option value="scalp">Scalp · 20–40 pt moves</option><option value="standard">Standard · strict</option></select></label>
     <label>Chart view<select id="chartView"><option value="index">Underlying index</option><option value="option">Selected option premium</option></select></label>
     <label>Auto refresh<select id="refreshEvery"><option value="5">5 s</option><option value="10" selected>10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></label>
     <button id="refreshBtn">Refresh data</button>
@@ -219,5 +220,5 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/app.js?v=1.8.0"></script>
+<script src="/static/app.js?v=1.9.1"></script>
 </body></html>
