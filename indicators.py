@@ -78,6 +78,55 @@ def pullback_resume(cs, e9, atr, side, lookback=6, tol=0.25):
     return touched and resumed, detail
 
 
+# Signal modes. "standard" is the original, strict rule set (unchanged behaviour). "scalp" is tuned for a small option
+# buyer who is happy with a 20-40 point index move: it trades price structure instead of lagging indicators, accepts a
+# continuation break instead of demanding an EMA 9 retest, and needs less room to the next S/R level.
+MODES = {
+    "standard": {"label": "Standard", "rsi_lo": 30, "rsi_hi": 70, "rsi_score_lo": 20, "rsi_score_hi": 80, "chase_atr": 1.0,
+                 "room_atr": 1.0, "relax_lagging": False, "micro_trigger": False,
+                 "fresh_bars": 3, "expire_bars": 12, "max_chase_atr": 1.0},
+    "scalp": {"label": "Scalp (20–40 pt moves)", "rsi_lo": 18, "rsi_hi": 82, "rsi_score_lo": 12, "rsi_score_hi": 88, "chase_atr": 3.5,
+              "room_atr": 0.5, "relax_lagging": True, "micro_trigger": True,
+              "fresh_bars": 2, "expire_bars": 6, "max_chase_atr": 0.6},
+}
+
+
+def mode_rules(mode):
+    return MODES.get(mode) or MODES["standard"]
+
+
+def micro_continuation(cs, atr, side, lookback=3, min_body=0.25):
+    """Scalp entry trigger: a short pause (1-3 counter-trend candles) happened within the last `lookback` closed bars
+    BEFORE the latest bar, and the latest closed bar is a real trend-direction candle that closes beyond the pause's
+    extreme. Straight runs with no pause are not entries (that is chasing); the trigger lapses `lookback` bars after
+    the pause so every signal run is short and a fresh signal is always close to the break. Returns (ok, detail)."""
+    n = len(cs)
+    if n < lookback + 3 or not atr:
+        return False, "n/a"
+    last = cs[-1]
+    pe = side == "PE"
+    is_counter = (lambda c: c["close"] >= c["open"]) if pe else (lambda c: c["close"] <= c["open"])
+    trend_bar = last["close"] < last["open"] if pe else last["close"] > last["open"]
+    recent = list(range(n - 1 - lookback, n - 1))
+    counters = [i for i in recent if is_counter(cs[i])]
+    if not counters:
+        return False, f"no pause in the last {lookback} bars (straight run — wait for the first pause, don't chase)"
+    j = counters[-1]
+    group = [j]
+    while group[0] - 1 >= 0 and is_counter(cs[group[0] - 1]) and group[0] - 1 >= n - 1 - lookback - 2:
+        group.insert(0, group[0] - 1)
+    level = min(cs[i]["low"] for i in group) if pe else max(cs[i]["high"] for i in group)
+    broke = last["close"] < level if pe else last["close"] > level
+    body = abs(last["close"] - last["open"])
+    big = body >= min_body * atr
+    ok = bool(trend_bar and broke and big)
+    word = "below" if pe else "above"
+    detail = (f"pause of {len(group)} bar(s), pause {'low' if pe else 'high'} {level:,.2f}; last closed bar "
+              f"{'breaks ' + word + ' it' if (trend_bar and broke) else 'has NOT broken ' + word + ' it'}"
+              + ("" if big or not (trend_bar and broke) else f" but body is only {body / atr:.2f} ATR (needs ≥ {min_body})"))
+    return ok, detail
+
+
 def ema(values, n):
     if not values:
         return []
@@ -335,7 +384,9 @@ def directional_structure(cs, e9, e21, atr, vwap, n=20):
     return out
 
 
-def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None):
+def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard"):
+    rules = mode_rules(mode)
+    mode = mode if mode in MODES else "standard"
     cs, forming_dropped = drop_forming(normalize_candles(raw_candles), interval, now)
     if len(cs) < 40:
         return {"status": "insufficient_data", "message": "Not enough candles to calculate indicators.",
@@ -376,7 +427,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
          "bull": bool(mc and mc[2] > 0 and mc[2] >= mc[3]), "bear": bool(mc and mc[2] < 0 and mc[2] <= mc[3]),
          "detail": f"Hist {mc[2]:+.2f} ({'rising' if mc[2] >= mc[3] else 'falling'})" if mc else "n/a"},
         {"key": "rsi", "label": "RSI (14) — strong but not stretched", "weight": 8, "ok": rsi is not None,
-         "bull": bool(rsi and 55 < rsi < 80), "bear": bool(rsi and 20 < rsi < 45),
+         "bull": bool(rsi and 55 < rsi < rules["rsi_score_hi"]), "bear": bool(rsi and rules["rsi_score_lo"] < rsi < 45),
          "detail": f"RSI {rsi:.1f}" if rsi is not None else "n/a"},
         {"key": "adx", "label": "ADX (14) trend strength ≥ 20", "weight": 12, "ok": adx is not None,
          "bull": bool(adx and adx[0] >= 20 and adx[1] > adx[2]), "bear": bool(adx and adx[0] >= 20 and adx[2] > adx[1]),
@@ -419,7 +470,8 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         regime_phase = ("BREAKOUT" if trend_dir == 1 else "BREAKDOWN") if ds["broke_out"] == trend_dir else "TREND"
         regime_note = f"{regime_label} ({regime_phase.lower()}): " + " · ".join(ds["evidence"])
         if adx is not None and adx[0] < 20:
-            regime_note += f" · ADX {adx[0]:.0f} still lagging, so entry gates may stay closed"
+            regime_note += (f" · ADX {adx[0]:.0f} still lagging — scalp mode trades on price structure" if rules["relax_lagging"]
+                            else f" · ADX {adx[0]:.0f} still lagging, so entry gates may stay closed")
     elif sideways:
         regime, regime_label = "SIDEWAYS", "SIDEWAYS"
         if in_range:
@@ -439,33 +491,56 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     by_key = {c["key"]: c for c in checks}
     gates = []
     if side:
+        relax = rules["relax_lagging"]
+        trend_agree = trend_dir == (1 if side == "CE" else -1)       # price structure itself proves the trend
+        adx_ok = by_key["adx"][want] or (relax and trend_agree)
+        st_ok = by_key["supertrend"][want] or (relax and trend_agree)
+        lag_note = " · passes on price-structure trend (scalp)"
+        if htf:
+            against = "BEAR" if side == "CE" else "BULL"
+            htf_ok = by_key["htf"][want] or (relax and htf["state"] != against)
+            htf_label = "Higher timeframe not against" if relax else "Higher timeframe agrees"
+        else:
+            htf_ok, htf_label = True, "Higher timeframe (unavailable)"
+        rsi_lo, rsi_hi = (rules["rsi_lo"], rules["rsi_hi"]) if (relax and trend_agree) else (30, 70)
         gates = [
             {"label": "Score ≥ 70", "pass": dom >= 70, "detail": f"{dom}/100"},
-            {"label": "Trend strength (ADX ≥ 20, DI agrees)", "pass": by_key["adx"][want], "detail": by_key["adx"]["detail"]},
-            {"label": "Supertrend agrees", "pass": by_key["supertrend"][want], "detail": by_key["supertrend"]["detail"]},
-            {"label": "Higher timeframe agrees" if htf else "Higher timeframe (unavailable)", "pass": (by_key["htf"][want] if htf else True),
-             "detail": by_key["htf"]["detail"]},
+            {"label": "Trend strength (ADX ≥ 20, DI agrees)" + (" or price-structure trend" if relax else ""), "pass": bool(adx_ok),
+             "detail": by_key["adx"]["detail"] + (lag_note if adx_ok and not by_key["adx"][want] else "")},
+            {"label": "Supertrend agrees" + (" or price-structure trend" if relax else ""), "pass": bool(st_ok),
+             "detail": by_key["supertrend"]["detail"] + (lag_note if st_ok and not by_key["supertrend"][want] else "")},
+            {"label": htf_label, "pass": bool(htf_ok), "detail": by_key["htf"]["detail"]},
             {"label": "Not sideways / not in a range", "pass": not sideways, "detail": regime_note},
-            {"label": "Momentum not overextended (RSI < 70 / > 30)", "pass": rsi is None or (rsi < 70 if side == "CE" else rsi > 30),
-             "detail": f"RSI {rsi:.1f}" if rsi is not None else "n/a"},
+            {"label": f"Momentum not overextended (RSI < {rsi_hi} / > {rsi_lo})", "pass": rsi is None or (rsi < rsi_hi if side == "CE" else rsi > rsi_lo),
+             "detail": (f"RSI {rsi:.1f}" if rsi is not None else "n/a") + (" · wider limit because the trend is confirmed" if (relax and trend_agree) else "")},
         ]
         if atr:
             # Anti-chase gates: most of the day's losses came from entering after the move had already happened.
             stretch = (last - e9[-1]) if side == "CE" else (e9[-1] - last)
-            gates.append({"label": "Not chasing (≤ 1 ATR beyond EMA 9)", "pass": stretch <= 1.0 * atr,
-                          "detail": f"{stretch:+.1f} pts beyond EMA 9 ({stretch / atr:+.2f} ATR)"})
+            bar_range = (cs[-1]["high"] - cs[-1]["low"]) / atr
+            chase_ok = stretch <= rules["chase_atr"] * atr and (not relax or bar_range <= 2.5)
+            gates.append({"label": (f"Not chasing (≤ {rules['chase_atr']:g} ATR beyond EMA 9, no blow-off bar)" if relax else "Not chasing (≤ 1 ATR beyond EMA 9)"),
+                          "pass": chase_ok,
+                          "detail": f"{stretch:+.1f} pts beyond EMA 9 ({stretch / atr:+.2f} ATR)" + (f" · last bar range {bar_range:.1f} ATR" if relax else "")})
             ok_pb, pb_detail = pullback_resume(cs, e9, atr, side)
-            gates.append({"label": "Pullback-and-resume trigger (retest holds)", "pass": ok_pb, "detail": pb_detail})
+            if rules["micro_trigger"]:
+                ok_mc, mc_detail = micro_continuation(cs, atr, side)
+                gates.append({"label": "Entry trigger (EMA 9 retest resumes, or break of the last pause)", "pass": ok_pb or ok_mc,
+                              "detail": ("Retest: " + pb_detail) if ok_pb else ("Pause break: " + mc_detail) if ok_mc else f"{mc_detail} · {pb_detail}"})
+            else:
+                gates.append({"label": "Pullback-and-resume trigger (retest holds)", "pass": ok_pb, "detail": pb_detail})
     failed = [g for g in gates if not g["pass"]]
     if side and not failed:
-        signal, decision = f"CONFIRMED_{side}", f"CONFIRMED {side} SETUP — enter only on a retest that holds"
+        signal = f"CONFIRMED_{side}"
+        decision = f"CONFIRMED {side} SETUP — " + ("enter on this continuation break; aim for 20–40 pts" if rules["micro_trigger"] else "enter only on a retest that holds")
     elif side and dom >= 55 and len(failed) <= 2:
         signal, decision = f"WATCH_{side}", f"WATCH {side} — waiting for: {failed[0]['label']}"
     else:
         signal, decision = "WAIT", "WAIT"
 
     return {
-        "status": "ok", "symbol": symbol, "interval": interval,
+        "status": "ok", "symbol": symbol, "interval": interval, "mode": mode, "mode_label": rules["label"],
+        "mode_rules": {k: rules[k] for k in ("room_atr", "fresh_bars", "expire_bars", "max_chase_atr")},
         "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
         "regime": regime, "regime_label": regime_label, "regime_phase": regime_phase, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
         "trend_evidence": ds["evidence"],

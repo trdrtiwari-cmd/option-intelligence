@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from indicators import IST, analyze, merge_volume, normalize_candles, parse_time
+from indicators import IST, MODES, analyze, merge_volume, normalize_candles, parse_time
 from instruments import FutureScanner, pick_front_future
 from feed_parser import parse_feed_message
 import dashboard_data as dd
@@ -59,7 +59,7 @@ class BasicAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Authentication required"})
 
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.1"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -856,11 +856,13 @@ async def _dashboard_final_for(sym, interval):
 
 
 @app.get("/api/analysis")
-async def analysis(symbol: str = "NIFTY", interval: int = 5):
+async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard"):
     """Transparent confirmation engine from index candles + a higher-timeframe trend read, fused with the Data Check
     dashboard signal and stamped with the time the signal was generated (v1.9).
     Not a guarantee and not an order instruction."""
     sym = symbol.upper()
+    if mode not in MODES:
+        raise HTTPException(status_code=400, detail="mode must be one of: " + ", ".join(MODES))
     dash_task = asyncio.create_task(_dashboard_final_for(sym, interval)) if sym in INDEX_KEYS else None
     try:
         result = await candles(symbol=symbol, interval=interval, days=10)
@@ -874,7 +876,7 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5):
                     raise
                 logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
         a = analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval,
-                    volume_source=result.get("volume_source"))  # the still-forming candle is ignored inside analyze()
+                    volume_source=result.get("volume_source"), mode=mode)  # the still-forming candle is ignored inside analyze()
         dash = await dash_task if dash_task else None
     except BaseException:
         if dash_task:
@@ -885,9 +887,9 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5):
     try:
         market = market_status()
         replay = sf.replay_signal_start(result["candles"], interval, a, htf_raw=htf_raw, htf_interval=htf_interval,
-                                        volume_source=result.get("volume_source"))
+                                        volume_source=result.get("volume_source"), mode=mode)
         track = SIGNAL_TRACKER.update(sym, sf.dash_key(dash), a.get("last_close"), time.time())
-        fused = sf.fuse(a, dash, replay, track, datetime.now(IST), market["open"], interval)
+        fused = sf.fuse(a, dash, replay, track, datetime.now(IST), market["open"], interval, mode=mode)
         a["gates"] = (a.get("gates") or []) + fused["gates"]
         a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],
                   "signal_technical": a.get("signal"), "decision_technical": a.get("decision"),

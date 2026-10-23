@@ -204,3 +204,23 @@ New API fields on `/api/analysis`: `final`, `timing`, `dashboard`, `signal_techn
 
 ### v1.9.1 — signal time on the Data Check dashboard
 The dashboard's own final signal now shows *Signal since HH:MM:SS IST · N min ago* plus the index price when it last changed, and every row of the score breakdown shows when that check last changed (`*` = estimated: the server started watching after the change, so it may be older). The main terminal and `/dashboard` share the same tracker, so both pages show the same time. The dashboard has no candle history to replay, so these times are the moment this server first saw the state change — with the page closed and nothing polling, changes are not seen.
+
+## v1.9.1 — Scalp mode (20–40 point moves)
+
+New **Signal mode** selector in the toolbar (saved in the browser; default **Scalp**). `Standard` keeps the original strict rules unchanged.
+Why: on a fast fall (price ~3 ATR under EMA 9, RSI in the 20s, no retest of EMA 9) the Standard gates "Not chasing", "RSI > 30" and
+"Pullback-and-resume" all fail, so a trending day produced no entry at all.
+
+| Rule | Standard | Scalp |
+|---|---|---|
+| Entry trigger | EMA 9 retest that resumes | EMA 9 retest **or** a pause of 1–3 counter-trend candles (within the last 3 bars) followed by a real candle closing beyond the pause. A straight run with no pause is **not** an entry |
+| RSI limit | > 30 (PE) / < 70 (CE) | > 18 / < 82, only when price structure confirms the trend |
+| Chase limit | ≤ 1 ATR beyond EMA 9 | ≤ 3.5 ATR beyond EMA 9, and the last bar is not a blow-off (range ≤ 2.5 ATR) |
+| ADX / Supertrend | must agree | must agree **or** price structure confirms the trend (they lag) |
+| Higher timeframe | must agree | must not be against |
+| Index room to S1 / R1 | ≥ 1 ATR | ≥ 0.5 ATR (≈ 20 pts); passes when there is no level |
+| Signal freshness | ≤ 3 bars old, ≤ 1.0 ATR moved | ≤ 2 bars old, ≤ 0.6 ATR moved (expires after 6 bars) |
+
+Unchanged in both modes: score ≥ 70, not sideways, Data Check dashboard must agree, 09:30–15:00 IST entry window, option-volume gate.
+Rules live in `MODES` (indicators.py). Paper trades record the mode (`ctx_mode`) so you can compare the two in the CSV.
+API: `GET /api/analysis?symbol=NIFTY&interval=5&mode=scalp|standard`. Tests: `python tests/test_scalp.py`.

@@ -8,7 +8,7 @@ Every signal therefore carries the time it was generated, its age, and how far p
 """
 from datetime import datetime, timedelta, timezone
 
-from indicators import IST, analyze, drop_forming, normalize_candles
+from indicators import IST, analyze, drop_forming, mode_rules, normalize_candles
 
 # ---- tunable rules (starting values - review them against your paper-trade CSV) ----
 FRESH_BARS = 3            # a signal older than this many candles is LATE (3 x 5m = 15 min)
@@ -30,7 +30,7 @@ def _pack_bar(cs, i, interval):
             "text": _hhmm(close_dt) + " IST", "price": cs[i]["close"]}
 
 
-def replay_signal_start(raw_candles, interval, current, htf_raw=None, htf_interval=None, volume_source=None, now=None):
+def replay_signal_start(raw_candles, interval, current, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard"):
     """When did the CURRENT technical signal begin? Re-runs analyze() on the candles as they stood at each earlier
     closed bar (same session only) and walks back while the signal is unchanged. Deterministic and restart-proof.
     Returns {"key": bar | None, "lean": bar | None, "bars": int, "capped": bool} or None if there is too little history.
@@ -53,7 +53,7 @@ def replay_signal_start(raw_candles, interval, current, htf_raw=None, htf_interv
         close_dt = cs[j]["_dt"] + timedelta(minutes=interval)
         htf_sub = [c for c in htf_cs if c["_dt"] + timedelta(minutes=htf_interval) <= close_dt]
         r = analyze(cs[:j + 1], current.get("symbol", "NIFTY"), interval, htf_raw=htf_sub or None,
-                    htf_interval=htf_interval if htf_sub else None, volume_source=volume_source, now=close_dt)
+                    htf_interval=htf_interval if htf_sub else None, volume_source=volume_source, now=close_dt, mode=mode)
         if r.get("status") != "ok":
             break
         sig = r.get("signal") or "WAIT"
@@ -112,10 +112,12 @@ def dashboard_summary(dash):
                         "detail": c.get("detail", "")} for c in dash.get("contributions", [])]}
 
 
-def fuse(a, dash, replay, dash_track, now_dt, market_open, interval):
+def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard"):
     """Combine technical analysis `a` (indicators.analyze output) with the dashboard final signal `dash`
     (dashboard_data.final_signal output). Returns {"gates": [...extra hard gates...], "final": {...}, "timing": {...}, "dashboard": {...}}."""
     now_dt = now_dt.astimezone(IST)
+    rules = mode_rules(mode)
+    fresh_bars, expire_bars, max_chase = rules["fresh_bars"], rules["expire_bars"], rules["max_chase_atr"]
     side = a.get("side")
     sig = a.get("signal") or "WAIT"
     tech_level = "CONFIRMED" if sig.startswith("CONFIRMED") else "WATCH" if sig.startswith("WATCH") else "WAIT"
@@ -150,7 +152,7 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval):
     timing = {"state": "NONE", "side": side, "generated_at": None, "generated_at_text": None, "age_minutes": None, "age_bars": None,
               "signal_price": None, "price_now": a.get("last_close"), "moved_atr": None, "basis": None, "estimated": False,
               "lean_since_text": lean_run["text"] if lean_run else None, "rules": {
-                  "fresh_minutes": FRESH_BARS * interval, "expire_minutes": EXPIRE_BARS * interval, "max_chase_atr": MAX_CHASE_ATR}}
+                  "fresh_minutes": fresh_bars * interval, "expire_minutes": expire_bars * interval, "max_chase_atr": max_chase}}
 
     def describe(since_dt, price, basis, estimated):
         age_min = max(0.0, (now_dt - since_dt).total_seconds() / 60.0)
@@ -177,9 +179,9 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval):
         if tech_run and replay.get("capped"):
             timing["estimated"] = True
         if precheck:
-            if age_min > EXPIRE_BARS * interval:
+            if age_min > expire_bars * interval:
                 state = "EXPIRED"
-            elif age_min > FRESH_BARS * interval or (moved is not None and moved > MAX_CHASE_ATR):
+            elif age_min > fresh_bars * interval or (moved is not None and moved > max_chase):
                 state = "LATE"
             else:
                 state = "FRESH"
@@ -188,12 +190,12 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval):
             detail = f"Generated {timing['generated_at_text']} · {age_min:.0f} min ago{mv}"
             if state != "FRESH":
                 detail += " — don't chase; wait for a new pullback signal"
-            fresh_gate = {"label": f"Signal fresh (≤ {FRESH_BARS * interval} min old, ≤ {MAX_CHASE_ATR:g} ATR moved)", "pass": state == "FRESH", "detail": detail}
+            fresh_gate = {"label": f"Signal fresh (≤ {fresh_bars * interval} min old, ≤ {max_chase:g} ATR moved)", "pass": state == "FRESH", "detail": detail}
         else:
             timing["state"] = "FORMING"
     elif precheck:   # confirmed but the age cannot be established -> refuse rather than assume fresh
         timing["state"] = "UNKNOWN"
-        fresh_gate = {"label": f"Signal fresh (≤ {FRESH_BARS * interval} min old, ≤ {MAX_CHASE_ATR:g} ATR moved)", "pass": False,
+        fresh_gate = {"label": f"Signal fresh (≤ {fresh_bars * interval} min old, ≤ {max_chase:g} ATR moved)", "pass": False,
                       "detail": "Not enough same-session candle history to verify when the signal was generated"}
     if fresh_gate:
         gates.append(fresh_gate)
