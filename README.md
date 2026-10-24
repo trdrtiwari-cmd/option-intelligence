@@ -63,7 +63,7 @@ Copy `.env.example` values into environment variables. Never paste API secrets i
    - `UPSTOX_API_SECRET`
    - `UPSTOX_REDIRECT_URI=https://YOUR-SERVICE.onrender.com/auth/callback`
    - `UPSTOX_ACCESS_TOKEN` (optional quick-start; replace it as required by Upstox)
-   - `DASHBOARD_PASSWORD` (recommended: browser asks for it; username can be anything)
+   - `DATABASE_URL` (PostgreSQL connection string — required for accounts to survive restarts) and `SIGNUP_CODE` (private invite code for creating accounts); see the v1.10.0 section
    - `TRADINGVIEW_WEBHOOK_SECRET` (optional, long random value; enables protected webhook endpoint)
 6. Register the exact same redirect URI in the Upstox developer app, redeploy, then use **Connect Upstox**.
 7. Check `/api/status`, then load live derivatives during market hours.
@@ -102,7 +102,7 @@ Create a TradingView alert with webhook URL `https://YOUR-APP.onrender.com/api/t
 {"secret": "YOUR_TRADINGVIEW_WEBHOOK_SECRET", "symbol": "{{ticker}}", "signal": "BUY_CE", "price": {{close}}}
 ```
 
-The latest alert is available at `GET /api/tradingview/last-alert`. (The webhook path is exempt from `DASHBOARD_PASSWORD`; it is protected by its own secret.)
+The latest alert is available at `GET /api/tradingview/last-alert`. (The webhook path is exempt from the login; it is protected by its own secret.)
 
 ## Revision notes (fixes in this version)
 
@@ -224,3 +224,29 @@ Why: on a fast fall (price ~3 ATR under EMA 9, RSI in the 20s, no retest of EMA 
 Unchanged in both modes: score ≥ 70, not sideways, Data Check dashboard must agree, 09:30–15:00 IST entry window, option-volume gate.
 Rules live in `MODES` (indicators.py). Paper trades record the mode (`ctx_mode`) so you can compare the two in the CSV.
 API: `GET /api/analysis?symbol=NIFTY&interval=5&mode=scalp|standard`. Tests: `python tests/test_scalp.py`.
+
+
+## v1.10.0 — accounts, login and automatic saving
+
+**What changed.** The site now has sign-up, log-in and log-out. Everything except `/health`, `/login` and the TradingView webhook
+needs a login. Your paper trades, paper capital, risk-guard settings and preferences (signal mode, refresh rates) are saved to
+your account automatically a moment after every change, and are loaded on any device you log in from. The old shared
+`DASHBOARD_PASSWORD` browser pop-up is gone.
+
+**Required on Render: a database.** Render's free web service has no permanent disk, so a local file would lose every account on
+each restart/deploy. Create a free PostgreSQL database with any provider (for example Neon or Supabase — check their current free
+limits; Render's own PostgreSQL also works) and put its connection string into the `DATABASE_URL` environment variable. Tables are created
+automatically on first start. Without `DATABASE_URL` the app uses a SQLite file (`data/option_intelligence.db`) — fine for running on your own computer.
+
+**Who can sign up.**
+* Set `SIGNUP_CODE` on Render to a long private phrase. People create an account with that invite code. (If you leave it empty but still have the old `DASHBOARD_PASSWORD` set, that is used as the code.)
+* If neither is set, only the very first account can be created — it becomes the **owner** — and sign-ups then close. Do the first sign-up yourself immediately after deploying.
+* Only the owner can use **Connect Upstox** (the market-data token is shared by everyone who logs in).
+
+**Pages / buttons.** `/login` (log in or create account), `/account` (change password, download your data as JSON, delete account), and a header chip on every page showing *Saved ✓ 10:32* (or *Saving…* / *Offline — unsaved, will retry*), your username and **Log out**.
+
+**How saving works.** `static/sync.js` runs before the app, loads your saved data into the browser, and then watches the same browser storage the app already uses — no app code changed. Changes are uploaded after ~1.5 s (price-only refreshes of open paper trades every 30 s), when you hide/close the tab, and when you log out. If the connection drops, changes stay on the device and are retried. Two devices editing at once are merged (paper trades by trade id; a closed trade beats an open copy). Data that was in your browser before accounts existed is uploaded to the first account that signs in.
+
+**Security notes.** Passwords are hashed with scrypt; sessions are random tokens (only a hash is stored) in an HttpOnly, SameSite cookie, valid 30 days of activity; login attempts are rate-limited; cross-site write requests are refused. There is no email, so a forgotten password is reset by the owner: `DATABASE_URL=... python manage_users.py reset-password NAME` (also `list`, `make-admin`, `delete`).
+
+**Tests.** `python tests/test_accounts.py` (accounts, sessions, saved data, login middleware) and `node tests/sync/run.js` (the auto-save script against the real storage code: migration, two devices, outage, shared browser, logout).

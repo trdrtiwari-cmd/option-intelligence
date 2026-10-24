@@ -2,15 +2,18 @@ import os, re, base64, secrets, threading, time, asyncio, json, logging, importl
 from datetime import date, timedelta, datetime, timezone, time as dtime
 from pathlib import Path
 from urllib.parse import urlencode
+from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from indicators import IST, MODES, analyze, merge_volume, normalize_candles, parse_time
 from instruments import FutureScanner, pick_front_future
 from feed_parser import parse_feed_message
+import accounts as acc
 import dashboard_data as dd
 import signal_fusion as sf
 
@@ -29,37 +32,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-# ---------------------------------------------------------------- optional password gate
-class BasicAuthMiddleware:
-    """Pure-ASGI Basic-auth gate (HTTP + WebSocket). /health and the TradingView webhook
-    (which has its own secret) stay open. Enabled only when DASHBOARD_PASSWORD is set."""
-    OPEN_PATHS = {"/health", "/api/tradingview/webhook"}
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] not in ("http", "websocket") or scope.get("path") in self.OPEN_PATHS:
-            return await self.app(scope, receive, send)
-        auth = dict(scope.get("headers") or []).get(b"authorization", b"").decode("latin-1")
-        ok = False
-        if auth.lower().startswith("basic "):
-            try:
-                _, _, pw = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
-                ok = secrets.compare_digest(pw, DASHBOARD_PASSWORD)
-            except Exception:
-                ok = False
-        if ok:
-            return await self.app(scope, receive, send)
-        if scope["type"] == "websocket":
-            await send({"type": "websocket.close", "code": 4401})
-            return
-        await send({"type": "http.response.start", "status": 401, "headers": [
-            (b"www-authenticate", b'Basic realm="Option Intelligence"'), (b"content-type", b"text/plain")]})
-        await send({"type": "http.response.body", "body": b"Authentication required"})
-
-
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.10.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -71,8 +44,7 @@ class NoCacheStaticFiles(StaticFiles):
 
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
-if DASHBOARD_PASSWORD:
-    app.add_middleware(BasicAuthMiddleware)
+app.add_middleware(acc.SessionAuthMiddleware)   # login required everywhere except /health, /login and the TradingView webhook
 app.mount("/static", NoCacheStaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 oauth_states = set()
@@ -495,6 +467,168 @@ async def home():
     return FileResponse(BASE_DIR / "static" / "index.html", headers={"Cache-Control": "no-cache"})
 
 
+
+# ================================================================ accounts, login and saved data (v1.10)
+class CredsBody(BaseModel):
+    username: str = ""
+    password: str = ""
+    code: str = ""
+
+
+class PasswordBody(BaseModel):
+    old_password: str = ""
+    new_password: str = ""
+
+
+class DeleteBody(BaseModel):
+    password: str = ""
+
+
+class DataBody(BaseModel):
+    value: Any = None
+    base_version: Optional[int] = None
+    force: bool = False
+
+
+def _current_user(request: Request):
+    return request.scope.get("oi_user")
+
+
+def _need_user(request: Request):
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail={"detail": "Login required", "login_required": True})
+    return user
+
+
+def _require_admin(request: Request):
+    user = _need_user(request)
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Only the owner account (the first one created) can connect or reconnect Upstox.")
+
+
+def _client_ip(request: Request):
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() if fwd else "") or (request.client.host if request.client else "?")
+
+
+async def _acc(fn, *args, **kwargs):
+    """Run a (blocking) account call in a worker thread and turn AccountError into an HTTP error."""
+    try:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    except acc.AccountError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message)
+
+
+def _set_session_cookie(request: Request, response, token):
+    https = request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https" or request.url.scheme == "https"
+    response.set_cookie(acc.COOKIE_NAME, token, max_age=acc.SESSION_DAYS * 86400, httponly=True, samesite="lax", secure=https, path="/")
+
+
+@app.get("/login")
+async def login_page():
+    return FileResponse(BASE_DIR / "static" / "login.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/account")
+async def account_page():
+    return FileResponse(BASE_DIR / "static" / "account.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/auth/config")
+async def auth_config(request: Request):
+    try:
+        signup = await asyncio.to_thread(acc.signup_status)
+    except Exception as exc:
+        logger.warning("Account database unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="Account database is unavailable. Check DATABASE_URL.")
+    return {"signup": signup, "user": _current_user(request), "auth_disabled": acc.AUTH_DISABLED, "storage": acc.storage_info()}
+
+
+@app.post("/api/auth/signup")
+async def auth_signup(body: CredsBody, request: Request):
+    ip = _client_ip(request)
+    await _acc(acc.throttle_check, "signup:" + ip, 8, 3600)
+    acc.throttle_fail("signup:" + ip)
+    user = await _acc(acc.create_user, body.username, body.password, body.code)
+    token = await _acc(acc.create_session, user["id"], request.headers.get("user-agent", ""))
+    response = JSONResponse({"user": user})
+    _set_session_cookie(request, response, token)
+    return response
+
+
+@app.post("/api/auth/login")
+async def auth_login(body: CredsBody, request: Request):
+    ip, uname = _client_ip(request), acc.normalise_username(body.username)
+    for key, limit in (("ipu:" + ip + "|" + uname, 5), ("user:" + uname, 10), ("ip:" + ip, 30)):
+        await _acc(acc.throttle_check, key, limit, 600)
+    try:
+        user = await _acc(acc.authenticate, body.username, body.password)
+    except HTTPException:
+        for key in ("ipu:" + ip + "|" + uname, "user:" + uname, "ip:" + ip):
+            acc.throttle_fail(key)
+        raise
+    acc.throttle_clear("ipu:" + ip + "|" + uname)
+    token = await _acc(acc.create_session, user["id"], request.headers.get("user-agent", ""))
+    response = JSONResponse({"user": user})
+    _set_session_cookie(request, response, token)
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    await _acc(acc.end_session, request.scope.get("oi_token"))
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(acc.COOKIE_NAME, path="/")
+    return response
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    return {"user": _need_user(request), "storage": acc.storage_info()}
+
+
+@app.post("/api/auth/password")
+async def auth_password(body: PasswordBody, request: Request):
+    user = _need_user(request)
+    await _acc(acc.change_password, user["id"], body.old_password, body.new_password, request.scope.get("oi_token"))
+    return {"ok": True, "note": "Other devices were signed out."}
+
+
+@app.post("/api/auth/delete")
+async def auth_delete(body: DeleteBody, request: Request):
+    user = _need_user(request)
+    await _acc(acc.delete_user, user["id"], body.password)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(acc.COOKIE_NAME, path="/")
+    return response
+
+
+@app.get("/api/userdata")
+async def userdata_all(request: Request):
+    user = _need_user(request)
+    return {"user": user, "data": await _acc(acc.get_all_data, user["id"]), "server_time": time.time()}
+
+
+@app.put("/api/userdata/{key}")
+async def userdata_put(key: str, body: DataBody, request: Request):
+    user = _need_user(request)
+    try:
+        saved = await asyncio.to_thread(acc.put_data, user["id"], key, body.value, body.base_version, body.force)
+    except acc.AccountError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message)
+    except acc.Conflict as exc:
+        return JSONResponse({"detail": "Saved data changed on another device.", "conflict": True, "current": exc.current}, status_code=409)
+    return {"ok": True, **saved}
+
+
+@app.delete("/api/userdata/{key}")
+async def userdata_delete(key: str, request: Request):
+    user = _need_user(request)
+    await asyncio.to_thread(acc.delete_data, user["id"], key)
+    return {"ok": True}
+
+
 @app.get("/api/status")
 async def status():
     state = await check_token_state()
@@ -505,14 +639,15 @@ async def status():
         "mode": "Upstox REST + optional V3 WebSocket; analysis-only; no orders are placed",
         "websocket_sdk_available": importlib.util.find_spec("upstox_client") is not None,
         "tradingview_webhook_configured": bool(os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "").strip()),
-        "password_protected": bool(DASHBOARD_PASSWORD),
+        "password_protected": True,
         "futures_volume": {"ready": bool(FUTURES["rows"]), "error": FUTURES["error"]},
         "market": market_status(),
     }
 
 
 @app.get("/api/login")
-async def login():
+async def login(request: Request):
+    _require_admin(request)
     if not (UPSTOX_API_KEY and UPSTOX_REDIRECT_URI):
         raise HTTPException(status_code=400, detail="Set UPSTOX_API_KEY and UPSTOX_REDIRECT_URI first.")
     state = secrets.token_urlsafe(24)
@@ -524,6 +659,7 @@ async def login():
 @app.get("/auth/callback")
 async def auth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     global runtime_token
+    _require_admin(request)
     if error:
         raise HTTPException(status_code=400, detail=f"Upstox login failed: {error}")
     if not code or not state or state not in oauth_states:
