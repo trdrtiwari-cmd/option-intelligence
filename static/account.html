@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Account · Option Intelligence</title>
+  <link rel="stylesheet" href="/static/style.css?v=1.10.0">
+</head>
+<body>
+<header class="topbar">
+  <div><div class="brand">OPTION <span>INTELLIGENCE</span></div><div class="sub">Your account</div></div>
+  <div class="top-actions"><a class="button secondary" href="/">← Main terminal</a></div>
+</header>
+<main class="account-main">
+  <section class="panel"><h2>Profile</h2><div id="profile" class="sub">Loading…</div><div id="storageNote" class="notice warning" hidden></div></section>
+  <section class="panel"><h2>Saved data</h2>
+    <p class="sub">Paper trades, capital, risk guards and your preferences are saved to this account automatically a moment after every change.</p>
+    <div id="savedList" class="sub">Loading…</div>
+    <div class="account-actions"><button id="exportBtn" class="secondary" type="button">Download my data (JSON)</button></div>
+  </section>
+  <section class="panel"><h2>Change password</h2>
+    <form id="pwForm" class="account-form">
+      <label>Current password<input id="oldPw" type="password" autocomplete="current-password" maxlength="128"></label>
+      <label>New password<input id="newPw" type="password" autocomplete="new-password" maxlength="128"></label>
+      <label>Repeat new password<input id="newPw2" type="password" autocomplete="new-password" maxlength="128"></label>
+      <button type="submit">Change password</button><span id="pwMsg" class="sub"></span>
+    </form>
+  </section>
+  <section class="panel"><h2>Delete account</h2>
+    <p class="sub">Permanently deletes this account and everything saved in it. This cannot be undone.</p>
+    <form id="delForm" class="account-form"><label>Password<input id="delPw" type="password" autocomplete="current-password" maxlength="128"></label>
+      <button class="danger" type="submit">Delete my account</button><span id="delMsg" class="sub"></span></form>
+  </section>
+</main>
+<div id="toast" class="toast" role="status"></div>
+<script src="/static/account.js?v=1.10.0"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sign in · Option Intelligence</title>
+  <link rel="stylesheet" href="/static/style.css?v=1.10.0">
+</head>
+<body class="auth-body">
+<main class="auth-wrap">
+  <div class="auth-brand"><div class="brand">OPTION <span>INTELLIGENCE</span></div><div class="sub">Intraday options research terminal</div></div>
+  <section class="panel auth-card">
+    <div class="auth-tabs" role="tablist">
+      <button type="button" id="tabLogin" class="auth-tab active" role="tab">Log in</button>
+      <button type="button" id="tabSignup" class="auth-tab" role="tab">Create account</button>
+    </div>
+    <div id="authNote" class="notice" hidden></div>
+    <form id="authForm" autocomplete="on" novalidate>
+      <label>Username<input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" required></label>
+      <label>Password<input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+      <label id="confirmRow" hidden>Repeat password<input id="confirm" type="password" autocomplete="new-password" maxlength="128"></label>
+      <label id="codeRow" hidden>Invite code<input id="code" name="code" autocomplete="off" spellcheck="false" maxlength="128"></label>
+      <div id="authHint" class="sub small"></div>
+      <div id="authError" class="auth-error" role="alert" hidden></div>
+      <button id="authSubmit" type="submit">Log in</button>
+    </form>
+    <div class="sub small auth-foot">Your paper trades, capital and settings are saved to your account automatically and follow you to any device.</div>
+  </section>
+</main>
+<script src="/static/login.js?v=1.10.0"></script>
+</body>
+</html>
