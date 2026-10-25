@@ -288,3 +288,12 @@ Tests: `python tests/test_diagnostics.py`.
 **Diagnostics are harder to fool.** Gate-relaxation advice now needs a two-sample significance test (it previously fired on noise); the best exit is flagged as "best of 36" and shown for the first and second half of the period; its edge vs random entries is measured at that same exit with a stricter 3-SE bar; a breakeven-trail test (+10/15/20/30 pts) is reported; new breakdown "with / against the session's move". Tests: random walks never look profitable at 60/20 once averaged across seeds.
 
 **Before trusting any of this:** re-run `/diagnostics` on a different 15–20-day window (and ideally a rising market). Saved browser settings override the new defaults — reset the Risk guard panel once to pick them up.
+
+
+## v1.11.2 — second diagnostics run (19 days, 2026-09-25 → 10-23) and honesty checks
+
+**What the re-run showed.** Scalp: 150 signals, +4.2 pts/trade at 60/20 (60/15: +4.9), beats random entries by +7.0 (real), positive in both halves, every cell of the 60-target row positive again, breakeven trail loses again (keep it OFF), 13:30–15:30 entries still lose (cutoff confirmed). Standard: 62 signals, +3.0, not distinguishable from random.
+
+**But:** 14 of the 19 days were already in the first run, so this is not an independent test. The five genuinely new days (Sep 25 – Oct 1) made **−1.25 pts/trade over 34 scalp signals** (standard: −1.3 over 11). And **one day, 2026-10-08, made +473 of the +626 scalp points**; without it the other 132 trades made +1.2/trade. In standard mode, without that day the result is −2.2/trade. Treat this as a trend-day capture system with a ~40 % win rate whose profit arrives on a few days.
+
+**Diagnostics now report** profit concentration by day, a guard-style execution test (one open trade at a time; stop for the day after 2 / 3 losses in a row), and a per-trade list (`trades`, in the downloaded JSON) so any filter can be tested on the exact signals. No further engine rule was changed: every remaining candidate (pause-break trigger −12 pts over 10 trades, BULLISH-bias bucket 1 win in 10, CE vs PE) is either under 2 standard errors, or its trades sit on 2–3 days, or it only mirrors this month's falling market.

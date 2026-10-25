@@ -109,6 +109,51 @@ def first_touch(path, entry, d, target, stop):
     return d * (path[-1]["close"] - entry), "time"
 
 
+def exit_index(path, entry, d, target, stop):
+    """1-based number of the candle on which first_touch exits (a time exit = the last candle)."""
+    for k, c in enumerate(path, 1):
+        adverse = (entry - c["low"]) if d > 0 else (c["high"] - entry)
+        fav = (c["high"] - entry) if d > 0 else (entry - c["low"])
+        if adverse >= stop or fav >= target:
+            return k
+    return len(path)
+
+
+def execution_sim(rows, target, stop, cost, max_losses=None, one_at_a_time=True):
+    """Trade the signals the way the paper-trade guard would: one open trade at a time, and (optionally) stop for the day after
+    `max_losses` losses in a row. Signals are all backtested as if independent, which overstates trades on bad days."""
+    pnls, free_at, streak = [], -1, {}
+    for r in sorted(rows, key=lambda r: r["i"]):
+        if one_at_a_time and r["i"] < free_at:
+            continue
+        if max_losses and streak.get(r["day"], 0) >= max_losses:
+            continue
+        pnl = first_touch(r["_path"], r["entry"], r["_d"], target, stop)[0] - cost
+        free_at = r["i"] + exit_index(r["_path"], r["entry"], r["_d"], target, stop)
+        streak[r["day"]] = streak.get(r["day"], 0) + 1 if pnl <= 0 else 0
+        pnls.append(pnl)
+    return stats(pnls)
+
+
+def day_concentration(rows):
+    """Trades on the same day share one market move, so they are not independent. How much of the profit is one day?"""
+    by = {}
+    for r in rows:
+        by.setdefault(r["day"], []).append(r["pnl"])
+    if not by:
+        return None
+    totals = {d: sum(v) for d, v in by.items()}
+    top = max(totals, key=totals.get)
+    return {"days": len(by), "winning_days": sum(1 for t in totals.values() if t > 0), "total": round(sum(totals.values()), 1),
+            "top_day": top, "top_day_total": round(totals[top], 1), "without_top": stats([r["pnl"] for r in rows if r["day"] != top])}
+
+
+def trade_list(rows):
+    return [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "score": r["score"], "phase": r["phase"] or r["regime"], "trigger": r["trigger"],
+             "rsi_ext": None if r["rsi_ext"] is None else round(r["rsi_ext"], 1), "stretch_atr": None if r["stretch_atr"] is None else round(r["stretch_atr"], 2),
+             "with_day": r["with_day"], "mfe": round(r["mfe"], 1), "mae": round(r["mae"], 1), "pnl": round(r["pnl"], 1), "exit": r["exit"]} for r in rows]
+
+
 def first_touch_be(path, entry, d, target, stop, be_at):
     """Like first_touch, but once price has gone `be_at` points your way the stop moves to breakeven (entry). The move applies
     from the NEXT candle, which is slightly optimistic for the trail (a same-candle reversal is not punished), so if the trail
@@ -252,6 +297,12 @@ def build_report(rows_conf, rows_near, params, random_stats=None, random_fn=None
                 for b in (10, 15, 20, 30) if b < be["target"]]
             if random_fn:
                 report["random_at_best"] = random_fn(be["target"], be["stop"])
+            report["execution"] = [{"label": "every signal, overlaps allowed", **stats([r["grid"][key] for r in rows_conf])},
+                                   {"label": "one trade at a time", **execution_sim(rows_conf, be["target"], be["stop"], cost)},
+                                   {"label": "+ stop for the day after 2 losses in a row", **execution_sim(rows_conf, be["target"], be["stop"], cost, 2)},
+                                   {"label": "+ stop for the day after 3 losses in a row", **execution_sim(rows_conf, be["target"], be["stop"], cost, 3)}]
+        report["day_concentration"] = day_concentration(rows_conf)
+        report["trades"] = trade_list(rows_conf)
     report["groups"] = {
         "Time of day (IST)": _bucket(rows_conf, _hour, [h[0] for h in HOUR_BUCKETS]),
         "Side": _bucket(rows_conf, lambda r: r["side"]),
@@ -345,6 +396,17 @@ def verdict(rep):
                             f"Turn the paper-trade trail off for this exit (the test is slightly generous to the trail, so live results would be worse)."})
             elif best_t["avg"] > tc[0]["avg"] + 0.5:
                 out.append({"level": "info", "text": f"A breakeven trail after +{best_t['be_at']} pts would have helped slightly: {best_t['avg']:+.1f} vs {tc[0]['avg']:+.1f} with no trail (within noise unless the sample is large)."})
+    dc = rep.get("day_concentration")
+    if dc and dc["total"] > 0 and dc["top_day_total"] > 0.5 * dc["total"] and dc["without_top"].get("n"):
+        wt = dc["without_top"]
+        out.append({"level": "bad" if wt["avg"] <= 0 else "info",
+                    "text": f"Profit concentration: {dc['top_day']} alone made {dc['top_day_total']:+.0f} of the {dc['total']:+.0f} total points; without that day the other {wt['n']} trades "
+                            f"made {wt['avg']:+.1f} per trade. {dc['winning_days']} of {dc['days']} days were profitable. Trades on one day share one market move, so the real sample is the number of days, not trades."})
+    ex = rep.get("execution") or []
+    if len(ex) >= 4 and all(e.get("n") for e in ex):
+        best_e = max(ex[1:], key=lambda e: e["avg"] * e["n"])
+        out.append({"level": "info", "text": "Trading it the way the guard would (" + "; ".join(f"{e['label']}: {e['n']} trades, {e['avg']:+.1f}/trade, {e['total']:+.0f} total" for e in ex[1:]) +
+                    f"). Highest total: “{best_e['label']}”."})
     worst, best = [], []
     for name, rows in rep["groups"].items():
         for g in rows:
