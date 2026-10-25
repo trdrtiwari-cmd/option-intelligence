@@ -93,6 +93,25 @@ def test_breakeven_trail_and_new_report_fields():
     assert "With / against the session's move (open → signal)" in rep["groups"]
 
 
+def test_execution_sim_concentration_and_trade_list():
+    rep = dg.run(staircase_days(6, 3), mode="scalp", cost=2.0)
+    ex = rep["execution"]
+    assert [e["label"][:5] for e in ex] == ["every", "one t", "+ sto", "+ sto"]
+    assert ex[1]["n"] <= ex[0]["n"] and ex[2]["n"] <= ex[1]["n"] and ex[3]["n"] >= ex[2]["n"]      # each rule can only remove trades
+    assert rep["day_concentration"]["days"] >= 1 and len(rep["trades"]) == rep["confirmed"]["count"]
+    # one-at-a-time: a signal that fires while a trade is still open is skipped
+    path = [c(100, 101, 99, 100)] * 12                                                     # never exits: held for 12 candles
+    rows = [{"i": 5, "day": "d", "entry": 100.0, "_path": path, "_d": 1}, {"i": 9, "day": "d", "entry": 100.0, "_path": path, "_d": 1}]
+    assert dg.execution_sim(rows, 60, 20, 0)["n"] == 1 and dg.execution_sim(rows, 60, 20, 0, one_at_a_time=False)["n"] == 2
+    assert dg.exit_index([c(100, 101, 99, 100), c(100, 165, 99, 160)], 100.0, 1, 60, 20) == 2
+    # profit concentration is called out
+    rows = [{"day": "a", "pnl": 100.0}, {"day": "b", "pnl": -10.0}, {"day": "b", "pnl": -10.0}, {"day": "c", "pnl": 5.0}]
+    assert dg.day_concentration(rows)["top_day"] == "a"
+    rep2 = {"confirmed": {"count": 4, "stats": dg.stats([100, -10, -10, 5])}, "params": {"target": 60, "stop": 20, "cost": 0}, "groups": {}, "ablation": [],
+            "day_concentration": dg.day_concentration(rows), "random_entries": {}}
+    assert any("Profit concentration" in v["text"] and v["level"] == "bad" for v in dg.verdict(rep2))
+
+
 def test_noise_gap_is_not_a_correction():
     base = {"n": 55, "avg": 0.06, "se": 3.32}
     assert not dg._diff_sig({"n": 26, "avg": 5.62, "se": 4.82}, base)      # the real standard-mode "not chasing" gap: 0.95 SE -> noise
