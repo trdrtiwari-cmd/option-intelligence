@@ -64,14 +64,44 @@ def test_end_to_end_on_trending_data_finds_signals():
     assert std["confirmed"]["count"] < rep["confirmed"]["count"]               # standard mode takes far fewer entries on this data
 
 
-def test_random_walk_has_no_edge():
-    rnd, price, rows, t = random.Random(5), 22800.0, [], datetime(2026, 10, 5, 9, 15, tzinfo=IST)
-    for d in range(14):
+def walk(seed, days=14):
+    rnd, price, rows = random.Random(seed), 22800.0, []
+    for d in range(days):
         t = datetime(2026, 10, 5, 9, 15, tzinfo=IST) + timedelta(days=d)
         for k in range(75):
             o = price; price += rnd.gauss(0, 9); rows.append({"time": (t + timedelta(minutes=5 * k)).isoformat(), "open": o, "high": max(o, price) + rnd.uniform(0, 5),
                                                               "low": min(o, price) - rnd.uniform(0, 5), "close": price, "volume": 0})
-    rep = dg.run(rows, mode="scalp", cost=4.0)
+    return rows
+
+
+def test_wide_exit_makes_no_phantom_edge_on_noise():
+    """The 60/20 exit must not look profitable on a random walk once you average over several different walks."""
+    avgs = [dg.run(walk(s), mode="scalp", cost=4.0, target=60, stop=20)["confirmed"]["stats"]["avg"] for s in (5, 6, 7, 8, 9, 10)]
+    print("random-walk mean of avg pts/trade at 60/20:", round(sum(avgs) / len(avgs), 2))
+    assert sum(avgs) / len(avgs) < 1.0
+
+
+def test_breakeven_trail_and_new_report_fields():
+    entry = 100.0
+    # +15 reached, then price returns to entry -> breakeven trail exits at 0 where no-trail would later hit the stop
+    path = [c(100, 116, 99, 112), c(112, 113, 100, 101), c(101, 102, 70, 75)]
+    assert dg.first_touch_be(path, entry, 1, 60, 20, 15) == (0.0, "stop") or dg.first_touch_be(path, entry, 1, 60, 20, 15)[0] == -0.0
+    assert dg.first_touch(path, entry, 1, 60, 20) == (-20.0, "stop")
+    assert dg.first_touch_be([c(100, 165, 99, 160)], entry, 1, 60, 20, 15) == (60.0, "target")
+    rep = dg.run(staircase_days(6, 3), mode="scalp", cost=2.0)
+    assert "trail_check" in rep and rep["trail_check"][0]["be_at"] is None and "random_at_best" in rep and "halves" in rep
+    assert "With / against the session's move (open → signal)" in rep["groups"]
+
+
+def test_noise_gap_is_not_a_correction():
+    base = {"n": 55, "avg": 0.06, "se": 3.32}
+    assert not dg._diff_sig({"n": 26, "avg": 5.62, "se": 4.82}, base)      # the real standard-mode "not chasing" gap: 0.95 SE -> noise
+    assert dg._diff_sig({"n": 40, "avg": 14.0, "se": 2.0}, base)
+
+
+def test_random_walk_has_no_edge():
+    rows = walk(5)
+    rep = dg.run(rows, mode="scalp", cost=4.0, target=30, stop=20)
     n = rep["confirmed"]["stats"].get("n", 0)
     print("random walk:", n, "signals", rep["confirmed"]["stats"])
     if n >= 8:

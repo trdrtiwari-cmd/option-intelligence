@@ -88,6 +88,26 @@ def test_rules_exposed_and_fusion_uses_them():
     assert sf.fuse(tech, dash, replay, None, now, True, 5, mode="standard")["timing"]["state"] == "FRESH"
 
 
+def test_rsi_momentum_zone_gate_and_entry_cutoff():
+    """v1.11.1: diagnostics showed entries without RSI momentum (PE with RSI >= 40) went 0 for 11 -> new gate in both modes."""
+    import signal_fusion as F
+    assert F.ENTRY_CUTOFF_MIN == 13 * 60 + 30, "entries after 13:30 IST lost in both diagnostics modes"
+    seen = 0
+    for ending in ([-20], [-20, -20, -20], [-20, 40, 40, 40, 40, 40, 40]):
+        for mode in ("standard", "scalp"):
+            a = run(selloff(ending), mode)
+            if not a.get("side"):
+                continue
+            g = gate(a, "Momentum established")
+            want = a["rsi"] > 60 if a["side"] == "CE" else a["rsi"] < 40
+            assert g["pass"] == want, (mode, a["side"], a["rsi"], g)
+            if not g["pass"]:
+                assert not a["signal"].startswith("CONFIRMED"), "a failed RSI-momentum gate must block confirmation"
+                seen += 1
+    a = run(selloff([-20]), "scalp")
+    assert a["rsi"] < 40 and gate(a, "Momentum established")["pass"] and a["signal"] == "CONFIRMED_PE"   # the fast-fall entry survives
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
