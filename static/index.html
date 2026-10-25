@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.11.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.11.1">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -158,14 +158,14 @@
           <label>Risk mode<select id="paperRiskMode"><option value="atr">ATR-based (option premium)</option><option value="manual">Manual SL / targets</option></select></label>
           <label>Quantity (units<span id="paperLotHint"></span>)<input id="paperQty" type="number" min="1" step="1" value="1"></label>
           <label>Entry price<input id="paperEntry" type="number" min="0.05" step="0.05" placeholder="Auto from selected option LTP"></label>
-          <label>Exit target<select id="paperExitTarget"><option value="t1">Auto-exit at Target 1</option><option value="t2">Auto-exit at Target 2</option><option value="t3">Auto-exit at Target 3</option><option value="manual">Manual exit only</option></select></label>
+          <label>Exit target<select id="paperExitTarget"><option value="t1">Auto-exit at Target 1</option><option value="t2">Auto-exit at Target 2</option><option value="t3" selected>Auto-exit at Target 3</option><option value="manual">Manual exit only</option></select></label>
         </div>
         <div id="paperAtrSettings" class="paper-form">
           <label>ATR timeframe<select id="paperAtrInterval"><option value="1">1 minute</option><option value="3">3 minutes</option><option value="5" selected>5 minutes</option><option value="15">15 minutes</option></select></label>
           <label>SL ATR multiplier<input id="paperSlMult" type="number" min="0.1" step="0.1" value="1"></label>
           <label>Target 1 ATR multiplier<input id="paperT1Mult" type="number" min="0.1" step="0.1" value="1.5"></label>
           <label>Target 2 ATR multiplier<input id="paperT2Mult" type="number" min="0.1" step="0.1" value="2.5"></label>
-          <label>Target 3 ATR multiplier<input id="paperT3Mult" type="number" min="0.1" step="0.1" value="3.5"></label>
+          <label>Target 3 ATR multiplier<input id="paperT3Mult" type="number" min="0.1" step="0.1" value="3"></label>
           <div class="atr-readout"><span>Option premium ATR</span><strong id="paperAtrValue">UNAVAILABLE</strong><button type="button" class="secondary" id="paperCalcAtr">Calculate ATR</button></div>
         </div>
         <div id="paperManualSettings" class="paper-form" hidden>
@@ -178,7 +178,7 @@
           <summary>Trade guard — entry rules that block bad trades</summary>
           <div class="paper-form guard-form">
             <label class="check"><input type="checkbox" id="guardEnforce" checked> Enforce (block entries that break a rule)</label>
-            <label class="check"><input type="checkbox" id="guardTrail" checked> Trail stop (breakeven at +1R)</label>
+            <label class="check"><input type="checkbox" id="guardTrail"> Trail stop (breakeven at +1R)</label>
             <label>Max trades / day<input id="guardMaxTrades" type="number" min="0" step="1"></label>
             <label>Daily loss cap (₹)<input id="guardDailyLoss" type="number" min="0" step="500"></label>
             <label>Stop after N losses in a row<input id="guardMaxLosses" type="number" min="0" step="1"></label>
@@ -220,5 +220,5 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/sync.js?v=1.11.0" data-next="/static/app.js?v=1.11.0"></script>
+<script src="/static/sync.js?v=1.11.1" data-next="/static/app.js?v=1.11.1"></script>
 </body></html>
