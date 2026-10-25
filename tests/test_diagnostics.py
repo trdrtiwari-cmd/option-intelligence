@@ -96,8 +96,10 @@ def test_breakeven_trail_and_new_report_fields():
 def test_execution_sim_concentration_and_trade_list():
     rep = dg.run(staircase_days(6, 3), mode="scalp", cost=2.0)
     ex = rep["execution"]
-    assert [e["label"][:5] for e in ex] == ["every", "one t", "+ sto", "+ sto"]
+    assert [e["label"][:5] for e in ex][:3] == ["every", "one t", "+ max"] and len(ex) == 7
     assert ex[1]["n"] <= ex[0]["n"] and ex[2]["n"] <= ex[1]["n"] and ex[3]["n"] >= ex[2]["n"]      # each rule can only remove trades
+    assert ex[4]["n"] <= ex[1]["n"] and ex[5]["n"] >= ex[4]["n"] and ex[6]["n"] <= ex[4]["n"]
+    assert rep["atr_execution"] and rep["atr_day_concentration"]["days"] >= 1
     assert rep["day_concentration"]["days"] >= 1 and len(rep["trades"]) == rep["confirmed"]["count"]
     # one-at-a-time: a signal that fires while a trade is still open is skipped
     path = [c(100, 101, 99, 100)] * 12                                                     # never exits: held for 12 candles
@@ -118,6 +120,18 @@ def test_atr_grid():
     # sized by the ATR at the signal bar: a 2-ATR stop on a trade with ATR 10 is a 20-point stop
     path = [c(100, 101, 79, 80)]
     assert dg.first_touch(path, 100.0, 1, 3 * 10, 2 * 10) == (-20.0, "stop")
+
+
+def test_entry_window_is_applied_to_signals_and_random_baseline():
+    rows = staircase_days(6, 3)
+    allhours = dg.run(rows, mode="scalp", cost=2.0, window=None)
+    win = dg.run(rows, mode="scalp", cost=2.0)                                  # default = the live 09:30-13:30 window
+    assert win["params"]["entry_window"].startswith("09:30–13:30") and allhours["params"]["entry_window"].startswith("off")
+    assert win["confirmed"]["count"] <= allhours["confirmed"]["count"]
+    assert all(570 <= int(t["time"][:2]) * 60 + int(t["time"][3:]) + 5 < 810 for t in win["trades"]), "no trade may close its signal bar outside the window"
+    cs = dg.normalize_candles(rows)
+    inside = [i for i in range(40, len(cs) - 2) if dg.in_window(cs, i, 5, dg.DEFAULT_WINDOW)]
+    assert 0 < len(inside) < len(cs) - 42
 
 
 def test_noise_gap_is_not_a_correction():
