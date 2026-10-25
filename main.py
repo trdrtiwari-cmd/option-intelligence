@@ -15,6 +15,7 @@ from instruments import FutureScanner, pick_front_future
 from feed_parser import parse_feed_message
 import accounts as acc
 import dashboard_data as dd
+import diagnostics as dgn
 import signal_fusion as sf
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -32,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.11.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -627,6 +628,92 @@ async def userdata_delete(key: str, request: Request):
     user = _need_user(request)
     await asyncio.to_thread(acc.delete_data, user["id"], key)
     return {"ok": True}
+
+
+
+# ================================================================ signal diagnostics (v1.11)
+DIAG_JOBS = {}
+DIAG_LOCK = threading.Lock()
+
+
+def _diag_prune():
+    now = time.time()
+    for jid in [j for j, v in DIAG_JOBS.items() if now - v["created"] > 1800 and v["status"] != "running"]:
+        DIAG_JOBS.pop(jid, None)
+
+
+@app.get("/diagnostics")
+async def diagnostics_page():
+    return FileResponse(BASE_DIR / "static" / "diagnostics.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/diagnostics/start")
+async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 15, mode: str = "scalp",
+                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12):
+    """Replays the technical engine over the last `days` of candles and measures what happened after every signal.
+    Runs in a background thread (a 20-day replay takes several seconds locally and longer on a free instance)."""
+    _need_user(request)
+    sym = symbol.upper()
+    if sym not in INDEX_KEYS:
+        raise HTTPException(status_code=400, detail="Unknown index symbol.")
+    if mode not in MODES:
+        raise HTTPException(status_code=400, detail="mode must be one of: " + ", ".join(MODES))
+    if interval not in (1, 3, 5, 15):
+        raise HTTPException(status_code=400, detail="interval must be 1, 3, 5 or 15.")
+    max_days = max(2, int(2500 / (375 / interval)))
+    if not 2 <= days <= min(30, max_days):
+        raise HTTPException(status_code=400, detail=f"days must be between 2 and {min(30, max_days)} for a {interval}-minute chart.")
+    if not (0 <= cost <= 30 and 5 <= target <= 100 and 5 <= stop <= 100 and 3 <= horizon <= 48):
+        raise HTTPException(status_code=400, detail="cost 0-30, target/stop 5-100 points, horizon 3-48 candles.")
+    with DIAG_LOCK:
+        _diag_prune()
+        running = next((j for j, v in DIAG_JOBS.items() if v["status"] == "running"), None)
+        if running:
+            return {"job_id": running, "already_running": True}
+        job_id = secrets.token_urlsafe(8)
+        DIAG_JOBS[job_id] = {"status": "running", "created": time.time(), "progress": 0.0, "report": None, "error": None, "stage": "Fetching candles"}
+    result = None
+    try:
+        result = await candles(symbol=sym, interval=interval, days=days)
+        htf_interval = 15 if interval < 15 else None
+        htf_raw = None
+        if htf_interval:
+            try:
+                htf_raw = (await candles(symbol=sym, interval=htf_interval, days=days))["candles"]
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    raise
+    except HTTPException as exc:
+        DIAG_JOBS[job_id].update(status="error", error=_err_text(exc))
+        return {"job_id": job_id}
+    except Exception as exc:
+        DIAG_JOBS[job_id].update(status="error", error=f"{type(exc).__name__}: {str(exc)[:150]}")
+        return {"job_id": job_id}
+
+    def work():
+        job = DIAG_JOBS[job_id]
+        job["stage"] = "Replaying signals bar by bar"
+        try:
+            rep = dgn.run(result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw, htf_interval=htf_interval,
+                          volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop,
+                          progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
+            rep["params"]["volume_source"] = result.get("volume_source")
+            job.update(status="done", report=rep, progress=1.0, stage="Done")
+        except Exception as exc:
+            logger.warning("Diagnostics failed: %s", exc)
+            job.update(status="error", error=f"{type(exc).__name__}: {str(exc)[:150]}")
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/diagnostics/result")
+async def diagnostics_result(request: Request, job_id: str = ""):
+    _need_user(request)
+    job = DIAG_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown or expired job. Start the analysis again.")
+    return {"status": job["status"], "progress": job["progress"], "stage": job["stage"], "error": job["error"], "report": job["report"]}
 
 
 @app.get("/api/status")

@@ -250,3 +250,17 @@ automatically on first start. Without `DATABASE_URL` the app uses a SQLite file 
 **Security notes.** Passwords are hashed with scrypt; sessions are random tokens (only a hash is stored) in an HttpOnly, SameSite cookie, valid 30 days of activity; login attempts are rate-limited; cross-site write requests are refused. There is no email, so a forgotten password is reset by the owner: `DATABASE_URL=... python manage_users.py reset-password NAME` (also `list`, `make-admin`, `delete`).
 
 **Tests.** `python tests/test_accounts.py` (accounts, sessions, saved data, login middleware) and `node tests/sync/run.js` (the auto-save script against the real storage code: migration, two devices, outage, shared browser, logout).
+
+
+## v1.11.0 — Signal diagnostics (`/diagnostics`)
+
+Answers "where do the corrections need to be?" from your own market history instead of opinion. It replays the technical engine
+bar by bar over the last N days (using only candles that had closed at each moment), then measures what the index did after every signal:
+win rate and points per trade after your cost allowance; an **exit grid** (target × stop) showing which exit rule fits the signals;
+breakdowns by time of day, side, regime, score, RSI, stretch beyond EMA 9, entry trigger and day; and a **gate check** — setups blocked by
+exactly one gate — showing which gate is too strict and which is earning its keep. Every run is compared with **random entries using the
+same exit**, because a signal only has an edge to the extent it beats random. Findings marked CORRECTION / WORKS / PROBLEM in plain language; the full report can be downloaded as JSON.
+
+Limits: technical engine only (the Data Check dashboard has no history to replay); results are in index points, not option rupees; use 15–20 days
+and confirm anything you change on a second, different period. CLI: `python diagnostics.py candles.json scalp 5 4` (candles.json = the `candles` array from `/api/candles`).
+Tests: `python tests/test_diagnostics.py`.
