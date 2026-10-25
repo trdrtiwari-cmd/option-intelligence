@@ -348,7 +348,12 @@ def build_report(rows_conf, rows_near, params, random_stats=None, random_fn=None
             if random_fn:
                 report["random_at_best"] = random_fn(be["target"], be["stop"])
             report["execution"] = execution_table(rows_conf, be["target"], be["stop"], cost)
-        report["day_concentration"] = day_concentration(rows_conf)
+        be2 = report.get("best_exit")
+        if be2:
+            ckey = f"{be2['target']}/{be2['stop']}"
+            report["day_concentration"] = {**day_concentration(rows_conf, lambda r: r["grid"][ckey]), "exit": f"{be2['target']}/{be2['stop']} pts"}
+        else:
+            report["day_concentration"] = {**day_concentration(rows_conf), "exit": f"{cost and params['target']}/{params['stop']} pts"}
         bae = report.get("best_atr_exit")
         if bae:
             arows2 = [r for r in rows_conf if r.get("atr_grid") and r.get("atr")]
@@ -465,7 +470,7 @@ def verdict(rep):
     if dc and dc["total"] > 0 and dc["top_day_total"] > 0.5 * dc["total"] and dc["without_top"].get("n"):
         wt = dc["without_top"]
         out.append({"level": "bad" if wt["avg"] <= 0 else "info",
-                    "text": f"Profit concentration: {dc['top_day']} alone made {dc['top_day_total']:+.0f} of the {dc['total']:+.0f} total points; without that day the other {wt['n']} trades "
+                    "text": f"Profit concentration (at the {dc.get('exit', 'baseline')} exit): {dc['top_day']} alone made {dc['top_day_total']:+.0f} of the {dc['total']:+.0f} total points; without that day the other {wt['n']} trades "
                             f"made {wt['avg']:+.1f} per trade. {dc['winning_days']} of {dc['days']} days were profitable. Trades on one day share one market move, so the real sample is the number of days, not trades."})
     for key, title in (("execution", "Trading the fixed-point exit the way the guard would"), ("atr_execution", "Same with the ATR exit")):
         ex = rep.get(key) or []
@@ -478,7 +483,7 @@ def verdict(rep):
     if adc and adc["total"] > 0 and adc["top_day_total"] > 0.5 * adc["total"] and adc["without_top"].get("n"):
         wt = adc["without_top"]
         out.append({"level": "bad" if wt["avg"] <= 0 else "info",
-                    "text": f"ATR exit — profit concentration: {adc['top_day']} made {adc['top_day_total']:+.0f} of {adc['total']:+.0f} total points; without it the other {wt['n']} trades made {wt['avg']:+.1f} per trade. {adc['winning_days']} of {adc['days']} days were profitable."})
+                    "text": f"ATR exit ({rep.get('best_atr_exit', {}).get('target', '?'):g} × / {rep.get('best_atr_exit', {}).get('stop', '?'):g} × ATR) — profit concentration: {adc['top_day']} made {adc['top_day_total']:+.0f} of {adc['total']:+.0f} total points; without it the other {wt['n']} trades made {wt['avg']:+.1f} per trade. {adc['winning_days']} of {adc['days']} days were profitable."})
     worst, best = [], []
     for name, rows in rep["groups"].items():
         for g in rows:

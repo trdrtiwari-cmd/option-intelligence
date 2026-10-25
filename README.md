@@ -314,3 +314,7 @@ Tests: `python tests/test_diagnostics.py`.
 * Paper-trade ATR multipliers: stop 1.25 × ATR (was 1.0), Target 3 = 4 × ATR (was 3.0), exit at Target 3. The app's ATR is the option's own premium ATR, roughly delta × the index ATR, so these multiples carry over only approximately.
 
 **Not changed (still under the bar):** pause-break trigger (−10.7 over 9 signals, CI −24…+1.1), BULLISH-bias bucket (0 of 5 inside the window), CE-vs-PE, score ≥ 90 as a size-up rule, guard defaults (max 3 trades a day, stop after 2 losses) — the new execution rows will say whether "max 3 a day" is cutting winners on trend days.
+
+
+## v1.11.6 — fourth run (entry window applied, 93 scalp signals) and guard default
+Inside the live window the best fixed exit (60/30) made +11.2 pts/trade (positive in both halves, gap vs random > 3 SE) and the best ATR exit (4 × ATR target, 1.25 × ATR stop — the cell v1.11.5 uses) made +17.6 (positive across all six stops, both halves +15.6 / +19.6). Guard-style execution at 60/30: one at a time +545; **max 3 trades a day +403 (worst — it cuts winners on trend days)**; max 5 a day +613; stop after 2 losses +627; 2 losses + max 5 a day +661. **Changed:** guard default "Max trades / day" 3 → 5 (stop after 2 losses unchanged). Profit concentration is now measured at the best exit instead of the baseline exit (the earlier line used whatever target/stop was typed in the form).
