@@ -100,6 +100,7 @@ def test_execution_sim_concentration_and_trade_list():
     assert ex[1]["n"] <= ex[0]["n"] and ex[2]["n"] <= ex[1]["n"] and ex[3]["n"] >= ex[2]["n"]      # each rule can only remove trades
     assert ex[4]["n"] <= ex[1]["n"] and ex[5]["n"] >= ex[4]["n"] and ex[6]["n"] <= ex[4]["n"]
     assert rep["atr_execution"] and rep["atr_day_concentration"]["days"] >= 1
+    assert rep["day_concentration"]["exit"].startswith(f"{rep['best_exit']['target']}/{rep['best_exit']['stop']}"), "concentration must be measured at the best exit, not the baseline"
     assert rep["day_concentration"]["days"] >= 1 and len(rep["trades"]) == rep["confirmed"]["count"]
     # one-at-a-time: a signal that fires while a trade is still open is skipped
     path = [c(100, 101, 99, 100)] * 12                                                     # never exits: held for 12 candles
