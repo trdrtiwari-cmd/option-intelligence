@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Signal diagnostics · Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.11.2">
+  <link rel="stylesheet" href="/static/style.css?v=1.11.3">
 </head>
 <body>
 <header class="topbar">
@@ -31,11 +31,12 @@
   <div id="results" hidden>
     <section class="panel"><div class="section-head"><h2>What the data says</h2><button id="dlBtn" type="button" class="secondary">Download full report (JSON)</button></div><ul id="verdict" class="dg-verdict"></ul><div id="headline" class="dg-big"></div></section>
     <section class="panel"><div class="section-head"><div><h2>Exit grid — points per trade for each target / stop pair</h2><p>Confirmed signals only. Green = profitable after cost. Cells with fewer than 8 trades are dimmed.</p></div></div><div class="table-wrap"><table id="gridTable" class="dg-grid"></table></div></section>
+    <section class="panel"><div class="section-head"><div><h2>ATR exit grid — points per trade, target and stop as multiples of ATR</h2><p id="atrNote">Exits sized in ATR multiples, as in the paper-trade panel.</p></div></div><div class="table-wrap"><table id="atrGridTable" class="dg-grid"></table></div></section>
     <section class="panel"><h2>Where it wins and loses</h2><div id="groups" class="dg-groups"></div></section>
     <section class="panel"><div class="section-head"><div><h2>Gate check — setups blocked by exactly one gate</h2><p>If these would have paid more than confirmed signals, that gate is too strict. If they would have lost, it is doing its job.</p></div></div><div class="table-wrap"><table id="ablation"></table></div></section>
     <section class="panel"><h2>Read this before acting on it</h2><ul id="limits" class="dg-verdict"></ul></section>
   </div>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/sync.js?v=1.11.2" data-next="/static/diagnostics.js?v=1.11.2"></script>
+<script src="/static/sync.js?v=1.11.3" data-next="/static/diagnostics.js?v=1.11.3"></script>
 </body></html>

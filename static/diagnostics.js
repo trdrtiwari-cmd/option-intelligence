@@ -69,6 +69,15 @@
         row.forEach(cell => { const td = el("td", "dg-cell", cell.n ? `${num(cell.avg)}` : "—"); td.setAttribute("style", heat(cell.avg, cell.n)); td.title = cell.n ? `n=${cell.n} · win ${cell.win_rate}% · PF ${cell.pf ?? "—"}` : "no trades";
           if (best && best.target === cell.target && best.stop === cell.stop) td.classList.add("dg-best"); if (cell.target === P.target && cell.stop === P.stop) td.classList.add("dg-current"); tr.appendChild(td); }); g.appendChild(tr); });
     } else g.appendChild(el("tr")).appendChild(el("td", "", "No confirmed signals in this period."));
+    const ag = clear($("atrGridTable"));
+    if (rep.atr_grid) {
+      const hr = el("tr"); hr.appendChild(el("th", "", "Target ↓ / Stop →")); rep.atr_grid[0].forEach(cell => hr.appendChild(el("th", "", cell.stop + " ATR"))); ag.appendChild(hr);
+      const bestA = rep.best_atr_exit;
+      rep.atr_grid.forEach(row => { const tr = el("tr"); tr.appendChild(el("th", "", row[0].target + " ATR"));
+        row.forEach(cell => { const td = el("td", "dg-cell", cell.n ? `${num(cell.avg)}` : "—"); td.setAttribute("style", heat(cell.avg, cell.n)); td.title = cell.n ? `n=${cell.n} · win ${cell.win_rate}% · PF ${cell.pf ?? "—"}` : "no trades";
+          if (bestA && bestA.target === cell.target && bestA.stop === cell.stop) td.classList.add("dg-best"); tr.appendChild(td); }); ag.appendChild(tr); });
+      const note = $("atrNote"); if (note && rep.atr_points) note.textContent = `Exits sized as multiples of the index ATR(14) at the signal bar (median ≈ ${rep.atr_points.median} index points). Same cost allowance, same horizon.`;
+    }
 
     const gr = clear($("groups"));
     Object.entries(rep.groups).forEach(([name, rows]) => {
