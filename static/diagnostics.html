@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Signal diagnostics · Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.11.4">
+  <link rel="stylesheet" href="/static/style.css?v=1.11.5">
 </head>
 <body>
 <header class="topbar">
@@ -23,6 +23,7 @@
       <label>Stop (pts)<input id="stop" type="number" min="5" max="100" value="20"></label>
       <label>Cost per trade (pts)<input id="cost" type="number" min="0" max="30" step="0.5" value="4"></label>
       <label>Hold up to (candles)<input id="horizon" type="number" min="3" max="48" value="12"></label>
+      <label class="check"><input id="window" type="checkbox" checked> Only entries the live terminal allows (09:30–13:30)</label>
       <button id="runBtn" type="button">Run diagnostics</button>
     </div>
     <div id="progressBox" hidden><div class="dg-bar"><i id="progressBar"></i></div><div id="progressText" class="sub">Starting…</div></div>
@@ -38,5 +39,5 @@
   </div>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/sync.js?v=1.11.4" data-next="/static/diagnostics.js?v=1.11.4"></script>
+<script src="/static/sync.js?v=1.11.5" data-next="/static/diagnostics.js?v=1.11.5"></script>
 </body></html>

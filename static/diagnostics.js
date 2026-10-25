@@ -16,7 +16,7 @@
   $("runBtn").addEventListener("click", async () => {
     fail(""); $("results").hidden = true;
     const p = new URLSearchParams({ symbol: $("symbol").value, interval: $("interval").value, days: $("days").value, mode: $("mode").value,
-      target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value });
+      target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value, window: $("window").checked ? "true" : "false" });
     $("runBtn").disabled = true; $("progressBox").hidden = false; $("progressBar").style.width = "2%"; $("progressText").textContent = "Fetching candles…";
     try {
       const { job_id } = await api("/api/diagnostics/start?" + p, { method: "POST" });
