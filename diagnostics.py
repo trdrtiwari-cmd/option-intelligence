@@ -24,6 +24,8 @@ from indicators import IST, analyze, normalize_candles
 
 TARGET_GRID = (15, 20, 25, 30, 40, 60)
 STOP_GRID = (10, 15, 20, 25, 30, 40)
+TARGET_ATR_GRID = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0)     # exits sized in multiples of the index ATR(14) at the signal bar - the same idea
+STOP_ATR_GRID = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)     # the paper-trade panel uses (there it is the option's own ATR)
 HOUR_BUCKETS = (("09:15–09:45", 555, 585), ("09:45–10:30", 585, 630), ("10:30–12:00", 630, 720),
                 ("12:00–13:30", 720, 810), ("13:30–14:30", 810, 870), ("14:30–15:30", 870, 931))
 MIN_N = 8          # fewer samples than this are shown but never used to draw a conclusion
@@ -205,10 +207,12 @@ def evaluate(cs, events, interval, horizon, cost, target, stop):
         mfe, mae = excursions(path, entry, d)
         pnl, why = first_touch(path, entry, d, target, stop)
         grid = {f"{t}/{s}": first_touch(path, entry, d, t, s)[0] - cost for t in TARGET_GRID for s in STOP_GRID}
+        atr = ev.get("atr")
+        agrid = {f"{t:g}/{s:g}": first_touch(path, entry, d, t * atr, s * atr)[0] - cost for t in TARGET_ATR_GRID for s in STOP_ATR_GRID} if atr else None
         dt = cs[ev["i"]]["_dt"].astimezone(IST)
         rows.append({**ev, "day": dt.strftime("%Y-%m-%d"), "minute": dt.hour * 60 + dt.minute, "hhmm": dt.strftime("%H:%M"),
                      "entry": entry, "mfe": mfe, "mae": mae, "pnl": pnl - cost, "exit": why, "grid": grid, "bars": len(path),
-                     "with_day": None if abs(move) < 1e-9 else (move * d > 0), "_path": path, "_d": d})
+                     "atr_grid": agrid, "with_day": None if abs(move) < 1e-9 else (move * d > 0), "_path": path, "_d": d})
     return rows
 
 
@@ -282,6 +286,23 @@ def build_report(rows_conf, rows_near, params, random_stats=None, random_fn=None
                 row.append({"target": t, "stop": s, **st})
             grid.append(row)
         report["grid"] = grid
+        arows = [r for r in rows_conf if r.get("atr_grid")]
+        if arows:
+            ag = []
+            for t in TARGET_ATR_GRID:
+                ag.append([{"target": t, "stop": sp, **stats([r["atr_grid"][f"{t:g}/{sp:g}"] for r in arows])} for sp in STOP_ATR_GRID])
+            report["atr_grid"] = ag
+            acells = [c for row in ag for c in row if c["n"] >= MIN_N]
+            report["best_atr_exit"] = max(acells, key=lambda c: c["avg"]) if acells else None
+            report["atr_points"] = {"median": round(sorted(r["atr"] for r in arows)[len(arows) // 2], 1)}
+            bae = report["best_atr_exit"]
+            if bae:
+                k = f"{bae['target']:g}/{bae['stop']:g}"
+                days = sorted({r["day"] for r in arows})
+                if len(days) >= 4:
+                    mid = days[len(days) // 2]
+                    report["atr_halves"] = {"split_day": mid, "first": stats([r["atr_grid"][k] for r in arows if r["day"] < mid]),
+                                            "second": stats([r["atr_grid"][k] for r in arows if r["day"] >= mid])}
         cells = [c for row in grid for c in row if c["n"] >= MIN_N]
         report["best_exit"] = max(cells, key=lambda c: c["avg"]) if cells else None
         be = report["best_exit"]
@@ -396,6 +417,18 @@ def verdict(rep):
                             f"Turn the paper-trade trail off for this exit (the test is slightly generous to the trail, so live results would be worse)."})
             elif best_t["avg"] > tc[0]["avg"] + 0.5:
                 out.append({"level": "info", "text": f"A breakeven trail after +{best_t['be_at']} pts would have helped slightly: {best_t['avg']:+.1f} vs {tc[0]['avg']:+.1f} with no trail (within noise unless the sample is large)."})
+    bae = rep.get("best_atr_exit")
+    if bae and base.get("n"):
+        ah = rep.get("atr_halves")
+        both = bool(ah and ah["first"].get("avg", 0) > 0 and ah["second"].get("avg", 0) > 0)
+        row = next((r for r in rep["atr_grid"] if r[0]["target"] == bae["target"]), [])
+        pos = sum(1 for c in row if c["avg"] > 0)
+        out.append({"level": "action" if bae["avg"] > 0 and both and pos >= 4 else "info",
+                    "text": f"ATR-sized exits: best is target {bae['target']:g} × ATR / stop {bae['stop']:g} × ATR → {bae['avg']:+.1f} pts/trade (n={bae['n']}; 1 ATR ≈ {rep['atr_points']['median']} index pts). "
+                            f"Best fixed-point exit was {be['target'] if be else '—'}/{be['stop'] if be else '—'} pts → {be['avg'] if be else 0:+.1f}. "
+                            + (f"{pos} of 6 stops are positive at that target" if row else "") +
+                            (f"; positive in both halves ({ah['first']['avg']:+.1f} / {ah['second']['avg']:+.1f})." if ah else ".") +
+                            (" Mirror it in the paper-trade ATR multipliers." if bae["avg"] > 0 and both and pos >= 4 else " Not convincing enough to prefer over fixed points yet (best of 36 again).")})
     dc = rep.get("day_concentration")
     if dc and dc["total"] > 0 and dc["top_day_total"] > 0.5 * dc["total"] and dc["without_top"].get("n"):
         wt = dc["without_top"]
