@@ -112,6 +112,14 @@ def test_execution_sim_concentration_and_trade_list():
     assert any("Profit concentration" in v["text"] and v["level"] == "bad" for v in dg.verdict(rep2))
 
 
+def test_atr_grid():
+    rep = dg.run(staircase_days(6, 3), mode="scalp", cost=2.0)
+    assert len(rep["atr_grid"]) == 6 and len(rep["atr_grid"][0]) == 6 and rep["best_atr_exit"] and rep["atr_points"]["median"] > 0
+    # sized by the ATR at the signal bar: a 2-ATR stop on a trade with ATR 10 is a 20-point stop
+    path = [c(100, 101, 79, 80)]
+    assert dg.first_touch(path, 100.0, 1, 3 * 10, 2 * 10) == (-20.0, "stop")
+
+
 def test_noise_gap_is_not_a_correction():
     base = {"n": 55, "avg": 0.06, "se": 3.32}
     assert not dg._diff_sig({"n": 26, "avg": 5.62, "se": 4.82}, base)      # the real standard-mode "not chasing" gap: 0.95 SE -> noise
