@@ -299,5 +299,7 @@ Tests: `python tests/test_diagnostics.py`.
 **Diagnostics now report** profit concentration by day, a guard-style execution test (one open trade at a time; stop for the day after 2 / 3 losses in a row), and a per-trade list (`trades`, in the downloaded JSON) so any filter can be tested on the exact signals. No further engine rule was changed: every remaining candidate (pause-break trigger −12 pts over 10 trades, BULLISH-bias bucket 1 win in 10, CE vs PE) is either under 2 standard errors, or its trades sit on 2–3 days, or it only mirrors this month's falling market.
 
 
-## v1.11.3 — ATR-sized exits in diagnostics
+## v1.11.3 (re-issued as 1.11.4) — ATR-sized exits in diagnostics
 `/diagnostics` now has a second grid, **ATR exit grid**: target (1–5 × ATR) × stop (0.5–2 × ATR), where ATR is the index ATR(14) at the signal bar, so exits widen in fast markets and tighten in quiet ones — the same idea as the paper-trade ATR multipliers. It shows the best cell, whether it is positive in both halves and across neighbouring stops, and the median ATR in index points (to translate 1 ATR into points). It is compared with the fixed-point grid in the findings; both are "best of 36", so prefer a cell whose neighbours are also positive. Random-entry and execution-guard comparisons still use the fixed-point exit.
+
+**v1.11.4:** fixed a stale `FRONTEND_VERSION` in `static/app.js` that left the "page is out of date" banner on permanently after v1.11.1–1.11.3 (clearing the cache could not fix it). `python tests/test_versions.py` now fails if the server, `app.js` and the HTML `?v=` strings disagree.
