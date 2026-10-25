@@ -109,6 +109,23 @@ def first_touch(path, entry, d, target, stop):
     return d * (path[-1]["close"] - entry), "time"
 
 
+def first_touch_be(path, entry, d, target, stop, be_at):
+    """Like first_touch, but once price has gone `be_at` points your way the stop moves to breakeven (entry). The move applies
+    from the NEXT candle, which is slightly optimistic for the trail (a same-candle reversal is not punished), so if the trail
+    still loses to no-trail here, it will lose more live."""
+    cur = float(stop)
+    for c in path:
+        adverse = (entry - c["low"]) if d > 0 else (c["high"] - entry)
+        fav = (c["high"] - entry) if d > 0 else (entry - c["low"])
+        if adverse >= cur:
+            return -cur, "stop"
+        if fav >= target:
+            return float(target), "target"
+        if fav >= be_at:
+            cur = 0.0
+    return d * (path[-1]["close"] - entry), "time"
+
+
 def excursions(path, entry, d):
     mfe = max((c["high"] - entry) if d > 0 else (entry - c["low"]) for c in path)
     mae = max((entry - c["low"]) if d > 0 else (c["high"] - entry) for c in path)
@@ -131,17 +148,22 @@ def stats(pnls):
 def evaluate(cs, events, interval, horizon, cost, target, stop):
     """Outcome record for every event (adds pnl at the baseline exit, excursions and the whole target x stop grid)."""
     rows = []
+    day_open = {}
+    for c in cs:
+        day_open.setdefault(c["_dt"].astimezone(IST).date(), c["open"])
     for ev in events:
         entry, path = _path(cs, ev, interval, horizon)
         if path is None:
             continue
         d = 1 if ev["side"] == "CE" else -1
+        move = cs[ev["i"]]["close"] - day_open[cs[ev["i"]]["_dt"].astimezone(IST).date()]
         mfe, mae = excursions(path, entry, d)
         pnl, why = first_touch(path, entry, d, target, stop)
         grid = {f"{t}/{s}": first_touch(path, entry, d, t, s)[0] - cost for t in TARGET_GRID for s in STOP_GRID}
         dt = cs[ev["i"]]["_dt"].astimezone(IST)
         rows.append({**ev, "day": dt.strftime("%Y-%m-%d"), "minute": dt.hour * 60 + dt.minute, "hhmm": dt.strftime("%H:%M"),
-                     "entry": entry, "mfe": mfe, "mae": mae, "pnl": pnl - cost, "exit": why, "grid": grid, "bars": len(path)})
+                     "entry": entry, "mfe": mfe, "mae": mae, "pnl": pnl - cost, "exit": why, "grid": grid, "bars": len(path),
+                     "with_day": None if abs(move) < 1e-9 else (move * d > 0), "_path": path, "_d": d})
     return rows
 
 
@@ -190,7 +212,7 @@ def _band(v, edges, labels):
     return labels[-1]
 
 
-def build_report(rows_conf, rows_near, params, random_stats=None):
+def build_report(rows_conf, rows_near, params, random_stats=None, random_fn=None):
     cost, target, stop = params["cost"], params["target"], params["stop"]
     base = stats([r["pnl"] for r in rows_conf])
     report = {"params": params, "confirmed": {"count": len(rows_conf), "stats": base}, "limitations": [
@@ -217,6 +239,19 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
         report["grid"] = grid
         cells = [c for row in grid for c in row if c["n"] >= MIN_N]
         report["best_exit"] = max(cells, key=lambda c: c["avg"]) if cells else None
+        be = report["best_exit"]
+        if be:
+            key = f"{be['target']}/{be['stop']}"
+            days = sorted({r["day"] for r in rows_conf})
+            if len(days) >= 4:
+                mid = days[len(days) // 2]
+                report["halves"] = {"split_day": mid, "first": stats([r["grid"][key] for r in rows_conf if r["day"] < mid]),
+                                    "second": stats([r["grid"][key] for r in rows_conf if r["day"] >= mid])}
+            report["trail_check"] = [{"be_at": None, **stats([r["grid"][key] for r in rows_conf])}] + [
+                {"be_at": b, **stats([first_touch_be(r["_path"], r["entry"], r["_d"], be["target"], be["stop"], b)[0] - cost for r in rows_conf])}
+                for b in (10, 15, 20, 30) if b < be["target"]]
+            if random_fn:
+                report["random_at_best"] = random_fn(be["target"], be["stop"])
     report["groups"] = {
         "Time of day (IST)": _bucket(rows_conf, _hour, [h[0] for h in HOUR_BUCKETS]),
         "Side": _bucket(rows_conf, lambda r: r["side"]),
@@ -225,6 +260,8 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
         "Score": _bucket(rows_conf, lambda r: _band(r["score"], (80, 90), ("70–79", "80–89", "90–100")), ["70–79", "80–89", "90–100"]),
         "RSI extremity (low = exhausted)": _bucket(rows_conf, lambda r: _band(r["rsi_ext"], (20, 30, 40), ("< 20", "20–30", "30–40", "≥ 40")), ["< 20", "20–30", "30–40", "≥ 40"]),
         "Stretch beyond EMA 9": _bucket(rows_conf, lambda r: _band(r["stretch_atr"], (0.5, 1.0, 2.0, 3.5), ("< 0.5 ATR", "0.5–1", "1–2", "2–3.5", "> 3.5 ATR")), ["< 0.5 ATR", "0.5–1", "1–2", "2–3.5", "> 3.5 ATR"]),
+        "With / against the session's move (open → signal)": _bucket(rows_conf, lambda r: None if r["with_day"] is None else "with the day's move" if r["with_day"] else "against the day's move",
+                                                                    ["with the day's move", "against the day's move"]),
         "Day": _bucket(rows_conf, lambda r: r["day"]),
     }
     gates = {}
@@ -236,12 +273,20 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
     return report
 
 
+BEST_Z = 3.0       # bar for any result that was selected as the best of many (the best-exit cell)
 SIG_Z = 2.0        # chance alone produces |z| > 1.5 about 1 time in 8; 2.0 keeps false alarms near 1 in 20 per comparison
 
 
-def _sig(s, ref=0.0):
+def _sig(s, ref=0.0, min_n=15):
     """True when a mean differs from `ref` by more than SIG_Z standard errors (and the sample is not tiny)."""
-    return bool(s.get("se") and s.get("n", 0) >= 15 and abs(s["avg"] - ref) > SIG_Z * s["se"])
+    return bool(s.get("se") and s.get("n", 0) >= min_n and abs(s["avg"] - ref) > SIG_Z * s["se"])
+
+
+def _diff_sig(a, b):
+    """Two independent samples: is a's mean above b's by more than SIG_Z combined standard errors?"""
+    if not (a.get("se") and b.get("se")) or a.get("n", 0) < MIN_N or b.get("n", 0) < MIN_N:
+        return False
+    return (a["avg"] - b["avg"]) > SIG_Z * math.sqrt(a["se"] ** 2 + b["se"] ** 2)
 
 
 def verdict(rep):
@@ -274,8 +319,32 @@ def verdict(rep):
     if be and base.get("n"):
         cur = next((x for row in rep["grid"] for x in row if x["target"] == p["target"] and x["stop"] == p["stop"]), None)
         if be["avg"] > (cur["avg"] if cur else base["avg"]) + 0.5:
+            ncells = sum(len(row) for row in rep["grid"])
             out.append({"level": "action", "text": f"Best tested exit: target {be['target']} / stop {be['stop']} → {be['avg']:+.1f} points per trade (n={be['n']}), "
-                        f"versus {cur['avg']:+.1f} at {p['target']}/{p['stop']}. Changing the paper-trade stop/target rule toward this is the first correction to test."})
+                        f"versus {cur['avg']:+.1f} at {p['target']}/{p['stop']}. It is the best of {ncells} pairs, so expect less than this going forward; "
+                        f"trust it more when neighbouring cells (same target, nearby stops) are also positive. Changing the paper-trade stop/target rule toward this is the first correction to test."})
+        h = rep.get("halves")
+        if h and h["first"].get("n", 0) >= 5 and h["second"].get("n", 0) >= 5:
+            both = h["first"]["avg"] > 0 and h["second"]["avg"] > 0
+            out.append({"level": "good" if both else "bad", "text": f"Stability of {be['target']}/{be['stop']}: days before {h['split_day']} {h['first']['avg']:+.1f} pts/trade (n={h['first']['n']}), "
+                        f"from {h['split_day']} on {h['second']['avg']:+.1f} (n={h['second']['n']})." + (" Positive in both halves." if both else " Not positive in both halves — this exit may be fitted to one stretch of market; do not rely on it.")})
+        rb = rep.get("random_at_best") or {}
+        if rb.get("n", 0) >= 50 and base.get("n", 0) >= MIN_N:
+            edge = be["avg"] - rb["avg"]
+            se = math.sqrt((be["se"] or 0) ** 2 + (rb["se"] or 0) ** 2)
+            real = edge > BEST_Z * se and be["n"] >= 30         # stricter bar: this exit was picked as the best of many, so a plain 2-SE test would flatter it
+            out.append({"level": "good" if real else "info",
+                        "text": f"At that same exit, random entries made {rb['avg']:+.1f} pts/trade; the signals made {be['avg']:+.1f} → gap {edge:+.1f}"
+                                + (f" (more than {BEST_Z:g} standard errors, even after allowing for picking the best exit)." if real
+                                   else f" (not convincing: because this exit was picked as the best of many, the gap must exceed {BEST_Z:g} standard errors to count).")})
+        tc = rep.get("trail_check") or []
+        if len(tc) > 1 and tc[0].get("n"):
+            best_t = max(tc[1:], key=lambda x: x["avg"])
+            if best_t["avg"] < tc[0]["avg"] - 0.5:
+                out.append({"level": "action", "text": f"Trailing to breakeven hurts: with no trail {tc[0]['avg']:+.1f} pts/trade, best breakeven trigger (+{best_t['be_at']} pts) {best_t['avg']:+.1f}. "
+                            f"Turn the paper-trade trail off for this exit (the test is slightly generous to the trail, so live results would be worse)."})
+            elif best_t["avg"] > tc[0]["avg"] + 0.5:
+                out.append({"level": "info", "text": f"A breakeven trail after +{best_t['be_at']} pts would have helped slightly: {best_t['avg']:+.1f} vs {tc[0]['avg']:+.1f} with no trail (within noise unless the sample is large)."})
     worst, best = [], []
     for name, rows in rep["groups"].items():
         for g in rows:
@@ -290,9 +359,12 @@ def verdict(rep):
         if a.get("n", 0) < MIN_N:
             continue
         if a["avg"] > max(ref, 0) + 0.5 and a["avg"] > 0:
-            out.append({"level": "action", "text": f"Gate too strict? “{a['gate']}” was the ONLY thing blocking {a['n']} setups that averaged {a['avg']:+.1f} points per trade "
-                        f"(confirmed signals: {ref:+.1f}). Relaxing this gate would have added profitable entries."})
-        elif a["avg"] < 0 and _sig(a):
+            if _diff_sig(a, base):
+                out.append({"level": "action", "text": f"Gate too strict? “{a['gate']}” was the ONLY thing blocking {a['n']} setups that averaged {a['avg']:+.1f} points per trade "
+                            f"(confirmed signals: {ref:+.1f}) — a difference larger than chance. Relaxing this gate would have added profitable entries."})
+            else:
+                out.append({"level": "info", "text": f"“{a['gate']}” blocked {a['n']} setups averaging {a['avg']:+.1f} (confirmed: {ref:+.1f}), but that gap is within noise — leave the gate alone until a second period agrees."})
+        elif a["avg"] < 0 and _sig(a, min_n=10):
             out.append({"level": "good", "text": f"Gate earning its keep: “{a['gate']}” blocked {a['n']} setups that would have lost {a['avg']:+.1f} points per trade. Keep it."})
     if not any(v["level"] == "action" for v in out):
         out.append({"level": "info", "text": "No single correction stands out with enough data. Use more days, or try the other signal mode and compare."})
@@ -301,16 +373,17 @@ def verdict(rep):
 
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=30, stop=20, progress=None):
+        horizon=12, cost=4.0, target=60, stop=20, progress=None):
     cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress)
     confirmed, near = events_from(replayed)
     conf_rows = evaluate(cs, confirmed, interval, horizon, cost, target, stop)
     near_rows = evaluate(cs, near, interval, horizon, cost, target, stop)
     days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
     random_stats = random_entry_baseline(cs, interval, horizon, cost, target, stop)
+    random_fn = lambda t, sp: random_entry_baseline(cs, interval, horizon, cost, t, sp)
     params = {"symbol": symbol, "interval": interval, "mode": mode, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
               "days": days, "bars_evaluated": len(replayed)}
-    return build_report(conf_rows, near_rows, params, random_stats)
+    return build_report(conf_rows, near_rows, params, random_stats, random_fn)
 
 
 def _load(path):

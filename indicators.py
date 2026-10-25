@@ -81,11 +81,15 @@ def pullback_resume(cs, e9, atr, side, lookback=6, tol=0.25):
 # Signal modes. "standard" is the original, strict rule set (unchanged behaviour). "scalp" is tuned for a small option
 # buyer who is happy with a 20-40 point index move: it trades price structure instead of lagging indicators, accepts a
 # continuation break instead of demanding an EMA 9 retest, and needs less room to the next S/R level.
+# v1.11.1 (from the 14-day diagnostics): "rsi_zone" = the new momentum-zone gate: a PE needs RSI < 40 (a CE needs RSI > 60);
+# entries at RSI >= 40 (PE) went 0 for 11 across both modes (avg -20 pts, > 5 standard errors). Scalp keeps its wider 18/82
+# overextension limit: RSI 20-30 entries were weak (-1.6 pts over 30 signals) but only ~1 standard error worse than RSI 30-40,
+# which is not enough evidence to remove the fast-fall entries scalp mode exists for - re-check on a second period.
 MODES = {
-    "standard": {"label": "Standard", "rsi_lo": 30, "rsi_hi": 70, "rsi_score_lo": 20, "rsi_score_hi": 80, "chase_atr": 1.0,
+    "standard": {"label": "Standard", "rsi_lo": 30, "rsi_hi": 70, "rsi_score_lo": 20, "rsi_score_hi": 80, "chase_atr": 1.0, "rsi_zone": 40,
                  "room_atr": 1.0, "relax_lagging": False, "micro_trigger": False,
                  "fresh_bars": 3, "expire_bars": 12, "max_chase_atr": 1.0},
-    "scalp": {"label": "Scalp (20–40 pt moves)", "rsi_lo": 18, "rsi_hi": 82, "rsi_score_lo": 12, "rsi_score_hi": 88, "chase_atr": 3.5,
+    "scalp": {"label": "Scalp (20–40 pt moves)", "rsi_lo": 18, "rsi_hi": 82, "rsi_score_lo": 12, "rsi_score_hi": 88, "chase_atr": 3.5, "rsi_zone": 40,
               "room_atr": 0.5, "relax_lagging": True, "micro_trigger": True,
               "fresh_bars": 2, "expire_bars": 6, "max_chase_atr": 0.6},
 }
@@ -513,6 +517,9 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
             {"label": "Not sideways / not in a range", "pass": not sideways, "detail": regime_note},
             {"label": f"Momentum not overextended (RSI < {rsi_hi} / > {rsi_lo})", "pass": rsi is None or (rsi < rsi_hi if side == "CE" else rsi > rsi_lo),
              "detail": (f"RSI {rsi:.1f}" if rsi is not None else "n/a") + (" · wider limit because the trend is confirmed" if (relax and trend_agree) else "")},
+            {"label": f"Momentum established (RSI {'> ' + str(100 - rules['rsi_zone']) if side == 'CE' else '< ' + str(rules['rsi_zone'])})",
+             "pass": rsi is None or (rsi > 100 - rules["rsi_zone"] if side == "CE" else rsi < rules["rsi_zone"]),
+             "detail": (f"RSI {rsi:.1f}" if rsi is not None else "n/a") + " · entries without RSI momentum lost in the diagnostics (0 of 11 won)"},
         ]
         if atr:
             # Anti-chase gates: most of the day's losses came from entering after the move had already happened.

@@ -16,7 +16,7 @@ EXPIRE_BARS = 12          # older than this many candles it is EXPIRED and must 
 MAX_CHASE_ATR = 1.0       # price already moved more than this many ATR from the signal price => don't chase
 REPLAY_BARS = 40          # how far back the replay looks for the start of the current signal
 ENTRY_START_MIN = 9 * 60 + 30     # no new entries before 09:30 IST (opening volatility)
-ENTRY_CUTOFF_MIN = 15 * 60        # no new entries from 15:00 IST
+ENTRY_CUTOFF_MIN = 13 * 60 + 30  # no new entries from 13:30 IST (diagnostics: 13:30-15:30 entries lost in both modes; was 15:00)
 AGREE_LEVELS = ("CONFIRMED", "BIAS")   # dashboard levels that count as "agrees"
 
 

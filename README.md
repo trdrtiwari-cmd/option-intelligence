@@ -264,3 +264,27 @@ same exit**, because a signal only has an edge to the extent it beats random. Fi
 Limits: technical engine only (the Data Check dashboard has no history to replay); results are in index points, not option rupees; use 15–20 days
 and confirm anything you change on a second, different period. CLI: `python diagnostics.py candles.json scalp 5 4` (candles.json = the `candles` array from `/api/candles`).
 Tests: `python tests/test_diagnostics.py`.
+
+
+## v1.11.1 — corrections from the first diagnostics run (NIFTY, 5 m, 14 days, 2026-10-05 → 10-23)
+
+**What the numbers said.** Standard mode (55 signals) was indistinguishable from random entries. Scalp mode (117 signals) beat random entries by +6.3 pts/trade (statistically real) but only made +1.4 pts/trade at the old 30/20 exit. Every cell of the 60-point-target row of the scalp grid was profitable (+3.7 to +6.8 pts/trade, PF 1.23–1.58) — the exit, not the entry, was the biggest lever.
+
+**Changed (evidence ≥ 2 standard errors, or the same direction in both modes)**
+| Change | Evidence |
+|---|---|
+| Paper-trade default exit: **Target 3 at 3 R** (was Target 1 at 1.5 R), SL 1 ATR; diagnostics default exit 60 / 20 | 60-pt target row positive for every stop (best 60/15 +6.8, 60/20 +6.2 pts; the two are not distinguishable, 20 leaves room for slippage) |
+| **No entries after 13:30 IST** (was 15:00) | 13:30–15:30 lost in both modes (scalp −4.0 and −9.7 pts/trade, n = 37); mornings made +5 to +12 |
+| **New hard gate "Momentum established"**: PE needs RSI < 40, CE needs RSI > 60 | RSI ≥ 40 on a PE: 0 wins of 11 across both modes, −20 pts/trade |
+| **Time stop 60 min** (was 30) | the diagnostics horizon is 12 candles; a 60-pt target needs the time |
+| **Breakeven trail OFF by default** | never tested; the diagnostics now simulate it (see below) — turn it back on only if the next run says it helps |
+
+**Deliberately NOT changed** (not enough evidence, or probably market direction rather than logic)
+* CE vs PE (PE +3.7, CE −1.3 pts/trade) and the BULLISH regime bucket (1 win of 10): this fortnight was a falling market. Blocking CE would be fitting the sample; the new "with / against the session's move" breakdown will show whether it is direction or logic.
+* Scalp RSI 18/82 limit (RSI 20–30 entries −1.6 pts/trade, only ~1 SE worse than 30–40).
+* Standard-mode "Not chasing" / "Pullback" gates (blocked setups looked better but within noise).
+* Score bands (80–89 bad, 90–100 good is not monotonic → noise).
+
+**Diagnostics are harder to fool.** Gate-relaxation advice now needs a two-sample significance test (it previously fired on noise); the best exit is flagged as "best of 36" and shown for the first and second half of the period; its edge vs random entries is measured at that same exit with a stricter 3-SE bar; a breakeven-trail test (+10/15/20/30 pts) is reported; new breakdown "with / against the session's move". Tests: random walks never look profitable at 60/20 once averaged across seeds.
+
+**Before trusting any of this:** re-run `/diagnostics` on a different 15–20-day window (and ideally a rising market). Saved browser settings override the new defaults — reset the Risk guard panel once to pick them up.
