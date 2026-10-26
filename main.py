@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.11.1"
+APP_VERSION = "1.11.2"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1021,6 +1021,28 @@ async def tradingview_webhook(request: Request):
 @app.get("/api/tradingview/last-alert")
 async def tradingview_last_alert():
     return getattr(app.state, "last_tv_alert", {"status": "UNAVAILABLE", "message": "No TradingView alert received in this running instance."})
+
+
+@app.get("/api/subscribe-option")
+async def subscribe_option(symbol: str = "NIFTY", expiry_date: str = "", instrument_key: str = ""):
+    """Subscribe the exact selected option contract to the existing V3 stream, so its chart receives live ticks."""
+    sym = symbol.upper()
+    key = instrument_key.strip()
+    if sym not in INDEX_KEYS or not key or "|" not in key:
+        raise HTTPException(status_code=400, detail="Valid symbol and option instrument_key are required.")
+    if not DATE_RE.fullmatch(expiry_date or ""):
+        raise HTTPException(status_code=400, detail="Use the actual YYYY-MM-DD expiry selected in the option chain.")
+    contracts = await get_contracts(sym, expiry_date)
+    contract = next((c for c in contracts if c.get("instrument_key") == key), None)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Selected contract was not found for this underlying/expiry.")
+    with STREAM_LOCK:
+        STREAM_META[key] = {"trading_symbol": contract.get("trading_symbol"),
+                            "strike": contract.get("strike_price"),
+                            "type": contract.get("instrument_type"), "expiry": expiry_date}
+    _start_stream(sym, _stream_keys(sym, [key]))
+    return {"status": "SUBSCRIBE_REQUESTED", "symbol": sym, "instrument_key": key,
+            "trading_symbol": contract.get("trading_symbol"), "stream": "Upstox V3 WebSocket"}
 
 
 @app.get("/api/option-quote")

@@ -272,3 +272,12 @@ What the data showed, and what changed:
 * **Small fixed targets lose, wide ones win.** After cost, targets ≤ 25 pts were negative for every stop; target 60 / stop 15–20 was +5 to +7 pts/trade. Median favourable move was 37 pts but the median adverse move 26 pts, so a 20-pt stop is hit 46% of the time. → paper trading now defaults to **Auto-exit at Target 3** (3.5 × risk) instead of Target 1 (1.5 ×). Diagnostics now also compares trailing and scale-out exits.
 * **Kept as is:** the relaxed chase limit (entries 1–2 ATR beyond EMA 9 were the best bucket; the strict gate blocked setups that averaged +5.6), the "not sideways" and trigger gates (the setups they blocked lost money). The new pause-break trigger fired only 3 times in 14 days; EMA 9 retests give nearly all entries.
 * **Not changed (not enough evidence):** CE signals lost money (−1.3/trade) while PE made +3.7, and the generic "BULLISH" regime label lost 9 of 10 — but this was a falling market. Diagnostics now includes the dashboard's price-zone check and previous-close side so the next run can test whether requiring them fixes it.
+
+
+## v1.11.2 — selected-contract live chart and ATR risk references
+
+- The selected CE/PE contract can now be explicitly added to the existing Upstox V3 WebSocket subscription through the authenticated `/api/subscribe-option` route. The server validates the instrument key against the chosen underlying and actual expiry before subscribing.
+- Fresh selected-contract ticks update the option chart's active candle and current premium. A two-second fallback checks the quote endpoint but only treats `LIVE_TICK` responses as live; REST snapshots are explicitly labelled and never promoted to live ticks.
+- The Data Check dashboard adds a closed-candle Wilder ATR(14) risk reference: 1.0× ATR stop and 1.5× ATR target scenarios for CE and PE on the underlying index. These levels are index points, not option-premium rupees; use the selected option's own premium ATR for an actual premium-based plan.
+- The change does not make TradingView's own chart feed live. TradingView receives prices from its configured data provider; this website's Upstox stream updates this application only. TradingView webhooks remain one-way alerts into this backend.
+- No profitability guarantee. Validate live tick age, spread, slippage, and ATR levels in paper trading before using real capital.
