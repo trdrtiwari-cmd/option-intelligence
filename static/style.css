@@ -98,3 +98,9 @@ button.danger{background:#7a2433;border-color:#a33648;color:#fff}
 .dg-groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}@media(max-width:900px){.dg-groups{grid-template-columns:1fr}}.dg-group h3{margin:0 0 6px;font-size:13px;color:var(--muted)}
 
 .dg-sub{margin:16px 0 6px;font-size:13px;color:var(--muted)}
+
+/* ATR risk reference card */
+.dc-risk-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:12px 0}
+.dc-risk-grid>div{display:flex;flex-direction:column;gap:6px;padding:12px;border:1px solid var(--line,#d5dbe5);border-radius:10px;background:var(--panel,#fff)}
+.dc-risk-grid strong{font-size:1.05rem;font-variant-numeric:tabular-nums}
+@media(max-width:700px){.dc-risk-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
