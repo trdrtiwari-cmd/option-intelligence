@@ -329,10 +329,11 @@ def verdict(rep):
                     + (f" A stop tighter than about {c['median_mae']} points is inside the normal noise of these entries and will be hit before the move develops." if c["median_mae"] else "")})
     be = rep.get("best_exit")
     if be and base.get("n"):
-        cur = next((x for row in rep["grid"] for x in row if x["target"] == p["target"] and x["stop"] == p["stop"]), None)
-        if be["avg"] > (cur["avg"] if cur else base["avg"]) + 0.5:
+        # the pair you typed need not be a cell of the fixed grid (e.g. 60/60), but `base` is always computed for exactly that pair
+        cur_avg = base["avg"]
+        if be["avg"] > cur_avg + 0.5:
             out.append({"level": "action", "text": f"Best tested exit: target {be['target']} / stop {be['stop']} → {be['avg']:+.1f} points per trade (n={be['n']}), "
-                        f"versus {cur['avg']:+.1f} at {p['target']}/{p['stop']}. Changing the paper-trade stop/target rule toward this is the first correction to test."})
+                        f"versus {cur_avg:+.1f} at {p['target']}/{p['stop']}. Changing the paper-trade stop/target rule toward this is the first correction to test."})
     strat = [x for x in rep.get("strategies", []) if x.get("n", 0) >= MIN_N]
     if strat and base.get("n"):
         top = max(strat, key=lambda x: x["avg"])
