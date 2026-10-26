@@ -318,3 +318,12 @@ What the data showed, and what changed:
 - Candle analysis is returned in the `/api/analysis` response as `candle_analysis`; the gate detail is included with the existing gates.
 - Doji/weak/contradictory candles do not confirm a trade. The app continues to ignore the still-forming candle and preserves existing live-data freshness safeguards.
 - This is a conservative confirmation rule, not a profitability guarantee; backtest and paper-trade before live use.
+
+
+## v1.11.6 — diagnostics-led conservative entry filters
+
+Based on the uploaded NIFTY 5-minute scalp report (121 technical-engine signals, modeled round-trip cost 4 index points):
+- Default final-signal entry cutoff is now **12:00 IST** (configurable with `ENTRY_CUTOFF`). In this sample, entries before noon averaged +7.63 index points with PF 1.92 (n=45), while noon or later averaged -1.89 with PF 0.85 (n=76).
+- The **final-signal** score gate now requires **80/100** by default (configurable with `MIN_CONFIRMED_SCORE`, allowed 70–100). Scores 70–79 remain visible as technical WATCH/diagnostic candidates, but cannot become a final CONFIRMED signal. The 80–89 score bucket performed better than 70–79 in the uploaded sample, but the sample is small.
+- No target/stop values were changed: the report measures index points, not actual option-premium returns; an index-point target cannot be copied directly to CE/PE premium exits.
+- This report replays the technical engine only; it does not replay historical Data Check dashboard states, actual option premiums, spreads, or the newly added candle-confirmation gate. These filters are candidates for paper testing, not proof of future profitability. Re-run diagnostics on a different period before relying on them.

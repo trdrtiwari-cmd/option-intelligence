@@ -26,9 +26,10 @@ def _env_minutes(name, default):
         return default
 
 
-# 14 days of replayed signals (v1.11 diagnostics): entries before 12:00 made money, entries after 13:30 lost in both modes.
-# Override with ENTRY_CUTOFF=15:00 (or any HH:MM) in the environment if your own diagnostics say otherwise.
-ENTRY_CUTOFF_MIN = _env_minutes("ENTRY_CUTOFF", 13 * 60 + 30)
+# Uploaded NIFTY scalp diagnostics (121 trades): before 12:00 had +7.63 avg points / PF 1.92 (n=45),
+# while 12:00+ had -1.89 avg points / PF 0.85 (n=76). This is a small in-sample result, so keep it configurable
+# and re-check on a different period. ENTRY_CUTOFF=13:30 can override the default if later paper tests support it.
+ENTRY_CUTOFF_MIN = _env_minutes("ENTRY_CUTOFF", 12 * 60)
 AGREE_LEVELS = ("CONFIRMED", "BIAS")   # dashboard levels that count as "agrees"
 
 
@@ -157,6 +158,13 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
                       "pass": in_window,
                       "detail": f"Now {now_dt.strftime('%H:%M')} IST" + ("" if market_open else " · market closed") +
                                 ("" if in_window or not market_open else " — outside the entry window")})
+        try:
+            min_score = min(100, max(70, int(os.getenv("MIN_CONFIRMED_SCORE", "80"))))
+        except ValueError:
+            min_score = 80
+        dom_score = max(a.get("bull_score") or 0, a.get("bear_score") or 0)
+        gates.append({"label": f"Final-signal score ≥ {min_score}", "pass": dom_score >= min_score,
+                      "detail": f"{dom_score}/100 · minimum {min_score} for final confirmation"})
         candle = a.get("candle_analysis")
         # Backward-compatible for callers/tests supplying a legacy analysis payload; the live /api/analysis
         # path always includes candle_analysis and therefore always applies this gate.
