@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.11.5";
+const FRONTEND_VERSION="1.11.6"
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
