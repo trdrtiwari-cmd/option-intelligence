@@ -20,16 +20,13 @@ import math
 import sys
 from datetime import timedelta
 
+import dashboard_data as dd
 from indicators import IST, analyze, normalize_candles
-from signal_fusion import ENTRY_CUTOFF_MIN, ENTRY_START_MIN
 
 TARGET_GRID = (15, 20, 25, 30, 40, 60)
 STOP_GRID = (10, 15, 20, 25, 30, 40)
-TARGET_ATR_GRID = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0)     # exits sized in multiples of the index ATR(14) at the signal bar - the same idea
-STOP_ATR_GRID = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)     # the paper-trade panel uses (there it is the option's own ATR)
 HOUR_BUCKETS = (("09:15–09:45", 555, 585), ("09:45–10:30", 585, 630), ("10:30–12:00", 630, 720),
                 ("12:00–13:30", 720, 810), ("13:30–14:30", 810, 870), ("14:30–15:30", 870, 931))
-DEFAULT_WINDOW = (ENTRY_START_MIN, ENTRY_CUTOFF_MIN)   # the live entry window; diagnostics apply it by default so they measure what you would actually trade
 MIN_N = 8          # fewer samples than this are shown but never used to draw a conclusion
 
 
@@ -84,15 +81,6 @@ def events_from(replayed):
     return confirmed, near
 
 
-def in_window(cs, i, interval, window):
-    """Would the live terminal allow an entry on the signal that formed when bar i closed? (evaluation time = bar close)"""
-    if not window:
-        return True
-    dt = cs[i]["_dt"].astimezone(IST)
-    close = dt.hour * 60 + dt.minute + interval
-    return window[0] <= close < window[1]
-
-
 # ---------------------------------------------------------------- outcomes
 def _path(cs, ev, interval, horizon):
     """Candles after the signal bar, same session only. Entry = open of the next candle."""
@@ -122,84 +110,38 @@ def first_touch(path, entry, d, target, stop):
     return d * (path[-1]["close"] - entry), "time"
 
 
-def exit_index(path, entry, d, target, stop):
-    """1-based number of the candle on which first_touch exits (a time exit = the last candle)."""
-    for k, c in enumerate(path, 1):
-        adverse = (entry - c["low"]) if d > 0 else (c["high"] - entry)
-        fav = (c["high"] - entry) if d > 0 else (entry - c["low"])
-        if adverse >= stop or fav >= target:
-            return k
-    return len(path)
-
-
-def execution_sim(rows, target, stop, cost, max_losses=None, one_at_a_time=True, max_trades=None, atr_mult=False):
-    """Trade the signals the way the paper-trade guard would: one open trade at a time, optionally stop for the day after
-    `max_losses` losses in a row and/or after `max_trades` trades. With atr_mult the target/stop are ATR multiples (per trade)."""
-    pnls, free_at, streak, count = [], -1, {}, {}
-    for r in sorted(rows, key=lambda r: r["i"]):
-        if one_at_a_time and r["i"] < free_at:
-            continue
-        if max_losses and streak.get(r["day"], 0) >= max_losses:
-            continue
-        if max_trades and count.get(r["day"], 0) >= max_trades:
-            continue
-        t, sp = (target * r["atr"], stop * r["atr"]) if atr_mult else (target, stop)
-        pnl = first_touch(r["_path"], r["entry"], r["_d"], t, sp)[0] - cost
-        free_at = r["i"] + exit_index(r["_path"], r["entry"], r["_d"], t, sp)
-        streak[r["day"]] = streak.get(r["day"], 0) + 1 if pnl <= 0 else 0
-        count[r["day"]] = count.get(r["day"], 0) + 1
-        pnls.append(pnl)
-    return stats(pnls)
-
-
-EXEC_VARIANTS = (("every signal, overlaps allowed", {"one_at_a_time": False}),
-                 ("one trade at a time", {}),
-                 ("+ max 3 trades a day", {"max_trades": 3}),
-                 ("+ max 5 trades a day", {"max_trades": 5}),
-                 ("+ stop for the day after 2 losses in a row", {"max_losses": 2}),
-                 ("+ stop for the day after 3 losses in a row", {"max_losses": 3}),
-                 ("+ 2 losses in a row and max 5 trades a day", {"max_losses": 2, "max_trades": 5}))
-
-
-def execution_table(rows, target, stop, cost, atr_mult=False):
-    return [{"label": lab, **execution_sim(rows, target, stop, cost, atr_mult=atr_mult, **kw)} for lab, kw in EXEC_VARIANTS]
-
-
-def day_concentration(rows, pnl_of=None):
-    """Trades on the same day share one market move, so they are not independent. How much of the profit is one day?"""
-    pnl_of = pnl_of or (lambda r: r["pnl"])
-    by = {}
-    for r in rows:
-        by.setdefault(r["day"], []).append(pnl_of(r))
-    if not by:
-        return None
-    totals = {d: sum(v) for d, v in by.items()}
-    top = max(totals, key=totals.get)
-    return {"days": len(by), "winning_days": sum(1 for t in totals.values() if t > 0), "total": round(sum(totals.values()), 1),
-            "top_day": top, "top_day_total": round(totals[top], 1), "without_top": stats([pnl_of(r) for r in rows if r["day"] != top])}
-
-
-def trade_list(rows):
-    return [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "score": r["score"], "phase": r["phase"] or r["regime"], "trigger": r["trigger"],
-             "rsi_ext": None if r["rsi_ext"] is None else round(r["rsi_ext"], 1), "stretch_atr": None if r["stretch_atr"] is None else round(r["stretch_atr"], 2),
-             "with_day": r["with_day"], "held": r.get("held"), "mfe": round(r["mfe"], 1), "mae": round(r["mae"], 1), "pnl": round(r["pnl"], 1), "exit": r["exit"]} for r in rows]
-
-
-def first_touch_be(path, entry, d, target, stop, be_at):
-    """Like first_touch, but once price has gone `be_at` points your way the stop moves to breakeven (entry). The move applies
-    from the NEXT candle, which is slightly optimistic for the trail (a same-candle reversal is not punished), so if the trail
-    still loses to no-trail here, it will lose more live."""
-    cur = float(stop)
+def managed_exit(path, entry, d, stop, activate=None, trail=None, half_at=None):
+    """Stop-loss that trails. Before activation the stop sits `stop` points away. After the move reaches `activate` points
+    (or, with half_at, after half the position is sold at +half_at and the rest moves to breakeven) the stop trails
+    `trail` points behind the best price. Adverse moves are checked before favourable ones inside a candle (conservative).
+    Returns (points per full unit, reason)."""
+    mfe, level, banked, half_done = 0.0, -float(stop), 0.0, False
     for c in path:
-        adverse = (entry - c["low"]) if d > 0 else (c["high"] - entry)
-        fav = (c["high"] - entry) if d > 0 else (entry - c["low"])
-        if adverse >= cur:
-            return -cur, "stop"
-        if fav >= target:
-            return float(target), "target"
-        if fav >= be_at:
-            cur = 0.0
-    return d * (path[-1]["close"] - entry), "time"
+        worst = (c["low"] - entry) if d > 0 else (entry - c["high"])
+        best = (c["high"] - entry) if d > 0 else (entry - c["low"])
+        if worst <= level:
+            rem = 0.5 if half_done else 1.0
+            return banked + rem * level, ("trail" if level > 0 else "stop")
+        mfe = max(mfe, best)
+        if half_at is not None and not half_done and mfe >= half_at:
+            half_done, banked, level = True, 0.5 * half_at, max(level, 0.0)
+        if trail is not None and (half_done or (half_at is None and activate is not None and mfe >= activate)):
+            level = max(level, mfe - trail)
+    rem = 0.5 if half_done else 1.0
+    return banked + rem * d * (path[-1]["close"] - entry), "time"
+
+
+STRATEGIES = (
+    ("Fixed target 30 / stop 20", lambda p, e, d: first_touch(p, e, d, 30, 20)[0]),
+    ("Fixed target 40 / stop 15", lambda p, e, d: first_touch(p, e, d, 40, 15)[0]),
+    ("Fixed target 60 / stop 15", lambda p, e, d: first_touch(p, e, d, 60, 15)[0]),
+    ("Trailing: stop 20, trail 20 once +20", lambda p, e, d: managed_exit(p, e, d, 20, activate=20, trail=20)[0]),
+    ("Trailing: stop 15, trail 15 once +20", lambda p, e, d: managed_exit(p, e, d, 15, activate=20, trail=15)[0]),
+    ("Trailing: stop 20, trail 25 once +30", lambda p, e, d: managed_exit(p, e, d, 20, activate=30, trail=25)[0]),
+    ("Scale out: ½ at +30, rest trails 20 (stop 20)", lambda p, e, d: managed_exit(p, e, d, 20, trail=20, half_at=30)[0]),
+    ("Scale out: ½ at +30, rest trails 25 (stop 15)", lambda p, e, d: managed_exit(p, e, d, 15, trail=25, half_at=30)[0]),
+    ("Scale out: ½ at +40, rest trails 30 (stop 20)", lambda p, e, d: managed_exit(p, e, d, 20, trail=30, half_at=40)[0]),
+)
 
 
 def excursions(path, entry, d):
@@ -221,36 +163,41 @@ def stats(pnls):
             "pf": round(sum(wins) / gl, 2) if gl else None, "se": round(sd / math.sqrt(n), 2) if n > 1 else None}
 
 
-def evaluate(cs, events, interval, horizon, cost, target, stop):
+def evaluate(cs, events, interval, horizon, cost, target, stop, with_extras=False):
     """Outcome record for every event (adds pnl at the baseline exit, excursions and the whole target x stop grid)."""
     rows = []
-    day_open = {}
-    for c in cs:
-        day_open.setdefault(c["_dt"].astimezone(IST).date(), c["open"])
     for ev in events:
         entry, path = _path(cs, ev, interval, horizon)
         if path is None:
             continue
         d = 1 if ev["side"] == "CE" else -1
-        move = cs[ev["i"]]["close"] - day_open[cs[ev["i"]]["_dt"].astimezone(IST).date()]
         mfe, mae = excursions(path, entry, d)
         pnl, why = first_touch(path, entry, d, target, stop)
         grid = {f"{t}/{s}": first_touch(path, entry, d, t, s)[0] - cost for t in TARGET_GRID for s in STOP_GRID}
-        atr = ev.get("atr")
-        agrid = {f"{t:g}/{s:g}": first_touch(path, entry, d, t * atr, s * atr)[0] - cost for t in TARGET_ATR_GRID for s in STOP_ATR_GRID} if atr else None
+        strat = {name: fn(path, entry, d) - cost for name, fn in STRATEGIES} if with_extras else {}
         dt = cs[ev["i"]]["_dt"].astimezone(IST)
+        zone = vs_prev = None
+        if with_extras:
+            try:
+                z = dd.index_zone(cs[max(0, ev["i"] - 600):ev["i"] + 1], cs[ev["i"]]["close"], "Index")
+                if z.get("status") == "OK":
+                    want = "UP" if ev["side"] == "CE" else "DOWN"
+                    zone = "agrees (" + want + ")" if z["zone"] == want else "MID" if z["zone"] == "MID" else "opposes"
+                    vs_prev = "with prev-close side" if (cs[ev["i"]]["close"] - z["levels"]["prev_close"]) * d > 0 else "against prev-close side"
+            except Exception:
+                pass
         rows.append({**ev, "day": dt.strftime("%Y-%m-%d"), "minute": dt.hour * 60 + dt.minute, "hhmm": dt.strftime("%H:%M"),
                      "entry": entry, "mfe": mfe, "mae": mae, "pnl": pnl - cost, "exit": why, "grid": grid, "bars": len(path),
-                     "atr_grid": agrid, "held": exit_index(path, entry, d, target, stop), "with_day": None if abs(move) < 1e-9 else (move * d > 0), "_path": path, "_d": d})
+                     "strat": strat, "zone": zone, "vs_prev": vs_prev})
     return rows
 
 
-def random_entry_baseline(cs, interval, horizon, cost, target, stop, first_bar=40, n=800, seed=7, window=None):
+def random_entry_baseline(cs, interval, horizon, cost, target, stop, first_bar=40, n=800, seed=7):
     """What random entries (random bar, random CE/PE side) earn with the same exit rule on the same candles.
     Signals only have an edge to the extent they beat THIS number, not zero."""
     import random
     rnd = random.Random(seed)
-    idx = [i for i in range(first_bar, len(cs) - 2) if in_window(cs, i, interval, window)]      # same hours as the signals, or the comparison is unfair
+    idx = list(range(first_bar, len(cs) - 2))
     if not idx:
         return {"n": 0}
     pnls = []
@@ -290,7 +237,7 @@ def _band(v, edges, labels):
     return labels[-1]
 
 
-def build_report(rows_conf, rows_near, params, random_stats=None, random_fn=None):
+def build_report(rows_conf, rows_near, params, random_stats=None):
     cost, target, stop = params["cost"], params["target"], params["stop"]
     base = stats([r["pnl"] for r in rows_conf])
     report = {"params": params, "confirmed": {"count": len(rows_conf), "stats": base}, "limitations": [
@@ -315,52 +262,8 @@ def build_report(rows_conf, rows_near, params, random_stats=None, random_fn=None
                 row.append({"target": t, "stop": s, **st})
             grid.append(row)
         report["grid"] = grid
-        arows = [r for r in rows_conf if r.get("atr_grid")]
-        if arows:
-            ag = []
-            for t in TARGET_ATR_GRID:
-                ag.append([{"target": t, "stop": sp, **stats([r["atr_grid"][f"{t:g}/{sp:g}"] for r in arows])} for sp in STOP_ATR_GRID])
-            report["atr_grid"] = ag
-            acells = [c for row in ag for c in row if c["n"] >= MIN_N]
-            report["best_atr_exit"] = max(acells, key=lambda c: c["avg"]) if acells else None
-            report["atr_points"] = {"median": round(sorted(r["atr"] for r in arows)[len(arows) // 2], 1)}
-            bae = report["best_atr_exit"]
-            if bae:
-                k = f"{bae['target']:g}/{bae['stop']:g}"
-                days = sorted({r["day"] for r in arows})
-                if len(days) >= 4:
-                    mid = days[len(days) // 2]
-                    report["atr_halves"] = {"split_day": mid, "first": stats([r["atr_grid"][k] for r in arows if r["day"] < mid]),
-                                            "second": stats([r["atr_grid"][k] for r in arows if r["day"] >= mid])}
         cells = [c for row in grid for c in row if c["n"] >= MIN_N]
         report["best_exit"] = max(cells, key=lambda c: c["avg"]) if cells else None
-        be = report["best_exit"]
-        if be:
-            key = f"{be['target']}/{be['stop']}"
-            days = sorted({r["day"] for r in rows_conf})
-            if len(days) >= 4:
-                mid = days[len(days) // 2]
-                report["halves"] = {"split_day": mid, "first": stats([r["grid"][key] for r in rows_conf if r["day"] < mid]),
-                                    "second": stats([r["grid"][key] for r in rows_conf if r["day"] >= mid])}
-            report["trail_check"] = [{"be_at": None, **stats([r["grid"][key] for r in rows_conf])}] + [
-                {"be_at": b, **stats([first_touch_be(r["_path"], r["entry"], r["_d"], be["target"], be["stop"], b)[0] - cost for r in rows_conf])}
-                for b in (10, 15, 20, 30) if b < be["target"]]
-            if random_fn:
-                report["random_at_best"] = random_fn(be["target"], be["stop"])
-            report["execution"] = execution_table(rows_conf, be["target"], be["stop"], cost)
-        be2 = report.get("best_exit")
-        if be2:
-            ckey = f"{be2['target']}/{be2['stop']}"
-            report["day_concentration"] = {**day_concentration(rows_conf, lambda r: r["grid"][ckey]), "exit": f"{be2['target']}/{be2['stop']} pts"}
-        else:
-            report["day_concentration"] = {**day_concentration(rows_conf), "exit": f"{cost and params['target']}/{params['stop']} pts"}
-        bae = report.get("best_atr_exit")
-        if bae:
-            arows2 = [r for r in rows_conf if r.get("atr_grid") and r.get("atr")]
-            k = f"{bae['target']:g}/{bae['stop']:g}"
-            report["atr_execution"] = execution_table(arows2, bae["target"], bae["stop"], cost, atr_mult=True)
-            report["atr_day_concentration"] = day_concentration(arows2, lambda r: r["atr_grid"][k])
-        report["trades"] = trade_list(rows_conf)
     report["groups"] = {
         "Time of day (IST)": _bucket(rows_conf, _hour, [h[0] for h in HOUR_BUCKETS]),
         "Side": _bucket(rows_conf, lambda r: r["side"]),
@@ -369,10 +272,18 @@ def build_report(rows_conf, rows_near, params, random_stats=None, random_fn=None
         "Score": _bucket(rows_conf, lambda r: _band(r["score"], (80, 90), ("70–79", "80–89", "90–100")), ["70–79", "80–89", "90–100"]),
         "RSI extremity (low = exhausted)": _bucket(rows_conf, lambda r: _band(r["rsi_ext"], (20, 30, 40), ("< 20", "20–30", "30–40", "≥ 40")), ["< 20", "20–30", "30–40", "≥ 40"]),
         "Stretch beyond EMA 9": _bucket(rows_conf, lambda r: _band(r["stretch_atr"], (0.5, 1.0, 2.0, 3.5), ("< 0.5 ATR", "0.5–1", "1–2", "2–3.5", "> 3.5 ATR")), ["< 0.5 ATR", "0.5–1", "1–2", "2–3.5", "> 3.5 ATR"]),
-        "With / against the session's move (open → signal)": _bucket(rows_conf, lambda r: None if r["with_day"] is None else "with the day's move" if r["with_day"] else "against the day's move",
-                                                                    ["with the day's move", "against the day's move"]),
         "Day": _bucket(rows_conf, lambda r: r["day"]),
+        "Price zone vs signal side (dashboard's zone check)": _bucket(rows_conf, lambda r: r["zone"], ["agrees (UP)", "agrees (DOWN)", "MID", "opposes"]),
+        "Price vs previous close": _bucket(rows_conf, lambda r: r["vs_prev"], ["with prev-close side", "against prev-close side"]),
+        "Cutoff what-if: entries before / after 12:00": _bucket(rows_conf, lambda r: "before 12:00" if r["minute"] < 720 else "12:00 or later", ["before 12:00", "12:00 or later"]),
+        "Cutoff what-if: entries before / after 13:30": _bucket(rows_conf, lambda r: "before 13:30" if r["minute"] < 810 else "13:30 or later", ["before 13:30", "13:30 or later"]),
     }
+    report["strategies"] = [{"name": name, **stats([r["strat"][name] for r in rows_conf if name in r["strat"]])} for name, _ in STRATEGIES] if rows_conf else []
+    report["cost_table"] = [{"cost": c2, **stats([r["pnl"] + cost - c2 for r in rows_conf])} for c2 in (0, 2, 4, 6, 8)] if rows_conf else []
+    report["trades"] = [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pnl": round(r["pnl"], 1), "exit": r["exit"], "mfe": round(r["mfe"], 1),
+                         "mae": round(r["mae"], 1), "score": r["score"], "regime": r["regime"], "phase": r["phase"], "trigger": r["trigger"],
+                         "rsi_ext": None if r["rsi_ext"] is None else round(r["rsi_ext"], 1), "stretch_atr": None if r["stretch_atr"] is None else round(r["stretch_atr"], 2),
+                         "zone": r["zone"], "vs_prev": r["vs_prev"]} for r in rows_conf]
     gates = {}
     for r in rows_near:
         gates.setdefault(r["gate"], []).append(r["pnl"])
@@ -382,20 +293,12 @@ def build_report(rows_conf, rows_near, params, random_stats=None, random_fn=None
     return report
 
 
-BEST_Z = 3.0       # bar for any result that was selected as the best of many (the best-exit cell)
 SIG_Z = 2.0        # chance alone produces |z| > 1.5 about 1 time in 8; 2.0 keeps false alarms near 1 in 20 per comparison
 
 
-def _sig(s, ref=0.0, min_n=15):
+def _sig(s, ref=0.0):
     """True when a mean differs from `ref` by more than SIG_Z standard errors (and the sample is not tiny)."""
-    return bool(s.get("se") and s.get("n", 0) >= min_n and abs(s["avg"] - ref) > SIG_Z * s["se"])
-
-
-def _diff_sig(a, b):
-    """Two independent samples: is a's mean above b's by more than SIG_Z combined standard errors?"""
-    if not (a.get("se") and b.get("se")) or a.get("n", 0) < MIN_N or b.get("n", 0) < MIN_N:
-        return False
-    return (a["avg"] - b["avg"]) > SIG_Z * math.sqrt(a["se"] ** 2 + b["se"] ** 2)
+    return bool(s.get("se") and s.get("n", 0) >= 15 and abs(s["avg"] - ref) > SIG_Z * s["se"])
 
 
 def verdict(rep):
@@ -428,62 +331,15 @@ def verdict(rep):
     if be and base.get("n"):
         cur = next((x for row in rep["grid"] for x in row if x["target"] == p["target"] and x["stop"] == p["stop"]), None)
         if be["avg"] > (cur["avg"] if cur else base["avg"]) + 0.5:
-            ncells = sum(len(row) for row in rep["grid"])
             out.append({"level": "action", "text": f"Best tested exit: target {be['target']} / stop {be['stop']} → {be['avg']:+.1f} points per trade (n={be['n']}), "
-                        f"versus {cur['avg']:+.1f} at {p['target']}/{p['stop']}. It is the best of {ncells} pairs, so expect less than this going forward; "
-                        f"trust it more when neighbouring cells (same target, nearby stops) are also positive. Changing the paper-trade stop/target rule toward this is the first correction to test."})
-        h = rep.get("halves")
-        if h and h["first"].get("n", 0) >= 5 and h["second"].get("n", 0) >= 5:
-            both = h["first"]["avg"] > 0 and h["second"]["avg"] > 0
-            out.append({"level": "good" if both else "bad", "text": f"Stability of {be['target']}/{be['stop']}: days before {h['split_day']} {h['first']['avg']:+.1f} pts/trade (n={h['first']['n']}), "
-                        f"from {h['split_day']} on {h['second']['avg']:+.1f} (n={h['second']['n']})." + (" Positive in both halves." if both else " Not positive in both halves — this exit may be fitted to one stretch of market; do not rely on it.")})
-        rb = rep.get("random_at_best") or {}
-        if rb.get("n", 0) >= 50 and base.get("n", 0) >= MIN_N:
-            edge = be["avg"] - rb["avg"]
-            se = math.sqrt((be["se"] or 0) ** 2 + (rb["se"] or 0) ** 2)
-            real = edge > BEST_Z * se and be["n"] >= 30         # stricter bar: this exit was picked as the best of many, so a plain 2-SE test would flatter it
-            out.append({"level": "good" if real else "info",
-                        "text": f"At that same exit, random entries made {rb['avg']:+.1f} pts/trade; the signals made {be['avg']:+.1f} → gap {edge:+.1f}"
-                                + (f" (more than {BEST_Z:g} standard errors, even after allowing for picking the best exit)." if real
-                                   else f" (not convincing: because this exit was picked as the best of many, the gap must exceed {BEST_Z:g} standard errors to count).")})
-        tc = rep.get("trail_check") or []
-        if len(tc) > 1 and tc[0].get("n"):
-            best_t = max(tc[1:], key=lambda x: x["avg"])
-            if best_t["avg"] < tc[0]["avg"] - 0.5:
-                out.append({"level": "action", "text": f"Trailing to breakeven hurts: with no trail {tc[0]['avg']:+.1f} pts/trade, best breakeven trigger (+{best_t['be_at']} pts) {best_t['avg']:+.1f}. "
-                            f"Turn the paper-trade trail off for this exit (the test is slightly generous to the trail, so live results would be worse)."})
-            elif best_t["avg"] > tc[0]["avg"] + 0.5:
-                out.append({"level": "info", "text": f"A breakeven trail after +{best_t['be_at']} pts would have helped slightly: {best_t['avg']:+.1f} vs {tc[0]['avg']:+.1f} with no trail (within noise unless the sample is large)."})
-    bae = rep.get("best_atr_exit")
-    if bae and base.get("n"):
-        ah = rep.get("atr_halves")
-        both = bool(ah and ah["first"].get("avg", 0) > 0 and ah["second"].get("avg", 0) > 0)
-        row = next((r for r in rep["atr_grid"] if r[0]["target"] == bae["target"]), [])
-        pos = sum(1 for c in row if c["avg"] > 0)
-        out.append({"level": "action" if bae["avg"] > 0 and both and pos >= 4 else "info",
-                    "text": f"ATR-sized exits: best is target {bae['target']:g} × ATR / stop {bae['stop']:g} × ATR → {bae['avg']:+.1f} pts/trade (n={bae['n']}; 1 ATR ≈ {rep['atr_points']['median']} index pts). "
-                            f"Best fixed-point exit was {be['target'] if be else '—'}/{be['stop'] if be else '—'} pts → {be['avg'] if be else 0:+.1f}. "
-                            + (f"{pos} of 6 stops are positive at that target" if row else "") +
-                            (f"; positive in both halves ({ah['first']['avg']:+.1f} / {ah['second']['avg']:+.1f})." if ah else ".") +
-                            (" Mirror it in the paper-trade ATR multipliers." if bae["avg"] > 0 and both and pos >= 4 else " Not convincing enough to prefer over fixed points yet (best of 36 again).")})
-    dc = rep.get("day_concentration")
-    if dc and dc["total"] > 0 and dc["top_day_total"] > 0.5 * dc["total"] and dc["without_top"].get("n"):
-        wt = dc["without_top"]
-        out.append({"level": "bad" if wt["avg"] <= 0 else "info",
-                    "text": f"Profit concentration (at the {dc.get('exit', 'baseline')} exit): {dc['top_day']} alone made {dc['top_day_total']:+.0f} of the {dc['total']:+.0f} total points; without that day the other {wt['n']} trades "
-                            f"made {wt['avg']:+.1f} per trade. {dc['winning_days']} of {dc['days']} days were profitable. Trades on one day share one market move, so the real sample is the number of days, not trades."})
-    for key, title in (("execution", "Trading the fixed-point exit the way the guard would"), ("atr_execution", "Same with the ATR exit")):
-        ex = rep.get(key) or []
-        ex = [e for e in ex if e.get("n")]
-        if len(ex) >= 3:
-            best_e = max(ex[1:], key=lambda e: e["total"])
-            out.append({"level": "info", "text": title + ": " + "; ".join(f"{e['label']} → {e['n']} trades, {e['avg']:+.1f}/trade, {e['total']:+.0f} total" for e in ex) +
-                        f". Highest total: “{best_e['label']}” (differences between these rows are usually inside the noise — prefer the simplest rule that is clearly better than ‘one trade at a time’)."})
-    adc = rep.get("atr_day_concentration")
-    if adc and adc["total"] > 0 and adc["top_day_total"] > 0.5 * adc["total"] and adc["without_top"].get("n"):
-        wt = adc["without_top"]
-        out.append({"level": "bad" if wt["avg"] <= 0 else "info",
-                    "text": f"ATR exit ({rep.get('best_atr_exit', {}).get('target', '?'):g} × / {rep.get('best_atr_exit', {}).get('stop', '?'):g} × ATR) — profit concentration: {adc['top_day']} made {adc['top_day_total']:+.0f} of {adc['total']:+.0f} total points; without it the other {wt['n']} trades made {wt['avg']:+.1f} per trade. {adc['winning_days']} of {adc['days']} days were profitable."})
+                        f"versus {cur['avg']:+.1f} at {p['target']}/{p['stop']}. Changing the paper-trade stop/target rule toward this is the first correction to test."})
+    strat = [x for x in rep.get("strategies", []) if x.get("n", 0) >= MIN_N]
+    if strat and base.get("n"):
+        top = max(strat, key=lambda x: x["avg"])
+        fixed = next((x for x in strat if x["name"].startswith("Fixed target 30")), None)
+        if fixed and top["avg"] > fixed["avg"] + 1.0 and top["avg"] > 0:
+            out.append({"level": "action", "text": f"Best exit style tested: “{top['name']}” → {top['avg']:+.1f} points per trade ({top['win_rate']}% winners, n={top['n']}) "
+                        f"versus {fixed['avg']:+.1f} for a plain 30/20. Managing the exit (trailing / scaling out) is worth more than changing the entry."})
     worst, best = [], []
     for name, rows in rep["groups"].items():
         for g in rows:
@@ -498,12 +354,9 @@ def verdict(rep):
         if a.get("n", 0) < MIN_N:
             continue
         if a["avg"] > max(ref, 0) + 0.5 and a["avg"] > 0:
-            if _diff_sig(a, base):
-                out.append({"level": "action", "text": f"Gate too strict? “{a['gate']}” was the ONLY thing blocking {a['n']} setups that averaged {a['avg']:+.1f} points per trade "
-                            f"(confirmed signals: {ref:+.1f}) — a difference larger than chance. Relaxing this gate would have added profitable entries."})
-            else:
-                out.append({"level": "info", "text": f"“{a['gate']}” blocked {a['n']} setups averaging {a['avg']:+.1f} (confirmed: {ref:+.1f}), but that gap is within noise — leave the gate alone until a second period agrees."})
-        elif a["avg"] < 0 and _sig(a, min_n=10):
+            out.append({"level": "action", "text": f"Gate too strict? “{a['gate']}” was the ONLY thing blocking {a['n']} setups that averaged {a['avg']:+.1f} points per trade "
+                        f"(confirmed signals: {ref:+.1f}). Relaxing this gate would have added profitable entries."})
+        elif a["avg"] < 0 and _sig(a):
             out.append({"level": "good", "text": f"Gate earning its keep: “{a['gate']}” blocked {a['n']} setups that would have lost {a['avg']:+.1f} points per trade. Keep it."})
     if not any(v["level"] == "action" for v in out):
         out.append({"level": "info", "text": "No single correction stands out with enough data. Use more days, or try the other signal mode and compare."})
@@ -512,20 +365,16 @@ def verdict(rep):
 
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=60, stop=20, progress=None, window=DEFAULT_WINDOW):
+        horizon=12, cost=4.0, target=30, stop=20, progress=None):
     cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress)
     confirmed, near = events_from(replayed)
-    confirmed = [e for e in confirmed if in_window(cs, e["i"], interval, window)]
-    near = [e for e in near if in_window(cs, e["i"], interval, window)]
-    conf_rows = evaluate(cs, confirmed, interval, horizon, cost, target, stop)
+    conf_rows = evaluate(cs, confirmed, interval, horizon, cost, target, stop, with_extras=True)
     near_rows = evaluate(cs, near, interval, horizon, cost, target, stop)
     days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
-    random_stats = random_entry_baseline(cs, interval, horizon, cost, target, stop, window=window)
-    random_fn = lambda t, sp: random_entry_baseline(cs, interval, horizon, cost, t, sp, window=window)
+    random_stats = random_entry_baseline(cs, interval, horizon, cost, target, stop)
     params = {"symbol": symbol, "interval": interval, "mode": mode, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
-              "days": days, "bars_evaluated": len(replayed),
-              "entry_window": (f"{window[0] // 60:02d}:{window[0] % 60:02d}–{window[1] // 60:02d}:{window[1] % 60:02d} IST (as live)" if window else "off (all hours)")}
-    return build_report(conf_rows, near_rows, params, random_stats, random_fn)
+              "days": days, "bars_evaluated": len(replayed)}
+    return build_report(conf_rows, near_rows, params, random_stats)
 
 
 def _load(path):

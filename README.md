@@ -265,56 +265,10 @@ Limits: technical engine only (the Data Check dashboard has no history to replay
 and confirm anything you change on a second, different period. CLI: `python diagnostics.py candles.json scalp 5 4` (candles.json = the `candles` array from `/api/candles`).
 Tests: `python tests/test_diagnostics.py`.
 
-
-## v1.11.1 — corrections from the first diagnostics run (NIFTY, 5 m, 14 days, 2026-10-05 → 10-23)
-
-**What the numbers said.** Standard mode (55 signals) was indistinguishable from random entries. Scalp mode (117 signals) beat random entries by +6.3 pts/trade (statistically real) but only made +1.4 pts/trade at the old 30/20 exit. Every cell of the 60-point-target row of the scalp grid was profitable (+3.7 to +6.8 pts/trade, PF 1.23–1.58) — the exit, not the entry, was the biggest lever.
-
-**Changed (evidence ≥ 2 standard errors, or the same direction in both modes)**
-| Change | Evidence |
-|---|---|
-| Paper-trade default exit: **Target 3 at 3 R** (was Target 1 at 1.5 R), SL 1 ATR; diagnostics default exit 60 / 20 | 60-pt target row positive for every stop (best 60/15 +6.8, 60/20 +6.2 pts; the two are not distinguishable, 20 leaves room for slippage) |
-| **No entries after 13:30 IST** (was 15:00) | 13:30–15:30 lost in both modes (scalp −4.0 and −9.7 pts/trade, n = 37); mornings made +5 to +12 |
-| **New hard gate "Momentum established"**: PE needs RSI < 40, CE needs RSI > 60 | RSI ≥ 40 on a PE: 0 wins of 11 across both modes, −20 pts/trade |
-| **Time stop 60 min** (was 30) | the diagnostics horizon is 12 candles; a 60-pt target needs the time |
-| **Breakeven trail OFF by default** | never tested; the diagnostics now simulate it (see below) — turn it back on only if the next run says it helps |
-
-**Deliberately NOT changed** (not enough evidence, or probably market direction rather than logic)
-* CE vs PE (PE +3.7, CE −1.3 pts/trade) and the BULLISH regime bucket (1 win of 10): this fortnight was a falling market. Blocking CE would be fitting the sample; the new "with / against the session's move" breakdown will show whether it is direction or logic.
-* Scalp RSI 18/82 limit (RSI 20–30 entries −1.6 pts/trade, only ~1 SE worse than 30–40).
-* Standard-mode "Not chasing" / "Pullback" gates (blocked setups looked better but within noise).
-* Score bands (80–89 bad, 90–100 good is not monotonic → noise).
-
-**Diagnostics are harder to fool.** Gate-relaxation advice now needs a two-sample significance test (it previously fired on noise); the best exit is flagged as "best of 36" and shown for the first and second half of the period; its edge vs random entries is measured at that same exit with a stricter 3-SE bar; a breakeven-trail test (+10/15/20/30 pts) is reported; new breakdown "with / against the session's move". Tests: random walks never look profitable at 60/20 once averaged across seeds.
-
-**Before trusting any of this:** re-run `/diagnostics` on a different 15–20-day window (and ideally a rising market). Saved browser settings override the new defaults — reset the Risk guard panel once to pick them up.
-
-
-## v1.11.2 — second diagnostics run (19 days, 2026-09-25 → 10-23) and honesty checks
-
-**What the re-run showed.** Scalp: 150 signals, +4.2 pts/trade at 60/20 (60/15: +4.9), beats random entries by +7.0 (real), positive in both halves, every cell of the 60-target row positive again, breakeven trail loses again (keep it OFF), 13:30–15:30 entries still lose (cutoff confirmed). Standard: 62 signals, +3.0, not distinguishable from random.
-
-**But:** 14 of the 19 days were already in the first run, so this is not an independent test. The five genuinely new days (Sep 25 – Oct 1) made **−1.25 pts/trade over 34 scalp signals** (standard: −1.3 over 11). And **one day, 2026-10-08, made +473 of the +626 scalp points**; without it the other 132 trades made +1.2/trade. In standard mode, without that day the result is −2.2/trade. Treat this as a trend-day capture system with a ~40 % win rate whose profit arrives on a few days.
-
-**Diagnostics now report** profit concentration by day, a guard-style execution test (one open trade at a time; stop for the day after 2 / 3 losses in a row), and a per-trade list (`trades`, in the downloaded JSON) so any filter can be tested on the exact signals. No further engine rule was changed: every remaining candidate (pause-break trigger −12 pts over 10 trades, BULLISH-bias bucket 1 win in 10, CE vs PE) is either under 2 standard errors, or its trades sit on 2–3 days, or it only mirrors this month's falling market.
-
-
-## v1.11.3 (re-issued as 1.11.4) — ATR-sized exits in diagnostics
-`/diagnostics` now has a second grid, **ATR exit grid**: target (1–5 × ATR) × stop (0.5–2 × ATR), where ATR is the index ATR(14) at the signal bar, so exits widen in fast markets and tighten in quiet ones — the same idea as the paper-trade ATR multipliers. It shows the best cell, whether it is positive in both halves and across neighbouring stops, and the median ATR in index points (to translate 1 ATR into points). It is compared with the fixed-point grid in the findings; both are "best of 36", so prefer a cell whose neighbours are also positive. Random-entry and execution-guard comparisons still use the fixed-point exit.
-
-**v1.11.4:** fixed a stale `FRONTEND_VERSION` in `static/app.js` that left the "page is out of date" banner on permanently after v1.11.1–1.11.3 (clearing the cache could not fix it). `python tests/test_versions.py` now fails if the server, `app.js` and the HTML `?v=` strings disagree.
-
-
-## v1.11.5 — diagnostics measure what you would actually trade; ATR exit defaults
-**Findings from the third run** (same 19 days; added the ATR grid, execution test, trade list). Scalp, per-trade list analysed with day-clustered bootstrap: entries inside the live window (09:30–13:30) averaged **+9.4 pts/trade over 93 trades**; entries from 13:30 on **−4.9 over 50**. Inside the window, EMA-9-retest entries made +10.6 (90 % CI +1.2…+18.3 across days); score ≥ 90 made +24.6 (n = 20, CI +10…+36); PE +13.8, CE +0.6 (CE works on up days, fails on down days → context, not logic). ATR exits: every target of 3–5 × ATR with every stop 0.5–2 × ATR was positive (+4.4 … +7.8 pts/trade; 4 × ATR target with 1–1.25 × ATR stop: +6.2 … +6.6, both halves positive). Guard-style execution at 60/15: one trade at a time +2.9/trade (+315 total); stop after 2 losses in a row +6.3/trade (+404, 64 trades); after 3 losses +5.7/trade (+512, 90 trades). Standard mode traded one-at-a-time loses (−4.1/trade).
-
-**Changed**
-* Diagnostics now apply the live entry window by default (checkbox on the page), and the random-entry baseline is drawn from the same hours (before, random entries included the losing afternoon, which flattered the signals).
-* Execution test adds "max 3 / max 5 trades a day" and "2 losses + max 5"; ATR-exit versions of the execution test and the day-concentration check; each trade in the list carries its holding time (`held`, in candles).
-* Paper-trade ATR multipliers: stop 1.25 × ATR (was 1.0), Target 3 = 4 × ATR (was 3.0), exit at Target 3. The app's ATR is the option's own premium ATR, roughly delta × the index ATR, so these multiples carry over only approximately.
-
-**Not changed (still under the bar):** pause-break trigger (−10.7 over 9 signals, CI −24…+1.1), BULLISH-bias bucket (0 of 5 inside the window), CE-vs-PE, score ≥ 90 as a size-up rule, guard defaults (max 3 trades a day, stop after 2 losses) — the new execution rows will say whether "max 3 a day" is cutting winners on trend days.
-
-
-## v1.11.6 — fourth run (entry window applied, 93 scalp signals) and guard default
-Inside the live window the best fixed exit (60/30) made +11.2 pts/trade (positive in both halves, gap vs random > 3 SE) and the best ATR exit (4 × ATR target, 1.25 × ATR stop — the cell v1.11.5 uses) made +17.6 (positive across all six stops, both halves +15.6 / +19.6). Guard-style execution at 60/30: one at a time +545; **max 3 trades a day +403 (worst — it cuts winners on trend days)**; max 5 a day +613; stop after 2 losses +627; 2 losses + max 5 a day +661. **Changed:** guard default "Max trades / day" 3 → 5 (stop after 2 losses unchanged). Profit concentration is now measured at the best exit instead of the baseline exit (the earlier line used whatever target/stop was typed in the form).
+### v1.11.1 — corrections from the first 14-day replay (NIFTY 5m, 2026-10-05 → 10-23, cost 4 pts)
+What the data showed, and what changed:
+* **Late entries lose.** Entries before 12:00 made money (scalp: +7.7 pts/trade, 52 trades); entries after 13:30 lost (−5.4, 37 trades) in both modes. → default entry cut-off moved from 15:00 to **13:30** (`ENTRY_CUTOFF=HH:MM` in the environment overrides it).
+* **Exhausted-RSI entries lose** (standard: setups blocked only by RSI < 30 / > 70 averaged −14.7; scalp bucket RSI 20–30: −1.6 vs +4.1 for 30–40). → scalp mode no longer relaxes the RSI gate (30 / 70 in both modes).
+* **Small fixed targets lose, wide ones win.** After cost, targets ≤ 25 pts were negative for every stop; target 60 / stop 15–20 was +5 to +7 pts/trade. Median favourable move was 37 pts but the median adverse move 26 pts, so a 20-pt stop is hit 46% of the time. → paper trading now defaults to **Auto-exit at Target 3** (3.5 × risk) instead of Target 1 (1.5 ×). Diagnostics now also compares trailing and scale-out exits.
+* **Kept as is:** the relaxed chase limit (entries 1–2 ATR beyond EMA 9 were the best bucket; the strict gate blocked setups that averaged +5.6), the "not sideways" and trigger gates (the setups they blocked lost money). The new pause-break trigger fired only 3 times in 14 days; EMA 9 retests give nearly all entries.
+* **Not changed (not enough evidence):** CE signals lost money (−1.3/trade) while PE made +3.7, and the generic "BULLISH" regime label lost 9 of 10 — but this was a falling market. Diagnostics now includes the dashboard's price-zone check and previous-close side so the next run can test whether requiring them fixes it.

@@ -6,6 +6,7 @@ Why timing matters: a confirmed setup is only worth entering close to the moment
 means buying after the move (stale signal), after the dashboard flipped, or in the wrong part of the session.
 Every signal therefore carries the time it was generated, its age, and how far price travelled since.
 """
+import os
 from datetime import datetime, timedelta, timezone
 
 from indicators import IST, analyze, drop_forming, mode_rules, normalize_candles
@@ -16,7 +17,18 @@ EXPIRE_BARS = 12          # older than this many candles it is EXPIRED and must 
 MAX_CHASE_ATR = 1.0       # price already moved more than this many ATR from the signal price => don't chase
 REPLAY_BARS = 40          # how far back the replay looks for the start of the current signal
 ENTRY_START_MIN = 9 * 60 + 30     # no new entries before 09:30 IST (opening volatility)
-ENTRY_CUTOFF_MIN = 13 * 60 + 30  # no new entries from 13:30 IST (diagnostics: 13:30-15:30 entries lost in both modes; was 15:00)
+def _env_minutes(name, default):
+    """HH:MM from the environment (e.g. ENTRY_CUTOFF=13:30) -> minutes after midnight."""
+    try:
+        h, m = os.getenv(name, "").strip().split(":")
+        return int(h) * 60 + int(m)
+    except ValueError:
+        return default
+
+
+# 14 days of replayed signals (v1.11 diagnostics): entries before 12:00 made money, entries after 13:30 lost in both modes.
+# Override with ENTRY_CUTOFF=15:00 (or any HH:MM) in the environment if your own diagnostics say otherwise.
+ENTRY_CUTOFF_MIN = _env_minutes("ENTRY_CUTOFF", 13 * 60 + 30)
 AGREE_LEVELS = ("CONFIRMED", "BIAS")   # dashboard levels that count as "agrees"
 
 

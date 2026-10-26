@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.11.6"
+APP_VERSION = "1.11.1"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -649,7 +649,7 @@ async def diagnostics_page():
 
 @app.post("/api/diagnostics/start")
 async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 15, mode: str = "scalp",
-                            cost: float = 4.0, target: int = 60, stop: int = 20, horizon: int = 12, window: bool = True):
+                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12):
     """Replays the technical engine over the last `days` of candles and measures what happened after every signal.
     Runs in a background thread (a 20-day replay takes several seconds locally and longer on a free instance)."""
     _need_user(request)
@@ -695,7 +695,7 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
         job["stage"] = "Replaying signals bar by bar"
         try:
             rep = dgn.run(result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw, htf_interval=htf_interval,
-                          volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop, window=dgn.DEFAULT_WINDOW if window else None,
+                          volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop,
                           progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
             rep["params"]["volume_source"] = result.get("volume_source")
             job.update(status="done", report=rep, progress=1.0, stage="Done")
