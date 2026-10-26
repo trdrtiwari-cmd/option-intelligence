@@ -16,7 +16,7 @@
   $("runBtn").addEventListener("click", async () => {
     fail(""); $("results").hidden = true;
     const p = new URLSearchParams({ symbol: $("symbol").value, interval: $("interval").value, days: $("days").value, mode: $("mode").value,
-      target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value, window: $("window").checked ? "true" : "false" });
+      target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value });
     $("runBtn").disabled = true; $("progressBox").hidden = false; $("progressBar").style.width = "2%"; $("progressText").textContent = "Fetching candles…";
     try {
       const { job_id } = await api("/api/diagnostics/start?" + p, { method: "POST" });
@@ -69,16 +69,9 @@
         row.forEach(cell => { const td = el("td", "dg-cell", cell.n ? `${num(cell.avg)}` : "—"); td.setAttribute("style", heat(cell.avg, cell.n)); td.title = cell.n ? `n=${cell.n} · win ${cell.win_rate}% · PF ${cell.pf ?? "—"}` : "no trades";
           if (best && best.target === cell.target && best.stop === cell.stop) td.classList.add("dg-best"); if (cell.target === P.target && cell.stop === P.stop) td.classList.add("dg-current"); tr.appendChild(td); }); g.appendChild(tr); });
     } else g.appendChild(el("tr")).appendChild(el("td", "", "No confirmed signals in this period."));
-    const ag = clear($("atrGridTable"));
-    if (rep.atr_grid) {
-      const hr = el("tr"); hr.appendChild(el("th", "", "Target ↓ / Stop →")); rep.atr_grid[0].forEach(cell => hr.appendChild(el("th", "", cell.stop + " ATR"))); ag.appendChild(hr);
-      const bestA = rep.best_atr_exit;
-      rep.atr_grid.forEach(row => { const tr = el("tr"); tr.appendChild(el("th", "", row[0].target + " ATR"));
-        row.forEach(cell => { const td = el("td", "dg-cell", cell.n ? `${num(cell.avg)}` : "—"); td.setAttribute("style", heat(cell.avg, cell.n)); td.title = cell.n ? `n=${cell.n} · win ${cell.win_rate}% · PF ${cell.pf ?? "—"}` : "no trades";
-          if (bestA && bestA.target === cell.target && bestA.stop === cell.stop) td.classList.add("dg-best"); tr.appendChild(td); }); ag.appendChild(tr); });
-      const note = $("atrNote"); if (note && rep.atr_points) note.textContent = `Exits sized as multiples of the index ATR(14) at the signal bar (median ≈ ${rep.atr_points.median} index points). Same cost allowance, same horizon.`;
-    }
 
+    table($("strategies"), ["Exit style", "Trades", "Win", "Avg pts", "Total", "PF", "±SE"], (rep.strategies || []).map(x => [x.name, ...statCells(x)]));
+    table($("costTable"), ["Cost per trade (pts)", "Trades", "Win", "Avg pts", "Total", "PF", "±SE"], (rep.cost_table || []).map(x => [x.cost + " pts" + (x.cost === P.cost ? "  (used)" : ""), ...statCells(x)]));
     const gr = clear($("groups"));
     Object.entries(rep.groups).forEach(([name, rows]) => {
       if (!rows.length) return;

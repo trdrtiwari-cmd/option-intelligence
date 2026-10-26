@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.11.6";
+const FRONTEND_VERSION="1.11.1";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -796,7 +796,7 @@ function paperCloseTrade(trade,price,reason){
 }
 // ---------------- Trade guard: entry rules that actually BLOCK paper entries ----------------
 const PAPER_GUARD_KEY="option-intelligence-paper-guard-v1";
-const GUARD_FIELDS={guardEnforce:["enforce","checkbox",true],guardMaxTrades:["maxTrades","num",5],guardDailyLoss:["dailyLoss","num",3000],guardMaxLosses:["maxLosses","num",2],guardCooldown:["cooldown","num",15],guardMaxSlPct:["maxSlPct","num",20],guardMaxSpread:["maxSpread","num",3],guardSlip:["slip","num",0.5],guardMinRR:["minRR","num",1.2],guardTimeStop:["timeStop","num",60],guardTrail:["trail","checkbox",false],guardStart:["start","time","09:30"],guardCutoff:["cutoff","time","13:30"],guardExpiryCutoff:["expiryCutoff","time","13:30"]};
+const GUARD_FIELDS={guardEnforce:["enforce","checkbox",true],guardMaxTrades:["maxTrades","num",3],guardDailyLoss:["dailyLoss","num",3000],guardMaxLosses:["maxLosses","num",2],guardCooldown:["cooldown","num",15],guardMaxSlPct:["maxSlPct","num",20],guardMaxSpread:["maxSpread","num",3],guardSlip:["slip","num",0.5],guardMinRR:["minRR","num",1.2],guardTimeStop:["timeStop","num",30],guardTrail:["trail","checkbox",true],guardStart:["start","time","09:30"],guardCutoff:["cutoff","time","15:00"],guardExpiryCutoff:["expiryCutoff","time","13:30"]};
 function guardTimeMin(v,d){const m=/^(\d{1,2}):(\d{2})/.exec(v||"")||/^(\d{1,2}):(\d{2})/.exec(d);return Number(m[1])*60+Number(m[2])}
 function hhmm(m){return String(Math.floor(m/60)).padStart(2,"0")+":"+String(m%60).padStart(2,"0")}
 function guardRead(){
