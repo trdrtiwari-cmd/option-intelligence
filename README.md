@@ -301,3 +301,20 @@ What the data showed, and what changed:
 - `/api/status` exposes `backend_live_data_warmup` (`WARM`, `WAITING_FOR_UPSTOX_TOKEN`, or `DEGRADED`) and the last warmup time/error.
 - Live data still requires a valid Upstox token, successful WebSocket connection, market activity, and fresh ticks. REST snapshots are not represented as live ticks; if a token is missing or stale data is detected, the UI should continue to show unavailable/WAIT rather than fabricate values.
 - This does not change TradingView's own chart feed; it warms this application's backend only.
+
+
+## v1.11.4 — continuous stream watchdog and visible-page refresh
+
+- The backend warmup loop checks whether each Upstox index stream thread is alive and whether a fresh index tick has arrived during market hours. Stopped or stalled streams are restarted automatically.
+- `/api/status` now exposes per-index stream diagnostics: thread state, subscribed instrument count, latest index tick age, freshness, and stream error.
+- The main dashboard keeps its selected auto-refresh interval running whenever the page is visible, including outside market hours, so status and snapshot panels do not freeze simply because the exchange is closed. Closed-market data is not labelled as live.
+- The backend cannot keep running if the hosting provider suspends/stops the service; continuous backend processing requires an always-on host. Upstox token validity, API permissions, market hours, and live ticks remain necessary.
+
+
+## v1.11.5 — candle confirmation in final signal
+
+- Added closed-candle analysis for bullish/bearish engulfing and strong breakout/breakdown candles.
+- Added a candle-confirmation gate to the technical signal engine: a directional setup cannot become CONFIRMED unless the latest closed candle confirms the same side.
+- Candle analysis is returned in the `/api/analysis` response as `candle_analysis`; the gate detail is included with the existing gates.
+- Doji/weak/contradictory candles do not confirm a trade. The app continues to ignore the still-forming candle and preserves existing live-data freshness safeguards.
+- This is a conservative confirmation rule, not a profitability guarantee; backtest and paper-trade before live use.

@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.11.3"
+APP_VERSION = "1.11.5"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -464,10 +464,29 @@ async def _backend_warmup_loop():
         try:
             if runtime_token:
                 for sym in INDEX_KEYS:
-                    # Start a baseline stream for both indices, even before a browser opens.
+                    # Keep a baseline stream for both indices before a browser opens, and
+                    # restart a dead/stalled stream during market hours. A quiet market or
+                    # closed exchange is not misclassified as a stream failure.
+                    restart_stream = False
                     with STREAM_LOCK:
-                        stream_exists = bool(STREAMS.get(sym, {}).get("streamer"))
-                    if not stream_exists:
+                        entry = STREAMS.get(sym)
+                        stream_exists = bool(entry and entry.get("streamer"))
+                        thread = entry.get("thread") if entry else None
+                        thread_alive = bool(thread and thread.is_alive())
+                        index_tick = LIVE_TICKS.get(INDEX_KEYS[sym], {})
+                        tick_age = time.time() - index_tick.get("received_ts", 0) if index_tick else None
+                        restart_stream = stream_exists and (not thread_alive or
+                            (market_status()["open"] and (tick_age is None or tick_age > 45)))
+                        if restart_stream:
+                            STREAMS.pop(sym, None)
+                            STREAM_ERRORS[sym] = "Stream watchdog restarting a stopped or stale feed"
+                    if restart_stream:
+                        try:
+                            entry["streamer"].disconnect()
+                        except Exception:
+                            pass
+                        logger.warning("Restarting stopped/stale Upstox stream for %s", sym)
+                    if not stream_exists or restart_stream:
                         keys = [INDEX_KEYS[sym]]
                         try:
                             exp = await resolve_expiry(sym, "current_week")
@@ -790,12 +809,32 @@ async def diagnostics_result(request: Request, job_id: str = ""):
     return {"status": job["status"], "progress": job["progress"], "stage": job["stage"], "error": job["error"], "report": job["report"]}
 
 
+def _live_stream_status():
+    now = time.time()
+    out = {}
+    with STREAM_LOCK:
+        for sym, index_key in INDEX_KEYS.items():
+            entry = STREAMS.get(sym)
+            tick = LIVE_TICKS.get(index_key)
+            age = max(0.0, now - tick.get("received_ts", now)) if tick else None
+            thread = entry.get("thread") if entry else None
+            out[sym] = {
+                "connected_thread": bool(thread and thread.is_alive()),
+                "subscribed_instruments": len(entry.get("keys", [])) if entry else 0,
+                "last_index_tick_age_seconds": round(age, 1) if age is not None else None,
+                "index_tick_fresh": bool(age is not None and age <= FRESH_SECONDS),
+                "error": STREAM_ERRORS.get(sym),
+            }
+    return out
+
+
 @app.get("/api/status")
 async def status():
     state = await check_token_state()
     return {
         "app": APP_TITLE, "version": APP_VERSION, "provider": "Upstox",
         "backend_live_data_warmup": dict(BACKEND_WARM_STATUS),
+        "live_streams": _live_stream_status(),
         "token_configured": bool(runtime_token), "token_state": state,
         "oauth_configured": bool(UPSTOX_API_KEY and UPSTOX_API_SECRET and UPSTOX_REDIRECT_URI),
         "mode": "Upstox REST + optional V3 WebSocket; analysis-only; no orders are placed",

@@ -157,6 +157,14 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
                       "pass": in_window,
                       "detail": f"Now {now_dt.strftime('%H:%M')} IST" + ("" if market_open else " · market closed") +
                                 ("" if in_window or not market_open else " — outside the entry window")})
+        candle = a.get("candle_analysis")
+        # Backward-compatible for callers/tests supplying a legacy analysis payload; the live /api/analysis
+        # path always includes candle_analysis and therefore always applies this gate.
+        if isinstance(candle, dict):
+            candle_ok = bool(candle.get("confirmed") and candle.get("side") == side)
+            candle_detail = candle.get("detail") or "Candle analysis unavailable — final signal not confirmed"
+            gates.append({"label": f"Closed-candle confirmation for BUY {side}", "pass": candle_ok,
+                          "detail": candle_detail})
 
     precheck = tech_level == "CONFIRMED" and all(g["pass"] for g in gates) and bool(side)
     tech_run = (replay or {}).get("key")
@@ -245,7 +253,8 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
         level, action = "WAIT", "WAIT"
         headline = "No technical setup." + (f" Dashboard leans {d_side} ({d_level}) but a dashboard read alone never creates an entry." if d_ok and d_side and d_level in AGREE_LEVELS else "")
     final = {"level": level, "action": action, "side": side, "confluence_score": confluence, "headline": headline,
-             "reasons": reasons, "blockers": blockers, "terminal_signal": sig, "dashboard_level": d_level, "dashboard_side": d_side}
+             "reasons": reasons, "blockers": blockers, "terminal_signal": sig, "dashboard_level": d_level, "dashboard_side": d_side,
+             "candle_analysis": a.get("candle_analysis")}
     return {"gates": gates, "final": final, "timing": timing, "dashboard": summary}
 
 
