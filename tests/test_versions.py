@@ -20,3 +20,7 @@ def test_versions_agree():
 
 if __name__ == "__main__":
     test_versions_agree(); print("ok test_versions_agree\nall version tests passed")
+
+
+def test_version_is_116():
+    assert re.search(r'APP_VERSION\s*=\s*"([\d.]+)"', read("main.py")).group(1) == "1.11.6"

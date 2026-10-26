@@ -48,3 +48,4 @@ def test_opposite_pattern_does_not_confirm_side():
     ], 'CE')
     assert result['pattern'] == 'BEARISH_ENGULFING'
     assert result['confirmed'] is False
+
