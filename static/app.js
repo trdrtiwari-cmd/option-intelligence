@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.11.3";
+const FRONTEND_VERSION="1.11.5";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -555,15 +555,15 @@ window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.
 ["optionTypeFilter","moneynessFilter"].forEach(id=>$(id)?.addEventListener("change",renderFilteredChain));
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
 initChart();checkStatus();refresh();
-// Auto refresh: user-selectable (default 10 s). Runs only while the tab is visible and the market is open,
-// and never overlaps a still-running refresh. Between refreshes the live index tick moves the last candle.
+// Auto refresh: user-selectable (default 10 s). Runs while the tab is visible, including outside market hours
+// so freshness/status panels keep updating. Never overlaps a refresh; real live ticks still require market activity.
 let autoTimer=null,refreshBusy=false;
 function startAutoRefresh(){
   clearInterval(autoTimer);
   const sec=Number($("refreshEvery").value)||10;
   try{localStorage.setItem("oi-refresh-sec",String(sec))}catch{}
   autoTimer=setInterval(async()=>{
-    if(document.visibilityState!=="visible"||!marketOpen||refreshBusy)return;
+    if(document.visibilityState!=="visible"||refreshBusy)return;
     refreshBusy=true;try{await refresh()}finally{refreshBusy=false}
   },sec*1000);
 }
