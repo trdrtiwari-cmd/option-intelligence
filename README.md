@@ -281,3 +281,23 @@ What the data showed, and what changed:
 - The Data Check dashboard adds a closed-candle Wilder ATR(14) risk reference: 1.0× ATR stop and 1.5× ATR target scenarios for CE and PE on the underlying index. These levels are index points, not option-premium rupees; use the selected option's own premium ATR for an actual premium-based plan.
 - The change does not make TradingView's own chart feed live. TradingView receives prices from its configured data provider; this website's Upstox stream updates this application only. TradingView webhooks remain one-way alerts into this backend.
 - No profitability guarantee. Validate live tick age, spread, slippage, and ATR levels in paper trading before using real capital.
+
+
+## v1.11.3 — Backend live-data warmup
+
+- Backend startup now runs a warmup loop for both NIFTY and BANKNIFTY, even before a browser dashboard is opened.
+- When an Upstox access token is available, the backend starts V3 WebSocket subscriptions for both index instruments and a small near-ATM CE/PE window.
+- The backend periodically warms the five Data Check panels for both indices so the first page visit is less likely to be a cold load.
+- `/api/status` exposes `backend_live_data_warmup` (`WARM`, `WAITING_FOR_UPSTOX_TOKEN`, or `DEGRADED`) and the last warmup time/error.
+- Live data still requires a valid Upstox token, successful WebSocket connection, market activity, and fresh ticks. REST snapshots are not represented as live ticks; if a token is missing or stale data is detected, the UI should continue to show unavailable/WAIT rather than fabricate values.
+- This does not change TradingView's own chart feed; it warms this application's backend only.
+
+
+## v1.11.3 — Backend live-data warmup
+
+- Backend startup now runs a warmup loop for both NIFTY and BANKNIFTY, even before a browser dashboard is opened.
+- When an Upstox access token is available, the backend starts V3 WebSocket subscriptions for both index instruments and a small near-ATM CE/PE window.
+- The backend periodically warms the five Data Check panels for both indices so the first page visit is less likely to be a cold load.
+- `/api/status` exposes `backend_live_data_warmup` (`WARM`, `WAITING_FOR_UPSTOX_TOKEN`, or `DEGRADED`) and the last warmup time/error.
+- Live data still requires a valid Upstox token, successful WebSocket connection, market activity, and fresh ticks. REST snapshots are not represented as live ticks; if a token is missing or stale data is detected, the UI should continue to show unavailable/WAIT rather than fabricate values.
+- This does not change TradingView's own chart feed; it warms this application's backend only.

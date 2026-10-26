@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.11.2"
+APP_VERSION = "1.11.3"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -71,6 +71,8 @@ LTP_CACHE = {}
 LTP_CACHE_TTL = 1.5
 FRESH_SECONDS = 15
 STREAM_LOCK = threading.RLock()
+BACKEND_WARM_TASK = None
+BACKEND_WARM_STATUS = {"state": "NOT_STARTED", "last_warm_at": None, "last_error": None}
 
 INDEX_KEYS = {
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -452,6 +454,78 @@ def _stream_keys(sym, option_keys=()):
     return list(dict.fromkeys([INDEX_KEYS[sym], *option_keys]))
 
 
+async def _backend_warmup_loop():
+    """Keep both index feeds and the shared dashboard data paths warm on the backend.
+
+    This does not manufacture ticks: live status still depends on a fresh Upstox WebSocket
+    event. REST dashboard blocks remain explicitly snapshot-based where appropriate.
+    """
+    while True:
+        try:
+            if runtime_token:
+                for sym in INDEX_KEYS:
+                    # Start a baseline stream for both indices, even before a browser opens.
+                    with STREAM_LOCK:
+                        stream_exists = bool(STREAMS.get(sym, {}).get("streamer"))
+                    if not stream_exists:
+                        keys = [INDEX_KEYS[sym]]
+                        try:
+                            exp = await resolve_expiry(sym, "current_week")
+                            chain = await get_chain(sym, exp)
+                            rows = [r for r in chain.get("rows", []) if r.get("strike_price") is not None]
+                            if rows:
+                                spot = float(rows[0].get("underlying_spot_price") or 0)
+                                rows.sort(key=lambda r: abs(float(r["strike_price"]) - spot))
+                                # Subscribe a small near-ATM window, both CE and PE, to limit feed load.
+                                for row in rows[:6]:
+                                    for leg in ("call_options", "put_options"):
+                                        opt = row.get(leg) or {}
+                                        key = opt.get("instrument_key")
+                                        if key:
+                                            keys.append(key)
+                        except Exception as exc:
+                            logger.info("Warmup option discovery deferred for %s: %s", sym, exc)
+                        _start_stream(sym, _stream_keys(sym, keys[1:]))
+
+                # Warm all five Data Check panels for both indices. Browser requests still
+                # refresh on demand; this simply avoids a cold backend when the site is opened.
+                for sym in INDEX_KEYS:
+                    universe = "niftybank" if sym == "BANKNIFTY" else "nifty50"
+                    try:
+                        await _dashboard_blocks(sym, universe, "current_week", 5, 0)
+                    except Exception as exc:
+                        logger.info("Dashboard warmup deferred for %s: %s", sym, exc)
+                BACKEND_WARM_STATUS.update({"state": "WARM", "last_warm_at": utc_now_iso(), "last_error": None})
+            else:
+                BACKEND_WARM_STATUS.update({"state": "WAITING_FOR_UPSTOX_TOKEN", "last_error": "Connect Upstox or configure UPSTOX_ACCESS_TOKEN."})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            BACKEND_WARM_STATUS.update({"state": "DEGRADED", "last_error": str(exc)[:250]})
+            logger.warning("Backend live-data warmup failed: %s", exc)
+        # Recheck token / streams periodically; don't hammer Upstox REST endpoints.
+        await asyncio.sleep(30)
+
+
+@app.on_event("startup")
+async def start_backend_live_data():
+    global BACKEND_WARM_TASK
+    if BACKEND_WARM_TASK is None or BACKEND_WARM_TASK.done():
+        BACKEND_WARM_TASK = asyncio.create_task(_backend_warmup_loop(), name="backend-live-data-warmup")
+
+
+@app.on_event("shutdown")
+async def stop_backend_live_data():
+    global BACKEND_WARM_TASK
+    if BACKEND_WARM_TASK and not BACKEND_WARM_TASK.done():
+        BACKEND_WARM_TASK.cancel()
+        try:
+            await BACKEND_WARM_TASK
+        except asyncio.CancelledError:
+            pass
+    BACKEND_WARM_TASK = None
+
+
 def _tick_view(key, now):
     """Tick + contract metadata + per-row age, or None if nothing has been received."""
     tick = LIVE_TICKS.get(key)
@@ -721,6 +795,7 @@ async def status():
     state = await check_token_state()
     return {
         "app": APP_TITLE, "version": APP_VERSION, "provider": "Upstox",
+        "backend_live_data_warmup": dict(BACKEND_WARM_STATUS),
         "token_configured": bool(runtime_token), "token_state": state,
         "oauth_configured": bool(UPSTOX_API_KEY and UPSTOX_API_SECRET and UPSTOX_REDIRECT_URI),
         "mode": "Upstox REST + optional V3 WebSocket; analysis-only; no orders are placed",
