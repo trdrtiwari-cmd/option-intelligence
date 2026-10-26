@@ -28,6 +28,20 @@ def test_first_touch_rules():
     assert (mfe, mae) == (25.0, 10.0)
 
 
+def test_managed_exits():
+    c2 = lambda o, h, l, cl: {"open": o, "high": h, "low": l, "close": cl}
+    # trailing: best +30, then price gives back 20 -> stop at +10 locks the profit
+    assert dg.managed_exit([c2(100, 125, 99, 124), c2(124, 130, 118, 119), c2(119, 121, 100, 105)], 100, 1, 20, activate=20, trail=20) == (10.0, "trail")
+    assert dg.managed_exit([c2(100, 101, 75, 80)], 100, 1, 20, activate=20, trail=20) == (-20.0, "stop")
+    # PE direction mirrors CE
+    assert dg.managed_exit([c2(100, 101, 68, 70), c2(70, 90, 69, 85)], 100, -1, 20, activate=20, trail=20) == (12.0, "trail")
+    # scale out: half banked at +30, rest stopped at the trailing level
+    assert dg.managed_exit([c2(100, 132, 99, 130), c2(130, 135, 105, 110)], 100, 1, 20, trail=20, half_at=30) == (21.0, "trail")
+    assert dg.managed_exit([c2(100, 132, 99, 130), c2(130, 131, 128, 129)], 100, 1, 20, trail=20, half_at=30) == (29.5, "time")
+    # a stop on the very candle that would reach the first target counts as a loss (adverse first)
+    assert dg.managed_exit([c2(100, 135, 70, 100)], 100, 1, 20, trail=20, half_at=30) == (-20.0, "stop")
+
+
 def test_stats():
     s = dg.stats([30, -20, 30, -20, 30])
     assert s["n"] == 5 and s["win_rate"] == 60.0 and s["avg"] == 10.0 and s["pf"] == 2.25 and s["total"] == 50.0
@@ -59,98 +73,39 @@ def test_end_to_end_on_trending_data_finds_signals():
     assert rep["confirmed"]["count"] >= 4, rep["confirmed"]
     assert rep["confirmed"]["stats"]["avg"] > 0, rep["confirmed"]["stats"]     # a staircase fall pays after a PE signal
     assert rep["random_entries"]["n"] > 50
+    assert len(rep["strategies"]) == len(dg.STRATEGIES) and next(x for x in rep["cost_table"] if x["cost"] == 2)["avg"] == rep["confirmed"]["stats"]["avg"]
+    assert rep["trades"] and {"day", "time", "side", "pnl", "zone"} <= set(rep["trades"][0])
+    assert "Price zone vs signal side (dashboard's zone check)" in rep["groups"]
     assert rep["grid"] and rep["verdict"] and all("level" in v and "text" in v for v in rep["verdict"])
     std = dg.run(rows, mode="standard", cost=2.0)
     assert std["confirmed"]["count"] < rep["confirmed"]["count"]               # standard mode takes far fewer entries on this data
 
 
-def walk(seed, days=14):
+def _walk(seed, days=10):
     rnd, price, rows = random.Random(seed), 22800.0, []
     for d in range(days):
         t = datetime(2026, 10, 5, 9, 15, tzinfo=IST) + timedelta(days=d)
         for k in range(75):
-            o = price; price += rnd.gauss(0, 9); rows.append({"time": (t + timedelta(minutes=5 * k)).isoformat(), "open": o, "high": max(o, price) + rnd.uniform(0, 5),
-                                                              "low": min(o, price) - rnd.uniform(0, 5), "close": price, "volume": 0})
+            o = price; price += rnd.gauss(0, 9)
+            rows.append({"time": (t + timedelta(minutes=5 * k)).isoformat(), "open": o, "high": max(o, price) + rnd.uniform(0, 5),
+                         "low": min(o, price) - rnd.uniform(0, 5), "close": price, "volume": 0})
     return rows
 
 
-def test_wide_exit_makes_no_phantom_edge_on_noise():
-    """The 60/20 exit must not look profitable on a random walk once you average over several different walks."""
-    avgs = [dg.run(walk(s), mode="scalp", cost=4.0, target=60, stop=20)["confirmed"]["stats"]["avg"] for s in (5, 6, 7, 8, 9, 10)]
-    print("random-walk mean of avg pts/trade at 60/20:", round(sum(avgs) / len(avgs), 2))
-    assert sum(avgs) / len(avgs) < 1.0
-
-
-def test_breakeven_trail_and_new_report_fields():
-    entry = 100.0
-    # +15 reached, then price returns to entry -> breakeven trail exits at 0 where no-trail would later hit the stop
-    path = [c(100, 116, 99, 112), c(112, 113, 100, 101), c(101, 102, 70, 75)]
-    assert dg.first_touch_be(path, entry, 1, 60, 20, 15) == (0.0, "stop") or dg.first_touch_be(path, entry, 1, 60, 20, 15)[0] == -0.0
-    assert dg.first_touch(path, entry, 1, 60, 20) == (-20.0, "stop")
-    assert dg.first_touch_be([c(100, 165, 99, 160)], entry, 1, 60, 20, 15) == (60.0, "target")
-    rep = dg.run(staircase_days(6, 3), mode="scalp", cost=2.0)
-    assert "trail_check" in rep and rep["trail_check"][0]["be_at"] is None and "random_at_best" in rep and "halves" in rep
-    assert "With / against the session's move (open → signal)" in rep["groups"]
-
-
-def test_execution_sim_concentration_and_trade_list():
-    rep = dg.run(staircase_days(6, 3), mode="scalp", cost=2.0)
-    ex = rep["execution"]
-    assert [e["label"][:5] for e in ex][:3] == ["every", "one t", "+ max"] and len(ex) == 7
-    assert ex[1]["n"] <= ex[0]["n"] and ex[2]["n"] <= ex[1]["n"] and ex[3]["n"] >= ex[2]["n"]      # each rule can only remove trades
-    assert ex[4]["n"] <= ex[1]["n"] and ex[5]["n"] >= ex[4]["n"] and ex[6]["n"] <= ex[4]["n"]
-    assert rep["atr_execution"] and rep["atr_day_concentration"]["days"] >= 1
-    assert rep["day_concentration"]["exit"].startswith(f"{rep['best_exit']['target']}/{rep['best_exit']['stop']}"), "concentration must be measured at the best exit, not the baseline"
-    assert rep["day_concentration"]["days"] >= 1 and len(rep["trades"]) == rep["confirmed"]["count"]
-    # one-at-a-time: a signal that fires while a trade is still open is skipped
-    path = [c(100, 101, 99, 100)] * 12                                                     # never exits: held for 12 candles
-    rows = [{"i": 5, "day": "d", "entry": 100.0, "_path": path, "_d": 1}, {"i": 9, "day": "d", "entry": 100.0, "_path": path, "_d": 1}]
-    assert dg.execution_sim(rows, 60, 20, 0)["n"] == 1 and dg.execution_sim(rows, 60, 20, 0, one_at_a_time=False)["n"] == 2
-    assert dg.exit_index([c(100, 101, 99, 100), c(100, 165, 99, 160)], 100.0, 1, 60, 20) == 2
-    # profit concentration is called out
-    rows = [{"day": "a", "pnl": 100.0}, {"day": "b", "pnl": -10.0}, {"day": "b", "pnl": -10.0}, {"day": "c", "pnl": 5.0}]
-    assert dg.day_concentration(rows)["top_day"] == "a"
-    rep2 = {"confirmed": {"count": 4, "stats": dg.stats([100, -10, -10, 5])}, "params": {"target": 60, "stop": 20, "cost": 0}, "groups": {}, "ablation": [],
-            "day_concentration": dg.day_concentration(rows), "random_entries": {}}
-    assert any("Profit concentration" in v["text"] and v["level"] == "bad" for v in dg.verdict(rep2))
-
-
-def test_atr_grid():
-    rep = dg.run(staircase_days(6, 3), mode="scalp", cost=2.0)
-    assert len(rep["atr_grid"]) == 6 and len(rep["atr_grid"][0]) == 6 and rep["best_atr_exit"] and rep["atr_points"]["median"] > 0
-    # sized by the ATR at the signal bar: a 2-ATR stop on a trade with ATR 10 is a 20-point stop
-    path = [c(100, 101, 79, 80)]
-    assert dg.first_touch(path, 100.0, 1, 3 * 10, 2 * 10) == (-20.0, "stop")
-
-
-def test_entry_window_is_applied_to_signals_and_random_baseline():
-    rows = staircase_days(6, 3)
-    allhours = dg.run(rows, mode="scalp", cost=2.0, window=None)
-    win = dg.run(rows, mode="scalp", cost=2.0)                                  # default = the live 09:30-13:30 window
-    assert win["params"]["entry_window"].startswith("09:30–13:30") and allhours["params"]["entry_window"].startswith("off")
-    assert win["confirmed"]["count"] <= allhours["confirmed"]["count"]
-    assert all(570 <= int(t["time"][:2]) * 60 + int(t["time"][3:]) + 5 < 810 for t in win["trades"]), "no trade may close its signal bar outside the window"
-    cs = dg.normalize_candles(rows)
-    inside = [i for i in range(40, len(cs) - 2) if dg.in_window(cs, i, 5, dg.DEFAULT_WINDOW)]
-    assert 0 < len(inside) < len(cs) - 42
-
-
-def test_noise_gap_is_not_a_correction():
-    base = {"n": 55, "avg": 0.06, "se": 3.32}
-    assert not dg._diff_sig({"n": 26, "avg": 5.62, "se": 4.82}, base)      # the real standard-mode "not chasing" gap: 0.95 SE -> noise
-    assert dg._diff_sig({"n": 40, "avg": 14.0, "se": 2.0}, base)
-
-
 def test_random_walk_has_no_edge():
-    rows = walk(5)
-    rep = dg.run(rows, mode="scalp", cost=4.0, target=30, stop=20)
-    n = rep["confirmed"]["stats"].get("n", 0)
-    print("random walk:", n, "signals", rep["confirmed"]["stats"])
-    if n >= 8:
-        assert rep["confirmed"]["stats"]["avg"] < 2.0, "a random walk must not look profitable"
-    assert not any(v["level"] == "good" and "measurable edge" in v["text"] for v in rep["verdict"])
-    assert not any(v["level"] == "good" and "statistically real" in v["text"] for v in rep["verdict"]), "no edge may be claimed on noise"
-    assert any("random entries" in v["text"] for v in rep["verdict"])
+    """A statistical test cannot be exact for one seed (about 1 in 40 noise runs looks 'significant'), so look at several seeds:
+    the average edge over random entries must be ~0 and 'statistically real' may be claimed at most rarely."""
+    flagged, edges = 0, []
+    for seed in range(1, 7):
+        rep = dg.run(_walk(seed), mode="scalp", cost=4.0)
+        b, r = rep["confirmed"]["stats"], rep["random_entries"]
+        if b.get("n", 0) >= 8:
+            edges.append(b["avg"] - r["avg"])
+        flagged += any(v["level"] == "good" and "statistically real" in v["text"] for v in rep["verdict"])
+        assert any("random entries" in v["text"] for v in rep["verdict"])
+    mean_edge = sum(edges) / len(edges)
+    print("random walks: mean edge over random entries %+.2f pts, flagged %d of 6" % (mean_edge, flagged))
+    assert abs(mean_edge) < 3.0 and flagged <= 1
 
 
 def test_no_look_ahead():

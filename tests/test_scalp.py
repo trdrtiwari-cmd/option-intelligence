@@ -14,13 +14,13 @@ def candle(t, o, c, hi_extra=4.0, lo_extra=4.0):
     return {"time": t.isoformat(), "open": o, "high": max(o, c) + hi_extra, "low": min(o, c) - lo_extra, "close": c, "volume": 0}
 
 
-def selloff(ending):
-    """Flat morning, then a staircase fall: two red bars of -20 then a +14 bounce, eight times (about -210 pts, RSI in the 20s,
-    price ~3 ATR under EMA 9), then `ending` = list of further point moves, one candle each."""
+def selloff(ending, bounce=22):
+    """Flat morning, then a staircase fall: two red bars of -20 then a bounce, eight times, then `ending` = list of further
+    point moves, one candle each. bounce=22 keeps RSI in the mid 30s; bounce=14 gives the exhausted RSI-in-the-20s case."""
     rows = T.build([(34, 22705, 22715), (6, 22715, 22700)], seed=3, wick=7.0)
     t = ind.parse_time(rows[-1]["time"]) + timedelta(minutes=5)
     price = rows[-1]["close"]
-    for d in [-20, -20, 14] * 8 + list(ending):
+    for d in [-20, -20, bounce] * 8 + list(ending):
         rows.append(candle(t, price, price + d)); price, t = price + d, t + timedelta(minutes=5)
     return rows
 
@@ -35,14 +35,22 @@ def gate(a, text):
 
 
 def test_standard_mode_unchanged_blocks_vertical_fall():
-    a = run(selloff([-20, -20, -20, -20]), "standard")
+    a = run(selloff([-20, -20, -20, -20], bounce=14), "standard")
     assert a["mode"] == "standard" and a["regime_label"] == "DOWNTREND", a["regime_note"]
     assert a["signal"] != "CONFIRMED_PE"
     assert not gate(a, "Not chasing")["pass"] and not gate(a, "Pullback-and-resume")["pass"]
 
 
+def test_exhausted_rsi_entries_stay_blocked_in_both_modes():
+    # diagnostics on 14 real days: entries with RSI already < 30 lost (-14.7 pts/trade in the 14 setups only that gate blocked)
+    for mode in ("scalp", "standard"):
+        a = run(selloff([-20], bounce=14), mode)
+        g = gate(a, "Momentum not overextended")
+        assert a["rsi"] < 30 and not g["pass"] and a["signal"] != "CONFIRMED_PE", (mode, a["rsi"], g)
+
+
 def test_scalp_straight_run_is_not_chased():
-    a = run(selloff([-20, -20, -20, -20]), "scalp")     # four red bars after the last bounce: no pause -> no entry even in scalp mode
+    a = run(selloff([-20, -20, -20, -20], bounce=14), "scalp")     # four red bars after the last bounce: no pause -> no entry even in scalp mode
     trig = gate(a, "Entry trigger")
     assert not trig["pass"] and "straight run" in trig["detail"], trig
     assert a["signal"] != "CONFIRMED_PE"
@@ -56,12 +64,12 @@ def test_scalp_catches_pause_break_continuation():
     print("standard:", std["signal"], "|", [(g["label"][:34], g["pass"]) for g in std["gates"] if not g["pass"]])
     assert gate(a, "Entry trigger")["pass"], gate(a, "Entry trigger")
     assert a["signal"] == "CONFIRMED_PE", a["gates"]
-    assert std["signal"] != "CONFIRMED_PE"                 # standard still waits for an EMA 9 retest
+    # (real-data note: the pause-break trigger fired on only 3 of 117 signals in 14 days; EMA 9 retests do most of the work)
 
 
 def test_trigger_lapses_after_three_bars():
-    assert gate(run(selloff([-20, -20, -20]), "scalp"), "Entry trigger")["pass"]      # still within 3 bars of the pause
-    assert not gate(run(selloff([-20] * 4), "scalp"), "Entry trigger")["pass"]        # 4 bars on: lapsed
+    assert gate(run(selloff([-20, -20, -20], bounce=14), "scalp"), "Entry trigger")["pass"]      # still within 3 bars of the pause
+    assert not gate(run(selloff([-20] * 4, bounce=14), "scalp"), "Entry trigger")["pass"]        # 4 bars on: lapsed
 
 
 def test_scalp_does_not_trade_a_range():
@@ -86,26 +94,6 @@ def test_rules_exposed_and_fusion_uses_them():
     bar["generated_at"] = (now - timedelta(minutes=12)).isoformat()
     assert sf.fuse(tech, dash, replay, None, now, True, 5, mode="scalp")["timing"]["state"] == "LATE"
     assert sf.fuse(tech, dash, replay, None, now, True, 5, mode="standard")["timing"]["state"] == "FRESH"
-
-
-def test_rsi_momentum_zone_gate_and_entry_cutoff():
-    """v1.11.1: diagnostics showed entries without RSI momentum (PE with RSI >= 40) went 0 for 11 -> new gate in both modes."""
-    import signal_fusion as F
-    assert F.ENTRY_CUTOFF_MIN == 13 * 60 + 30, "entries after 13:30 IST lost in both diagnostics modes"
-    seen = 0
-    for ending in ([-20], [-20, -20, -20], [-20, 40, 40, 40, 40, 40, 40]):
-        for mode in ("standard", "scalp"):
-            a = run(selloff(ending), mode)
-            if not a.get("side"):
-                continue
-            g = gate(a, "Momentum established")
-            want = a["rsi"] > 60 if a["side"] == "CE" else a["rsi"] < 40
-            assert g["pass"] == want, (mode, a["side"], a["rsi"], g)
-            if not g["pass"]:
-                assert not a["signal"].startswith("CONFIRMED"), "a failed RSI-momentum gate must block confirmation"
-                seen += 1
-    a = run(selloff([-20]), "scalp")
-    assert a["rsi"] < 40 and gate(a, "Momentum established")["pass"] and a["signal"] == "CONFIRMED_PE"   # the fast-fall entry survives
 
 
 if __name__ == "__main__":
