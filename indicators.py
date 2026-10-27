@@ -81,13 +81,20 @@ def pullback_resume(cs, e9, atr, side, lookback=6, tol=0.25):
 # Signal modes. "standard" is the original, strict rule set (unchanged behaviour). "scalp" is tuned for a small option
 # buyer who is happy with a 20-40 point index move: it trades price structure instead of lagging indicators, accepts a
 # continuation break instead of demanding an EMA 9 retest, and needs less room to the next S/R level.
+# v1.11.2 corrections from the 10-session replay (see README). Both can be switched off from the environment.
+#  * RSI momentum floor: every entry with RSI "extremity" >= 40 (PE: RSI >= 40, CE: RSI <= 60) lost - 5 of 5 in both modes.
+#  * CE needs price-structure proof: the 9 CE entries that rested on lagging indicators alone (generic BULLISH label) won 2 of 9.
+import os as _os
+CE_NEEDS_STRUCTURE = _os.getenv("CE_NEEDS_STRUCTURE", "1") != "0"
+RSI_MOMENTUM = float(_os.getenv("RSI_MOMENTUM", "40"))
+
 MODES = {
     "standard": {"label": "Standard", "rsi_lo": 30, "rsi_hi": 70, "rsi_score_lo": 20, "rsi_score_hi": 80, "chase_atr": 1.0,
                  "room_atr": 1.0, "relax_lagging": False, "micro_trigger": False,
-                 "fresh_bars": 3, "expire_bars": 12, "max_chase_atr": 1.0},
+                 "fresh_bars": 3, "expire_bars": 12, "max_chase_atr": 1.0, "rsi_momentum": 40, "ce_needs_structure": CE_NEEDS_STRUCTURE},
     "scalp": {"label": "Scalp (20–40 pt moves)", "rsi_lo": 30, "rsi_hi": 70, "rsi_score_lo": 20, "rsi_score_hi": 80, "chase_atr": 3.5,
               "room_atr": 0.5, "relax_lagging": True, "micro_trigger": True,
-              "fresh_bars": 2, "expire_bars": 6, "max_chase_atr": 0.6},
+              "fresh_bars": 2, "expire_bars": 6, "max_chase_atr": 0.6, "rsi_momentum": 40, "ce_needs_structure": CE_NEEDS_STRUCTURE},
 }
 
 
@@ -384,47 +391,6 @@ def directional_structure(cs, e9, e21, atr, vwap, n=20):
     return out
 
 
-def candle_confirmation(cs, side):
-    """Analyze the latest CLOSED candle and return a directional confirmation for the final signal.
-
-    A confirmed setup requires a directional engulfing candle or a strong close beyond the prior candle range.
-    A forming candle is excluded upstream by drop_forming().
-    """
-    if len(cs) < 2:
-        return {"pattern": "INSUFFICIENT_DATA", "side": None, "confirmed": False,
-                "body_pct": None, "detail": "Need at least two closed candles"}
-    prev, cur = cs[-2], cs[-1]
-    o, h, l, c = cur["open"], cur["high"], cur["low"], cur["close"]
-    po, pc = prev["open"], prev["close"]
-    rng = max(h - l, 0.0)
-    body = abs(c - o)
-    body_pct = body / rng if rng else 0.0
-    close_pos = (c - l) / rng if rng else 0.5
-    bull_engulf = c > o and pc < po and o <= pc and c >= po
-    bear_engulf = c < o and pc > po and o >= pc and c <= po
-    bull_break = c > o and c > prev["high"] and body_pct >= 0.45 and close_pos >= 0.70
-    bear_break = c < o and c < prev["low"] and body_pct >= 0.45 and close_pos <= 0.30
-    if bull_engulf:
-        pattern, pattern_side = "BULLISH_ENGULFING", "CE"
-    elif bear_engulf:
-        pattern, pattern_side = "BEARISH_ENGULFING", "PE"
-    elif bull_break:
-        pattern, pattern_side = "BULLISH_BREAKOUT_CANDLE", "CE"
-    elif bear_break:
-        pattern, pattern_side = "BEARISH_BREAKDOWN_CANDLE", "PE"
-    elif rng and body_pct <= 0.15:
-        pattern, pattern_side = "DOJI_INDECISION", None
-    else:
-        pattern, pattern_side = "NO_STRONG_CONFIRMATION", None
-    confirmed = bool(side and pattern_side == side)
-    side_text = "bullish" if side == "CE" else "bearish" if side == "PE" else "directional"
-    detail = (f"{pattern.replace('_', ' ').title()} · body {body_pct:.0%} of range · "
-              f"close position {close_pos:.0%}; " + (f"confirms {side}" if confirmed else f"does not confirm {side_text} setup"))
-    return {"pattern": pattern, "side": pattern_side, "confirmed": confirmed,
-            "body_pct": round(body_pct, 3), "close_position": round(close_pos, 3), "detail": detail,
-            "last_closed_bar": cur.get("time")}
-
-
 def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard"):
     rules = mode_rules(mode)
     mode = mode if mode in MODES else "standard"
@@ -529,7 +495,6 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     side = "CE" if bull > bear else "PE" if bear > bull else None
     dom = bull if side == "CE" else bear
     want = "bull" if side == "CE" else "bear"
-    candle = candle_confirmation(cs, side)
     by_key = {c["key"]: c for c in checks}
     gates = []
     if side:
@@ -556,6 +521,14 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
             {"label": f"Momentum not overextended (RSI < {rsi_hi} / > {rsi_lo})", "pass": rsi is None or (rsi < rsi_hi if side == "CE" else rsi > rsi_lo),
              "detail": (f"RSI {rsi:.1f}" if rsi is not None else "n/a") + (" · wider limit because the trend is confirmed" if (relax and trend_agree and (rsi_lo, rsi_hi) != (30, 70)) else "")},
         ]
+        mom = RSI_MOMENTUM
+        if mom and rsi is not None:
+            ext = rsi if side == "PE" else 100 - rsi
+            gates.append({"label": f"Momentum present (RSI {'≤ %g' % mom if side == 'PE' else '≥ %g' % (100 - mom)})", "pass": ext < mom,
+                          "detail": f"RSI {rsi:.1f} — entries with weak momentum (RSI still near 50) lost 5 of 5 in the replay"})
+        if side == "CE" and rules.get("ce_needs_structure"):
+            gates.append({"label": "CE needs price-structure uptrend (not indicators alone)", "pass": trend_dir == 1,
+                          "detail": regime_note if trend_dir == 1 else "No higher-high / EMA / range-break proof of an uptrend yet — CE entries on lagging indicators alone won 2 of 9 in the replay"})
         if atr:
             # Anti-chase gates: most of the day's losses came from entering after the move had already happened.
             stretch = (last - e9[-1]) if side == "CE" else (e9[-1] - last)
@@ -585,7 +558,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "mode_rules": {k: rules[k] for k in ("room_atr", "fresh_bars", "expire_bars", "max_chase_atr")},
         "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
         "regime": regime, "regime_label": regime_label, "regime_phase": regime_phase, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
-        "trend_evidence": ds["evidence"], "candle_analysis": candle,
+        "trend_evidence": ds["evidence"],
         "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
                   "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"], "broke_out": ds["broke_out"]}, "checks": checks, "gates": gates,
         "rsi": round(rsi, 2) if rsi is not None else None,

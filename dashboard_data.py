@@ -21,6 +21,16 @@ THRESHOLDS = {
     "premium_gap": 3.0,    # CE% minus PE% gap needed for a directional call
     "zone_up": 3,          # zone score >= this -> UP
     "zone_down": -3,       # zone score <= this -> DOWN
+    # ATR trade levels (index points). Calibrated on the v1.11.2 replay: wide targets with a ~1 ATR stop beat small
+    # fixed targets in both modes (target 60 / stop 15-20 ~ 3 ATR / 1 ATR when 5m ATR is ~20 pts).
+    "atr_period": 14,
+    "atr_sl": 1.0,         # stop-loss distance in ATR
+    "atr_t1": 1.5,         # target 1: sell half / move stop to cost
+    "atr_t2": 3.0,         # target 2: main target
+    "atr_t3": 4.5,         # target 3: runner (trail behind it)
+    "atr_min_sl_pts": 10.0,  # never place the stop closer than this (noise)
+    "option_delta": 0.5,   # ATM option delta used to translate index points into premium
+    "max_premium_sl_pct": 25.0,  # premium stop never wider than this % of entry premium
 }
 
 # Major sector indices. Aliases are matched (normalised) against Upstox's index names / trading symbols,
@@ -375,7 +385,16 @@ def _minute_of_day(dt):
     return d.hour * 60 + d.minute
 
 
-def index_zone(candles, last_price=None, label="Nifty"):
+def atr_from_candles(candles, period=14):
+    """Wilder ATR of the CLOSED candles (normalised candles with _dt). The last candle is dropped when it is still forming."""
+    from indicators import atr_wilder
+    if not candles:
+        return None
+    cs = list(candles)
+    return atr_wilder(cs, period)
+
+
+def index_zone(candles, last_price=None, label="Nifty", atr=None):
     """Classify the index as UP / MID / DOWN from five transparent checks (+1 / 0 / -1 each):
     vs opening range (first 15 min), vs session average price, vs previous close, vs day open, vs previous-day H/L.
     Score >= +3 -> UP, <= -3 -> DOWN, otherwise MID."""
@@ -427,7 +446,7 @@ def index_zone(candles, last_price=None, label="Nifty"):
               "DOWN": f"{label} trading below its reference levels (score {score:+d}/5)",
               "MID": f"{label} inside its reference band — range-bound / undecided (score {score:+d}/5)"}[zone]
     span = day_high - day_low
-    return {"status": "OK", "zone": zone, "score": score, "price": price, "session": str(today_d),
+    return {"status": "OK", "zone": zone, "score": score, "price": price, "session": str(today_d), "atr": atr,
             "change_pct": (price - prev_close) / prev_close * 100.0 if prev_close else None,
             "day_range_pos": ((price - day_low) / span * 100.0) if span > 0 else 50.0,
             "levels": {"day_open": day_open, "prev_close": prev_close, "pdh": pdh, "pdl": pdl, "orh": orh, "orl": orl,
@@ -577,3 +596,45 @@ def final_signal(blocks, market_open=True):
             "headline": headline, "reasons": reasons, "against": against, "cautions": cautions,
             "plan": plan, "invalidation": invalidation, "contributions": rows,
             "disclaimer": "Rule-based read of market data; not a trade instruction. Confirmation lowers false signals but cannot remove losses."}
+
+
+# ---------------------------------------------------------------- ATR stop-loss / targets
+def trade_levels(final, blocks, atr=None, price=None):
+    """ATR based stop-loss and targets for the dashboard's final signal (index points, plus an approximate option premium
+    translation). Returns None when there is no side, no ATR or no price.  The levels are a risk PLAN for a signal,
+    never an order: they are shown for WATCH / BIAS / CONFIRMED alike so the risk is known before acting."""
+    t = THRESHOLDS
+    side = (final or {}).get("side")
+    zone = (blocks or {}).get("zone") or {}
+    atr = num(atr if atr is not None else zone.get("atr"))
+    price = num(price if price is not None else zone.get("price"))
+    if side not in ("CE", "PE") or not atr or not price or atr <= 0:
+        return None
+    d = 1 if side == "CE" else -1
+    sl_pts = max(t["atr_sl"] * atr, t["atr_min_sl_pts"])
+    targets = []
+    for name, mult in (("T1", t["atr_t1"]), ("T2", t["atr_t2"]), ("T3", t["atr_t3"])):
+        pts = mult * atr
+        targets.append({"name": name, "atr_multiple": mult, "points": round(pts, 1), "index": round(price + d * pts, 2),
+                        "rr": round(pts / sl_pts, 2)})
+    out = {"side": side, "atr": round(atr, 2), "atr_period": t["atr_period"], "entry_index": round(price, 2),
+           "sl_points": round(sl_pts, 1), "sl_atr_multiple": round(sl_pts / atr, 2), "sl_index": round(price - d * sl_pts, 2),
+           "targets": targets, "level": (final or {}).get("level"),
+           "management": ["Sell half at T1 and move the stop to your entry (cost).",
+                          "Hold the rest for T2; once T2 is hit trail the stop 1 ATR behind price toward T3.",
+                          "Exit if the index closes beyond the stop level — do not widen the stop.",
+                          "The replay showed winners rarely go more than ~15 pts against you, so a trade that is already ~1 ATR wrong is usually wrong."]}
+    # approximate option premium plan from the ATM leg of this side
+    prem = (blocks or {}).get("premium") or {}
+    ltp = num(prem.get("ce_ltp" if side == "CE" else "pe_ltp"))
+    if ltp and ltp > 0:
+        delta = t["option_delta"]
+        raw_sl = delta * sl_pts
+        cap = ltp * t["max_premium_sl_pct"] / 100.0
+        sl_prem = min(raw_sl, cap)
+        k = sl_prem / raw_sl if raw_sl else 1.0
+        out["option"] = {"ltp": round(ltp, 2), "delta_used": delta, "sl": round(max(ltp - sl_prem, 0.05), 2),
+                         "sl_clamped": raw_sl > cap,
+                         "targets": [{"name": x["name"], "premium": round(ltp + k * delta * x["points"], 2)} for x in targets],
+                         "note": "Premium levels assume delta ~0.5 and ignore theta / gamma / IV change: use them as a guide and set exact levels from the option's own ATR in the terminal's paper-trade panel."}
+    return out

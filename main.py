@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from indicators import IST, MODES, analyze, merge_volume, normalize_candles, parse_time
+from indicators import IST, MODES, analyze, drop_forming, merge_volume, normalize_candles, parse_time
 from instruments import FutureScanner, pick_front_future
 from feed_parser import parse_feed_message
 import accounts as acc
@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.11.6"
+APP_VERSION = "1.11.2"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -71,8 +71,6 @@ LTP_CACHE = {}
 LTP_CACHE_TTL = 1.5
 FRESH_SECONDS = 15
 STREAM_LOCK = threading.RLock()
-BACKEND_WARM_TASK = None
-BACKEND_WARM_STATUS = {"state": "NOT_STARTED", "last_warm_at": None, "last_error": None}
 
 INDEX_KEYS = {
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -166,6 +164,36 @@ def contract_expiry(row):
 
 
 # ---------------------------------------------------------------- candles
+def overlay_live_tick(candles, key, interval):
+    """Fold the latest fresh WebSocket tick into the candle list so a REST refresh never shows older data than the
+    stream already has. Upstox's intraday-candle endpoint lags the market by tens of seconds; the tick does not."""
+    if not candles or not interval:
+        return candles
+    now = time.time()
+    with STREAM_LOCK:
+        view = _tick_view(key, now)
+    if not view or not view.get("fresh") or not view.get("ltp") or not market_status()["open"]:
+        return candles
+    ltp = float(view["ltp"])
+    try:
+        last = candles[-1]
+        lt = parse_time(last["time"]).timestamp()
+    except Exception:
+        return candles
+    step = interval * 60
+    now_ist = ist_now()
+    if parse_time(last["time"]).astimezone(IST).date() != now_ist.date():
+        return candles
+    k = int((now - lt) // step)
+    out = list(candles)
+    if k <= 0:
+        out[-1] = {**last, "high": max(last["high"], ltp), "low": min(last["low"], ltp), "close": ltp}
+    else:
+        bar_start = datetime.fromtimestamp(lt + k * step, IST)
+        out.append({"time": bar_start.isoformat(), "open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": 0, "oi": None})
+    return out
+
+
 def _rows_to_candles(rows):
     out = []
     for row in rows or []:
@@ -386,9 +414,35 @@ def _reset_streams():
             pass
 
 
+PINNED_KEYS = {}     # symbol -> {instrument_key: last_pinned_ts}: contracts the user is looking at (selected option, dashboard ATM legs)
+PIN_TTL = 6 * 3600
+MAX_PINNED = 30
+
+
+def _pin_keys(symbol, keys):
+    """Remember contracts that must stay subscribed even when they fall outside the near-ATM set, and subscribe them now.
+    Without this the option you pick on the chart was never in the WebSocket and only came from slow REST candles."""
+    now = time.time()
+    with STREAM_LOCK:
+        pins = PINNED_KEYS.setdefault(symbol, {})
+        for k in keys:
+            if k:
+                pins[k] = now
+        for k in [k for k, ts in pins.items() if now - ts > PIN_TTL]:
+            pins.pop(k, None)
+        while len(pins) > MAX_PINNED:
+            pins.pop(min(pins, key=pins.get), None)
+        existing = STREAMS.get(symbol)
+        have = list(existing.get("keys", [])) if existing else []
+    if runtime_token:
+        _start_stream(symbol, have or _stream_keys(symbol))
+
+
 def _start_stream(symbol, instruments):
     """One Upstox V3 SDK stream per underlying, in a daemon thread. Keys follow the current expiry."""
-    new_keys = list(dict.fromkeys(instruments))
+    with STREAM_LOCK:
+        pinned = list(PINNED_KEYS.get(symbol, {}))
+    new_keys = list(dict.fromkeys([*instruments, *pinned]))
     with STREAM_LOCK:
         existing = STREAMS.get(symbol)
         if existing and existing.get("streamer"):
@@ -452,97 +506,6 @@ def _start_stream(symbol, instruments):
 def _stream_keys(sym, option_keys=()):
     """The underlying index is ALWAYS part of the stream so the page gets a real-time index price."""
     return list(dict.fromkeys([INDEX_KEYS[sym], *option_keys]))
-
-
-async def _backend_warmup_loop():
-    """Keep both index feeds and the shared dashboard data paths warm on the backend.
-
-    This does not manufacture ticks: live status still depends on a fresh Upstox WebSocket
-    event. REST dashboard blocks remain explicitly snapshot-based where appropriate.
-    """
-    while True:
-        try:
-            if runtime_token:
-                for sym in INDEX_KEYS:
-                    # Keep a baseline stream for both indices before a browser opens, and
-                    # restart a dead/stalled stream during market hours. A quiet market or
-                    # closed exchange is not misclassified as a stream failure.
-                    restart_stream = False
-                    with STREAM_LOCK:
-                        entry = STREAMS.get(sym)
-                        stream_exists = bool(entry and entry.get("streamer"))
-                        thread = entry.get("thread") if entry else None
-                        thread_alive = bool(thread and thread.is_alive())
-                        index_tick = LIVE_TICKS.get(INDEX_KEYS[sym], {})
-                        tick_age = time.time() - index_tick.get("received_ts", 0) if index_tick else None
-                        restart_stream = stream_exists and (not thread_alive or
-                            (market_status()["open"] and (tick_age is None or tick_age > 45)))
-                        if restart_stream:
-                            STREAMS.pop(sym, None)
-                            STREAM_ERRORS[sym] = "Stream watchdog restarting a stopped or stale feed"
-                    if restart_stream:
-                        try:
-                            entry["streamer"].disconnect()
-                        except Exception:
-                            pass
-                        logger.warning("Restarting stopped/stale Upstox stream for %s", sym)
-                    if not stream_exists or restart_stream:
-                        keys = [INDEX_KEYS[sym]]
-                        try:
-                            exp = await resolve_expiry(sym, "current_week")
-                            chain = await get_chain(sym, exp)
-                            rows = [r for r in chain.get("rows", []) if r.get("strike_price") is not None]
-                            if rows:
-                                spot = float(rows[0].get("underlying_spot_price") or 0)
-                                rows.sort(key=lambda r: abs(float(r["strike_price"]) - spot))
-                                # Subscribe a small near-ATM window, both CE and PE, to limit feed load.
-                                for row in rows[:6]:
-                                    for leg in ("call_options", "put_options"):
-                                        opt = row.get(leg) or {}
-                                        key = opt.get("instrument_key")
-                                        if key:
-                                            keys.append(key)
-                        except Exception as exc:
-                            logger.info("Warmup option discovery deferred for %s: %s", sym, exc)
-                        _start_stream(sym, _stream_keys(sym, keys[1:]))
-
-                # Warm all five Data Check panels for both indices. Browser requests still
-                # refresh on demand; this simply avoids a cold backend when the site is opened.
-                for sym in INDEX_KEYS:
-                    universe = "niftybank" if sym == "BANKNIFTY" else "nifty50"
-                    try:
-                        await _dashboard_blocks(sym, universe, "current_week", 5, 0)
-                    except Exception as exc:
-                        logger.info("Dashboard warmup deferred for %s: %s", sym, exc)
-                BACKEND_WARM_STATUS.update({"state": "WARM", "last_warm_at": utc_now_iso(), "last_error": None})
-            else:
-                BACKEND_WARM_STATUS.update({"state": "WAITING_FOR_UPSTOX_TOKEN", "last_error": "Connect Upstox or configure UPSTOX_ACCESS_TOKEN."})
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            BACKEND_WARM_STATUS.update({"state": "DEGRADED", "last_error": str(exc)[:250]})
-            logger.warning("Backend live-data warmup failed: %s", exc)
-        # Recheck token / streams periodically; don't hammer Upstox REST endpoints.
-        await asyncio.sleep(30)
-
-
-@app.on_event("startup")
-async def start_backend_live_data():
-    global BACKEND_WARM_TASK
-    if BACKEND_WARM_TASK is None or BACKEND_WARM_TASK.done():
-        BACKEND_WARM_TASK = asyncio.create_task(_backend_warmup_loop(), name="backend-live-data-warmup")
-
-
-@app.on_event("shutdown")
-async def stop_backend_live_data():
-    global BACKEND_WARM_TASK
-    if BACKEND_WARM_TASK and not BACKEND_WARM_TASK.done():
-        BACKEND_WARM_TASK.cancel()
-        try:
-            await BACKEND_WARM_TASK
-        except asyncio.CancelledError:
-            pass
-    BACKEND_WARM_TASK = None
 
 
 def _tick_view(key, now):
@@ -809,32 +772,11 @@ async def diagnostics_result(request: Request, job_id: str = ""):
     return {"status": job["status"], "progress": job["progress"], "stage": job["stage"], "error": job["error"], "report": job["report"]}
 
 
-def _live_stream_status():
-    now = time.time()
-    out = {}
-    with STREAM_LOCK:
-        for sym, index_key in INDEX_KEYS.items():
-            entry = STREAMS.get(sym)
-            tick = LIVE_TICKS.get(index_key)
-            age = max(0.0, now - tick.get("received_ts", now)) if tick else None
-            thread = entry.get("thread") if entry else None
-            out[sym] = {
-                "connected_thread": bool(thread and thread.is_alive()),
-                "subscribed_instruments": len(entry.get("keys", [])) if entry else 0,
-                "last_index_tick_age_seconds": round(age, 1) if age is not None else None,
-                "index_tick_fresh": bool(age is not None and age <= FRESH_SECONDS),
-                "error": STREAM_ERRORS.get(sym),
-            }
-    return out
-
-
 @app.get("/api/status")
 async def status():
     state = await check_token_state()
     return {
         "app": APP_TITLE, "version": APP_VERSION, "provider": "Upstox",
-        "backend_live_data_warmup": dict(BACKEND_WARM_STATUS),
-        "live_streams": _live_stream_status(),
         "token_configured": bool(runtime_token), "token_state": state,
         "oauth_configured": bool(UPSTOX_API_KEY and UPSTOX_API_SECRET and UPSTOX_REDIRECT_URI),
         "mode": "Upstox REST + optional V3 WebSocket; analysis-only; no orders are placed",
@@ -894,6 +836,10 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
     if not key:
         raise HTTPException(status_code=400, detail="Unknown symbol or instrument key.")
     data = await fetch_candles(key, interval, days)
+    if instrument_key.strip():                       # option contract: pin it to the stream and show the live bar
+        if symbol.upper() in INDEX_KEYS:
+            _pin_keys(symbol.upper(), [key])
+        data = overlay_live_tick(data, key, interval)
     volume_source = None
     if not instrument_key.strip() and symbol.upper() in INDEX_KEYS:
         # Indices carry no volume: borrow the front-month future's volume so VWAP / volume checks work.
@@ -910,6 +856,17 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
         except Exception as exc:
             logger.info("Futures volume merge skipped: %s", exc)
     return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": data, "volume_source": volume_source}
+
+
+@app.get("/api/pin-option")
+async def pin_option(symbol: str = "NIFTY", instrument_key: str = ""):
+    """Subscribe one option contract to the live WebSocket (called when you select it on the chart)."""
+    sym = symbol.upper()
+    key = instrument_key.strip()
+    if sym not in INDEX_KEYS or "|" not in key:
+        raise HTTPException(status_code=400, detail="Valid symbol and option instrument_key required.")
+    _pin_keys(sym, [key])
+    return {"status": "PINNED", "instrument_key": key}
 
 
 @app.get("/api/option-contracts")
@@ -1137,28 +1094,6 @@ async def tradingview_last_alert():
     return getattr(app.state, "last_tv_alert", {"status": "UNAVAILABLE", "message": "No TradingView alert received in this running instance."})
 
 
-@app.get("/api/subscribe-option")
-async def subscribe_option(symbol: str = "NIFTY", expiry_date: str = "", instrument_key: str = ""):
-    """Subscribe the exact selected option contract to the existing V3 stream, so its chart receives live ticks."""
-    sym = symbol.upper()
-    key = instrument_key.strip()
-    if sym not in INDEX_KEYS or not key or "|" not in key:
-        raise HTTPException(status_code=400, detail="Valid symbol and option instrument_key are required.")
-    if not DATE_RE.fullmatch(expiry_date or ""):
-        raise HTTPException(status_code=400, detail="Use the actual YYYY-MM-DD expiry selected in the option chain.")
-    contracts = await get_contracts(sym, expiry_date)
-    contract = next((c for c in contracts if c.get("instrument_key") == key), None)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Selected contract was not found for this underlying/expiry.")
-    with STREAM_LOCK:
-        STREAM_META[key] = {"trading_symbol": contract.get("trading_symbol"),
-                            "strike": contract.get("strike_price"),
-                            "type": contract.get("instrument_type"), "expiry": expiry_date}
-    _start_stream(sym, _stream_keys(sym, [key]))
-    return {"status": "SUBSCRIBE_REQUESTED", "symbol": sym, "instrument_key": key,
-            "trading_symbol": contract.get("trading_symbol"), "stream": "Upstox V3 WebSocket"}
-
-
 @app.get("/api/option-quote")
 async def option_quote(instrument_key: str):
     """Latest quote for one option: a fresh WebSocket tick if available, else a labelled REST snapshot."""
@@ -1244,6 +1179,10 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
     if a.get("status") != "ok":
         return a
     try:
+        a["atr_levels"] = dd.trade_levels({"side": a.get("side"), "level": a.get("signal")}, {}, atr=a.get("atr"), price=a.get("last_close"))
+    except Exception:
+        a["atr_levels"] = None
+    try:
         market = market_status()
         replay = sf.replay_signal_start(result["candles"], interval, a, htf_raw=htf_raw, htf_interval=htf_interval,
                                         volume_source=result.get("volume_source"), mode=mode)
@@ -1262,7 +1201,7 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
 
 # ================================================================ Data Check dashboard (v1.8)
 QUOTE_CACHE = {}
-QUOTE_TTL = 5
+QUOTE_TTL = 2          # breadth / sector quotes: REST, kept short so the dashboard follows the market
 UNIVERSE_CACHE = {}
 UNIVERSE_TTL = 12 * 3600
 CSV_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
@@ -1380,7 +1319,18 @@ async def _dash_option_premium(sym, expiry_req):
     rows = entry["rows"]
     if not rows:
         return dd.unavailable(f"No option-chain rows for {expiry}")
-    out = dd.build_option_premium(rows, rows[0].get("underlying_spot_price"), _fresh_option_ticks(), steps=2)
+    spot = rows[0].get("underlying_spot_price")
+    with STREAM_LOCK:
+        iv = _tick_view(INDEX_KEYS[sym], time.time())
+    if iv and iv.get("fresh") and iv.get("ltp"):
+        spot = iv["ltp"]                         # live index tick decides the ATM strike, not the 4 s old REST snapshot
+    out = dd.build_option_premium(rows, spot, dict(_fresh_option_ticks()), steps=2)
+    try:                                         # keep the ATM +/-2 contracts on the live stream
+        keys = [(t[side] or {}).get("key") for t in out.get("table", []) for side in ("ce", "pe")]
+        if any(keys):
+            _pin_keys(sym, keys)
+    except Exception:
+        pass
     out["expiry"] = expiry
     out["snapshot_age_seconds"] = round(time.time() - entry["cached_at"], 1)
     return out
@@ -1401,7 +1351,9 @@ async def _dash_zone(sym):
         except Exception:
             price = None
     label = "Nifty" if sym == "NIFTY" else "Bank Nifty"
-    return dd.index_zone(cs, price, label)
+    closed, _ = drop_forming(cs, 5)
+    atr = dd.atr_from_candles(closed, dd.THRESHOLDS["atr_period"])
+    return dd.index_zone(cs, price, label, atr=atr)
 
 
 async def _safe_block(coro):
@@ -1444,10 +1396,11 @@ async def dashboard_summary(symbol: str = "NIFTY", universe: str = "", expiry: s
     sigs = {k: v.get("signal") for k, v in blocks.items()}
     market = market_status()
     final = dd.final_signal(blocks, market["open"])
+    final["levels"] = dd.trade_levels(final, blocks)
     _stamp_dashboard_times(sym, blocks, final)
     return {"symbol": sym, "universe": universe, "generated_at": utc_now_iso(), "market": market, **blocks,
             "overall": dd.overall_bias(sigs), "final": final,
-            "note": "Signals are rule-based reads of live data, not trade instructions. Quotes are REST snapshots (a few seconds old)."
+            "note": "Signals are rule-based reads of live data, not trade instructions. Index price, ATM option premiums and the premium graph follow the live WebSocket; breadth and sector quotes are REST (about 2 s old)."
                     + ("" if market["open"] else " Market is closed: values show the last session.")}
 
 
@@ -1476,6 +1429,9 @@ async def _dash_graph(sym, expiry, interval, offset):
             return []
 
     ce_c, pe_c = await asyncio.gather(get(ce_key), get(pe_key))
+    _pin_keys(sym, [ce_key, pe_key])
+    fold = lambda cs, key: normalize_candles(overlay_live_tick([{k: v for k, v in c.items() if k != "_dt"} for c in cs], key, interval)) if cs else cs
+    ce_c, pe_c = fold(ce_c, ce_key), fold(pe_c, pe_key)
     out = dd.build_premium_graph(
         ce_c, pe_c,
         {"strike": float(ce_row["strike_price"]), "key": ce_key, "prev_close": ((ce_row.get("call_options") or {}).get("market_data") or {}).get("close_price")},

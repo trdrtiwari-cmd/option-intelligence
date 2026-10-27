@@ -25,6 +25,8 @@ from indicators import IST, analyze, normalize_candles
 
 TARGET_GRID = (15, 20, 25, 30, 40, 60)
 STOP_GRID = (10, 15, 20, 25, 30, 40)
+ATR_TARGETS = (1.5, 2.0, 3.0, 4.0, 5.0)     # ATR-multiple exits (what the Data Check dashboard now uses)
+ATR_STOPS = (0.5, 0.75, 1.0, 1.5)
 HOUR_BUCKETS = (("09:15–09:45", 555, 585), ("09:45–10:30", 585, 630), ("10:30–12:00", 630, 720),
                 ("12:00–13:30", 720, 810), ("13:30–14:30", 810, 870), ("14:30–15:30", 870, 931))
 MIN_N = 8          # fewer samples than this are shown but never used to draw a conclusion
@@ -175,6 +177,9 @@ def evaluate(cs, events, interval, horizon, cost, target, stop, with_extras=Fals
         pnl, why = first_touch(path, entry, d, target, stop)
         grid = {f"{t}/{s}": first_touch(path, entry, d, t, s)[0] - cost for t in TARGET_GRID for s in STOP_GRID}
         strat = {name: fn(path, entry, d) - cost for name, fn in STRATEGIES} if with_extras else {}
+        atr_v = ev.get("atr")
+        atr_grid = {f"{t}/{s_}": first_touch(path, entry, d, t * atr_v, s_ * atr_v)[0] - cost
+                    for t in ATR_TARGETS for s_ in ATR_STOPS} if atr_v else {}
         dt = cs[ev["i"]]["_dt"].astimezone(IST)
         zone = vs_prev = None
         if with_extras:
@@ -188,7 +193,7 @@ def evaluate(cs, events, interval, horizon, cost, target, stop, with_extras=Fals
                 pass
         rows.append({**ev, "day": dt.strftime("%Y-%m-%d"), "minute": dt.hour * 60 + dt.minute, "hhmm": dt.strftime("%H:%M"),
                      "entry": entry, "mfe": mfe, "mae": mae, "pnl": pnl - cost, "exit": why, "grid": grid, "bars": len(path),
-                     "strat": strat, "zone": zone, "vs_prev": vs_prev})
+                     "strat": strat, "zone": zone, "vs_prev": vs_prev, "atr_grid": atr_grid})
     return rows
 
 
@@ -264,6 +269,18 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
         report["grid"] = grid
         cells = [c for row in grid for c in row if c["n"] >= MIN_N]
         report["best_exit"] = max(cells, key=lambda c: c["avg"]) if cells else None
+    if rows_conf:
+        ag = []
+        for t in ATR_TARGETS:
+            for s_ in ATR_STOPS:
+                vals = [r["atr_grid"][f"{t}/{s_}"] for r in rows_conf if r.get("atr_grid")]
+                if vals:
+                    ag.append({"target_atr": t, "stop_atr": s_, **stats(vals)})
+        report["atr_grid"] = ag
+        cand = [c for c in ag if c["n"] >= MIN_N]
+        report["best_atr_exit"] = max(cand, key=lambda c: c["avg"]) if cand else None
+        atrs = sorted(r["atr"] for r in rows_conf if r.get("atr"))
+        report["median_atr"] = round(atrs[len(atrs) // 2], 2) if atrs else None
     report["groups"] = {
         "Time of day (IST)": _bucket(rows_conf, _hour, [h[0] for h in HOUR_BUCKETS]),
         "Side": _bucket(rows_conf, lambda r: r["side"]),
@@ -283,7 +300,7 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
     report["trades"] = [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pnl": round(r["pnl"], 1), "exit": r["exit"], "mfe": round(r["mfe"], 1),
                          "mae": round(r["mae"], 1), "score": r["score"], "regime": r["regime"], "phase": r["phase"], "trigger": r["trigger"],
                          "rsi_ext": None if r["rsi_ext"] is None else round(r["rsi_ext"], 1), "stretch_atr": None if r["stretch_atr"] is None else round(r["stretch_atr"], 2),
-                         "zone": r["zone"], "vs_prev": r["vs_prev"]} for r in rows_conf]
+                         "zone": r["zone"], "vs_prev": r["vs_prev"], "atr": None if not r.get("atr") else round(r["atr"], 2)} for r in rows_conf]
     gates = {}
     for r in rows_near:
         gates.setdefault(r["gate"], []).append(r["pnl"])
@@ -359,6 +376,10 @@ def verdict(rep):
                         f"(confirmed signals: {ref:+.1f}). Relaxing this gate would have added profitable entries."})
         elif a["avg"] < 0 and _sig(a):
             out.append({"level": "good", "text": f"Gate earning its keep: “{a['gate']}” blocked {a['n']} setups that would have lost {a['avg']:+.1f} points per trade. Keep it."})
+    b = rep.get("best_atr_exit")
+    if b and rep.get("median_atr"):
+        out.append({"level": "info", "text": f"ATR exits (what the Data Check dashboard uses): best tested is target {b['target_atr']:g} ATR / stop {b['stop_atr']:g} ATR "
+                    f"→ {b['avg']:+.1f} points per trade (n={b['n']}, median 5-minute ATR {rep['median_atr']:g} pts). Compare with the dashboard setting in THRESHOLDS (atr_sl, atr_t2)."})
     if not any(v["level"] == "action" for v in out):
         out.append({"level": "info", "text": "No single correction stands out with enough data. Use more days, or try the other signal mode and compare."})
     return out

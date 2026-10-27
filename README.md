@@ -273,57 +273,22 @@ What the data showed, and what changed:
 * **Kept as is:** the relaxed chase limit (entries 1–2 ATR beyond EMA 9 were the best bucket; the strict gate blocked setups that averaged +5.6), the "not sideways" and trigger gates (the setups they blocked lost money). The new pause-break trigger fired only 3 times in 14 days; EMA 9 retests give nearly all entries.
 * **Not changed (not enough evidence):** CE signals lost money (−1.3/trade) while PE made +3.7, and the generic "BULLISH" regime label lost 9 of 10 — but this was a falling market. Diagnostics now includes the dashboard's price-zone check and previous-close side so the next run can test whether requiring them fixes it.
 
+## v1.11.2 — real-time option feed, ATR levels on the Data Check dashboard, corrections from the 10-session replay
 
-## v1.11.2 — selected-contract live chart and ATR risk references
+**Why the selected option was "very delayed".** (1) The contract you clicked was never added to the WebSocket unless it happened to be one of the 12 nearest strikes, so its price came from REST. (2) In *Selected option premium* view the page only re-downloaded REST candles; Upstox's intraday-candle endpoint itself lags, and nothing moved the last candle between refreshes (the index had a live-tick path, options did not). (3) The Data Check dashboard built its ATM legs and premium graph from the REST chain / REST candles only.
 
-- The selected CE/PE contract can now be explicitly added to the existing Upstox V3 WebSocket subscription through the authenticated `/api/subscribe-option` route. The server validates the instrument key against the chosen underlying and actual expiry before subscribing.
-- Fresh selected-contract ticks update the option chart's active candle and current premium. A two-second fallback checks the quote endpoint but only treats `LIVE_TICK` responses as live; REST snapshots are explicitly labelled and never promoted to live ticks.
-- The Data Check dashboard adds a closed-candle Wilder ATR(14) risk reference: 1.0× ATR stop and 1.5× ATR target scenarios for CE and PE on the underlying index. These levels are index points, not option-premium rupees; use the selected option's own premium ATR for an actual premium-based plan.
-- The change does not make TradingView's own chart feed live. TradingView receives prices from its configured data provider; this website's Upstox stream updates this application only. TradingView webhooks remain one-way alerts into this backend.
-- No profitability guarantee. Validate live tick age, spread, slippage, and ATR levels in paper trading before using real capital.
+**Fixes.** `GET /api/pin-option` (called on selection) and a `PINNED_KEYS` set keep the selected contract, the dashboard's ATM ±2 strikes and its graph legs subscribed (they survive the near-ATM re-subscription). Every WebSocket tick of the selected option now moves the last premium candle in the browser (`● LIVE option tick`). `/api/candles` for an option and the dashboard premium graph fold the newest fresh tick into the REST candles (`overlay_live_tick`), so a REST refresh can never show older data than the stream. The dashboard's ATM strike uses the live index tick instead of the 4 s old chain spot, and breadth/sector quotes are cached 2 s (was 5 s). Breadth and sectors are still REST (~2 s) — they are 60+ instruments and I could not test a bulk "ltpc" subscription against your Upstox plan limits.
 
+**ATR stop-loss and targets on the dashboard.** The final-signal panel now has an *ATR stop-loss & targets* block: Wilder ATR(14) of closed 5-minute index candles; stop = 1.0 ATR (never < 10 pts); T1 = 1.5 ATR (sell half, stop to cost), T2 = 3 ATR (main), T3 = 4.5 ATR (runner, trail 1 ATR). It also shows approximate option-premium levels (delta ≈ 0.5, stop capped at 25 % of premium). Settings: `THRESHOLDS["atr_*"]` in `dashboard_data.py`. `/api/analysis` returns `atr_levels` too. Diagnostics now runs an **ATR exit grid** (target 1.5–5 ATR × stop 0.5–1.5 ATR) and prints the best one with the median ATR — re-run it and set the multiples from that.
 
-## v1.11.3 — Backend live-data warmup
+**Corrections from your two diagnostics files (NIFTY 5m, 2026-10-12 → 10-26).**
+| Finding | Evidence | Change |
+|---|---|---|
+| Exit matters more than entry | 30/20 = −0.9 (standard) / +1.8 (scalp); 60/15–20 = +6.3 / +10.1 | Targets are 3 ATR main / 1 ATR stop, not 30/20 |
+| Weak-momentum entries lose | RSI "extremity" ≥ 40: 5 of 5 lost, both modes | New gate: RSI ≤ 40 for PE / ≥ 60 for CE (`RSI_MOMENTUM` env, 0 disables) |
+| CE on lagging indicators lost | generic-BULLISH CE: 2 wins of 9 (−11.2/trade); all other CE are structure-confirmed | New gate: CE needs a price-structure uptrend (`CE_NEEDS_STRUCTURE=0` disables) |
+| Signal vs random | edge +2.6 / +5.3 pts, inside noise | Not changed — keep paper trading |
+| Time of day | 13:30+ was positive here, negative in the earlier run | Cut-off left at 13:30 — contradictory, re-test |
+| Score 90–100 lost in scalp (n=7), stretch < 0.5 ATR lost (n=18) | small samples | Not changed — watch in the next run |
 
-- Backend startup now runs a warmup loop for both NIFTY and BANKNIFTY, even before a browser dashboard is opened.
-- When an Upstox access token is available, the backend starts V3 WebSocket subscriptions for both index instruments and a small near-ATM CE/PE window.
-- The backend periodically warms the five Data Check panels for both indices so the first page visit is less likely to be a cold load.
-- `/api/status` exposes `backend_live_data_warmup` (`WARM`, `WAITING_FOR_UPSTOX_TOKEN`, or `DEGRADED`) and the last warmup time/error.
-- Live data still requires a valid Upstox token, successful WebSocket connection, market activity, and fresh ticks. REST snapshots are not represented as live ticks; if a token is missing or stale data is detected, the UI should continue to show unavailable/WAIT rather than fabricate values.
-- This does not change TradingView's own chart feed; it warms this application's backend only.
-
-
-## v1.11.3 — Backend live-data warmup
-
-- Backend startup now runs a warmup loop for both NIFTY and BANKNIFTY, even before a browser dashboard is opened.
-- When an Upstox access token is available, the backend starts V3 WebSocket subscriptions for both index instruments and a small near-ATM CE/PE window.
-- The backend periodically warms the five Data Check panels for both indices so the first page visit is less likely to be a cold load.
-- `/api/status` exposes `backend_live_data_warmup` (`WARM`, `WAITING_FOR_UPSTOX_TOKEN`, or `DEGRADED`) and the last warmup time/error.
-- Live data still requires a valid Upstox token, successful WebSocket connection, market activity, and fresh ticks. REST snapshots are not represented as live ticks; if a token is missing or stale data is detected, the UI should continue to show unavailable/WAIT rather than fabricate values.
-- This does not change TradingView's own chart feed; it warms this application's backend only.
-
-
-## v1.11.4 — continuous stream watchdog and visible-page refresh
-
-- The backend warmup loop checks whether each Upstox index stream thread is alive and whether a fresh index tick has arrived during market hours. Stopped or stalled streams are restarted automatically.
-- `/api/status` now exposes per-index stream diagnostics: thread state, subscribed instrument count, latest index tick age, freshness, and stream error.
-- The main dashboard keeps its selected auto-refresh interval running whenever the page is visible, including outside market hours, so status and snapshot panels do not freeze simply because the exchange is closed. Closed-market data is not labelled as live.
-- The backend cannot keep running if the hosting provider suspends/stops the service; continuous backend processing requires an always-on host. Upstox token validity, API permissions, market hours, and live ticks remain necessary.
-
-
-## v1.11.5 — candle confirmation in final signal
-
-- Added closed-candle analysis for bullish/bearish engulfing and strong breakout/breakdown candles.
-- Added a candle-confirmation gate to the technical signal engine: a directional setup cannot become CONFIRMED unless the latest closed candle confirms the same side.
-- Candle analysis is returned in the `/api/analysis` response as `candle_analysis`; the gate detail is included with the existing gates.
-- Doji/weak/contradictory candles do not confirm a trade. The app continues to ignore the still-forming candle and preserves existing live-data freshness safeguards.
-- This is a conservative confirmation rule, not a profitability guarantee; backtest and paper-trade before live use.
-
-
-## v1.11.6 — diagnostics-led conservative entry filters
-
-Based on the uploaded NIFTY 5-minute scalp report (121 technical-engine signals, modeled round-trip cost 4 index points):
-- Default final-signal entry cutoff is now **12:00 IST** (configurable with `ENTRY_CUTOFF`). In this sample, entries before noon averaged +7.63 index points with PF 1.92 (n=45), while noon or later averaged -1.89 with PF 0.85 (n=76).
-- The **final-signal** score gate now requires **80/100** by default (configurable with `MIN_CONFIRMED_SCORE`, allowed 70–100). Scores 70–79 remain visible as technical WATCH/diagnostic candidates, but cannot become a final CONFIRMED signal. The 80–89 score bucket performed better than 70–79 in the uploaded sample, but the sample is small.
-- No target/stop values were changed: the report measures index points, not actual option-premium returns; an index-point target cannot be copied directly to CE/PE premium exits.
-- This report replays the technical engine only; it does not replay historical Data Check dashboard states, actual option premiums, spreads, or the newly added candle-confirmation gate. These filters are candidates for paper testing, not proof of future profitability. Re-run diagnostics on a different period before relying on them.
+Applying only the RSI gate to the replayed trades would have turned −0.9 → +2.9 (standard, n=26) and +1.8 → +4.3 (scalp, n=46) per trade at 30/20; adding the CE rule gives +6.0 in both. These were chosen **after** seeing the same 31/51 trades, so they are optimistic — confirm on a different period before trusting them.
