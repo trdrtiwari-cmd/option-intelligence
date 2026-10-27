@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.11.6"
+const FRONTEND_VERSION="1.11.2";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -555,15 +555,15 @@ window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.
 ["optionTypeFilter","moneynessFilter"].forEach(id=>$(id)?.addEventListener("change",renderFilteredChain));
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
 initChart();checkStatus();refresh();
-// Auto refresh: user-selectable (default 10 s). Runs while the tab is visible, including outside market hours
-// so freshness/status panels keep updating. Never overlaps a refresh; real live ticks still require market activity.
+// Auto refresh: user-selectable (default 10 s). Runs only while the tab is visible and the market is open,
+// and never overlaps a still-running refresh. Between refreshes the live index tick moves the last candle.
 let autoTimer=null,refreshBusy=false;
 function startAutoRefresh(){
   clearInterval(autoTimer);
   const sec=Number($("refreshEvery").value)||10;
   try{localStorage.setItem("oi-refresh-sec",String(sec))}catch{}
   autoTimer=setInterval(async()=>{
-    if(document.visibilityState!=="visible"||refreshBusy)return;
+    if(document.visibilityState!=="visible"||!marketOpen||refreshBusy)return;
     refreshBusy=true;try{await refresh()}finally{refreshBusy=false}
   },sec*1000);
 }
@@ -609,56 +609,22 @@ function applyIndexTick(t){
   }else return; // first bar of a new session: the next REST refresh supplies it
   try{candleSeries.update(c)}catch{}
 }
-// Selected option premium: subscribe the exact CE/PE contract and update its active candle from V3 ticks.
-// Historical candle endpoints alone can lag during the live bar; a fresh tick is the live source of truth.
-let lastOptionTickApplied=0;
-function applySelectedOptionTick(t){
-  if($("chartView").value!=="option"||chartSource!=="option"||!paperSelected||!t||
-     t.instrument_key!==paperSelected.instrument_key||!t.fresh||!Number.isFinite(Number(t.ltp)))return;
-  const ltp=Number(t.ltp), nowSec=Math.floor(Date.now()/1000), step=getInterval()*60;
-  lastOptionTickApplied=Date.now();
-  $("lastPrice").textContent=fmt(ltp);
-  $("priceChange").textContent=`${paperSelected.type} ${paperSelected.strike} · LIVE WebSocket · ${fmt(t.age_seconds,1)}s`;
-  $("priceChange").style.color="var(--green)";
+// Selected option on the chart: every WebSocket tick of that contract moves the last premium candle (no REST wait).
+function applyOptionTick(t){
+  if(!t||!t.fresh||!Number.isFinite(Number(t.ltp))||!currentCandles.length||!marketOpen)return;
+  if(chartSource!=="option"||$("chartView").value!=="option"||!paperSelected||t.instrument_key!==paperSelected.instrument_key)return;
+  const ltp=Number(t.ltp),step=getInterval()*60,last=currentCandles[currentCandles.length-1],lt=toChartTime(last.time);
+  if(!Number.isFinite(lt))return;
+  const nowSec=Math.floor(Date.now()/1000),k=Math.floor((nowSec-lt)/step);let c;
+  if(k<=0){c={time:lt,open:+last.open,high:Math.max(+last.high,ltp),low:Math.min(+last.low,ltp),close:ltp};last.high=c.high;last.low=c.low;last.close=c.close}
+  else if(istDayKey(nowSec)===istDayKey(lt)){const nt=lt+k*step;c={time:nt,open:ltp,high:ltp,low:ltp,close:ltp};currentCandles.push({time:nt,open:ltp,high:ltp,low:ltp,close:ltp,volume:0})}
+  else return;
   paperSelected.ltp=ltp;
-  if(!marketOpen)return;
-  const bucket=Math.floor(nowSec/step)*step;
-  const last=currentCandles[currentCandles.length-1];
-  let c;
-  if(last){
-    const lt=toChartTime(last.time);
-    if(Number.isFinite(lt)&&lt===bucket){
-      c={time:bucket,open:Number(last.open),high:Math.max(Number(last.high),ltp),low:Math.min(Number(last.low),ltp),close:ltp};
-      last.high=c.high;last.low=c.low;last.close=ltp;
-    }else if(!Number.isFinite(lt)||bucket>lt){
-      c={time:bucket,open:ltp,high:ltp,low:ltp,close:ltp};
-      currentCandles.push({time:bucket,open:ltp,high:ltp,low:ltp,close:ltp,volume:0});
-      if(currentCandles.length>1500)currentCandles=currentCandles.slice(-1500);
-    }else return;
-  }else{
-    c={time:bucket,open:ltp,high:ltp,low:ltp,close:ltp};
-    currentCandles=[{time:bucket,open:ltp,high:ltp,low:ltp,close:ltp,volume:0}];
-  }
+  $("lastPrice").textContent=fmt(ltp);
+  const ch=Number(t.close_price)>0?ltp-Number(t.close_price):null;
+  $("priceChange").textContent=`● LIVE option tick ${fmt(t.age_seconds,1)}s ago`+(ch===null?"":` · ${ch>=0?"+":""}${fmt(ch)} vs prev close`);
   try{candleSeries.update(c)}catch{}
-  // Keep risk preview quote current; indicator calculations still use completed candles only.
-  paperUpdatePreview();
 }
-// Selected-option quote fallback: recover missed WebSocket updates without treating REST snapshots as live ticks.
-let optionQuotePollBusy=false;
-setInterval(async()=>{
-  if(document.visibilityState!=="visible"||!marketOpen||$("chartView").value!=="option"||!paperSelected||optionQuotePollBusy)return;
-  const cached=liveTickMap[paperSelected.instrument_key];
-  if(cached&&cached.fresh&&Date.now()-lastOptionTickApplied<2500)return;
-  optionQuotePollBusy=true;
-  try{
-    const q=await api(`/api/option-quote?instrument_key=${encodeURIComponent(paperSelected.instrument_key)}`);
-    if(q.status==="LIVE_TICK"&&Number.isFinite(Number(q.ltp))){
-      applySelectedOptionTick({...q,instrument_key:paperSelected.instrument_key,fresh:true});
-    }else if(q.ltp!=null){
-      $("priceChange").textContent=`${paperSelected.type} ${paperSelected.strike} · ${q.status||"REST SNAPSHOT"} — not live`;
-    }
-  }catch{}finally{optionQuotePollBusy=false}
-},2000);
 // REST fallback: if the WebSocket is not delivering index ticks, poll the quote every 3 s.
 setInterval(async()=>{
   if(document.visibilityState!=="visible"||!marketOpen||restPriceBusy)return;
@@ -683,7 +649,8 @@ function connectLiveSocket(){
       const m=JSON.parse(ev.data),ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));
       renderLiveTicks(ticks);
       applyIndexTick(m.index);
-      ticks.forEach(t=>{if(t.instrument_key)liveTickMap[t.instrument_key]=t;applySelectedOptionTick(t)});
+      if(paperSelected)ticks.forEach(t=>{if(t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});
+      ticks.forEach(t=>{if(t.instrument_key)liveTickMap[t.instrument_key]=t});
       const nowMs=Date.now();if(nowMs-lastChainPaint>2000&&optionChainRows.length){lastChainPaint=nowMs;renderFilteredChain({scroll:false})}
       if(m.stream==="LIVE"){$("streamStatus").textContent="LIVE TICKS";$("streamStatus").className="pill live"}
       else{$("streamStatus").textContent=m.stream||"CONNECTING";$("streamStatus").className="pill stale"}
@@ -740,15 +707,13 @@ function selectPaperContract(type,strike,instrumentKey,ltp,expiry,button){
   paperSelected={symbol:getSymbol(),type,strike:Number(strike),instrument_key:instrumentKey,expiry:String(expiry||$("expiry").value),ltp:Number(ltp)||null,quoteStatus:"CHAIN_SNAPSHOT",lot:chainLotSize||null};
   {const lot=paperSelected.lot||1;$("paperQty").value=String(lot);$("paperQty").step=String(lot);$("paperLotHint").textContent=paperSelected.lot?` · 1 lot = ${paperSelected.lot}`:""}
   paperAtr=null;$("paperAtrValue").textContent="UNAVAILABLE";
+  api(`/api/pin-option?symbol=${encodeURIComponent(paperSelected.symbol)}&instrument_key=${encodeURIComponent(instrumentKey)}`).catch(()=>{}); // put it on the live WebSocket now
   $("paperSelectedContract").textContent=`Selected: ${paperSelectedLabel()} · chain LTP ${paperMoney(paperSelected.ltp)} (snapshot)`;
   $("paperEntry").value=paperSelected.ltp||"";
   $("paperBuyBtn").disabled=false;
   document.querySelectorAll(".chain-select").forEach(b=>b.closest("tr")?.classList.remove("chain-selected"));
   if(button)button.closest("tr")?.classList.add("chain-selected");
   paperUpdateMode();paperUpdatePreview();
-  api(`/api/subscribe-option?symbol=${encodeURIComponent(paperSelected.symbol)}&expiry_date=${encodeURIComponent(paperSelected.expiry)}&instrument_key=${encodeURIComponent(paperSelected.instrument_key)}`)
-    .then(()=>{connectLiveSocket();$("chartNote").textContent="Selected contract subscription requested; waiting for a fresh Upstox V3 tick."})
-    .catch(e=>{$("chartNote").textContent="Live option subscription unavailable: "+e.message+" — chart is snapshot-only until a fresh tick arrives."});
   if($("chartView").value==="option")refreshChartSource();
   loadOptionVolume();
   paperFetchQuote(true).then(()=>paperUpdatePreview()).catch(()=>{});

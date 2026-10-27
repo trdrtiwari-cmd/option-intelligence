@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Data Check Dashboard · Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.11.6">
+  <link rel="stylesheet" href="/static/style.css?v=1.11.2">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -38,6 +38,12 @@
       <div><h4>What to do</h4><ul id="finalPlan" class="dc-ul"></ul></div>
       <div><h4>What would invalidate it</h4><ul id="finalInval" class="dc-ul"></ul></div>
       <div><h4>Score breakdown</h4><div id="finalContrib" class="dc-contrib"></div></div>
+    </div>
+    <div id="atrBox" class="dc-atr" hidden>
+      <h4>ATR stop-loss &amp; targets <span id="atrMeta" class="sub small"></span></h4>
+      <div id="atrRows" class="dc-atr-grid"></div>
+      <div id="atrOption" class="sub small"></div>
+      <ul id="atrManage" class="dc-ul"></ul>
     </div>
     <div class="sub small" id="finalDisclaimer"></div>
   </section>
@@ -75,21 +81,9 @@
     <div class="chart-note" id="graphNote">—</div>
   </section>
 
-  <section class="panel" id="card-atr-risk">
-    <div class="section-head"><div><h2>ATR risk reference · underlying index points</h2><p>Closed-candle ATR(14), Wilder smoothing · reference levels only, not option-premium ₹ levels</p></div><span id="atrRiskChip" class="dc-chip">WAIT</span></div>
-    <div class="dc-risk-grid">
-      <div><span class="sub">Index reference price</span><strong id="atrRiskEntry">—</strong></div>
-      <div><span class="sub">ATR(14)</span><strong id="atrRiskAtr">—</strong></div>
-      <div><span class="sub">BUY CE reference SL</span><strong id="atrCeSl">—</strong></div>
-      <div><span class="sub">BUY CE target (1.5× ATR)</span><strong id="atrCeTarget">—</strong></div>
-      <div><span class="sub">BUY PE reference SL</span><strong id="atrPeSl">—</strong></div>
-      <div><span class="sub">BUY PE target (1.5× ATR)</span><strong id="atrPeTarget">—</strong></div>
-    </div>
-    <p class="chart-note" id="atrRiskNote">Waiting for fresh index candles. Levels are index references; calculate the selected option's own premium ATR for rupee SL/targets.</p>
-  </section>
   <div class="notice warning" id="dcNote">Signals are rule-based reads of live data, not trade instructions.</div>
   <footer><span id="buildInfo">dashboard v1.9.1</span> · Research only · Not investment advice</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/sync.js?v=1.11.6" data-next="/static/dashboard.js?v=1.11.6"></script>
+<script src="/static/sync.js?v=1.11.2" data-next="/static/dashboard.js?v=1.11.2"></script>
 </body></html>

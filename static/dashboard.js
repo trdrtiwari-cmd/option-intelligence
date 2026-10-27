@@ -70,8 +70,30 @@ function renderFinal(d) {
     const right = el("div"); right.style.textAlign = "right"; const chipEl = el("span", "dc-chip " + c.state, c.label); right.appendChild(chipEl);
     right.appendChild(el("small", "", (c.points === null ? "no data" : (c.points > 0 ? "+" : "") + c.points + " pts") + (c.timing ? ` · since ${c.timing.since_text.slice(0, 5)}${c.timing.exact ? "" : "*"}` : ""))); row.appendChild(right); box.appendChild(row);
   });
+  renderAtr(f.levels);
   $("finalDisclaimer").textContent = f.disclaimer;
   $("cntBull").textContent = `${o.bull} bullish`; $("cntBear").textContent = `${o.bear} bearish`; $("cntNeu").textContent = `${o.neutral + o.caution} neutral / caution`;
+}
+
+// ---------------- ATR stop-loss / targets ----------------
+function renderAtr(L) {
+  const box = $("atrBox");
+  if (!L) { box.hidden = true; return; }
+  box.hidden = false;
+  const ce = L.side === "CE", n = v => Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  $("atrMeta").textContent = `${L.side} plan · ATR(${L.atr_period}, 5m) = ${n(L.atr)} pts · entry ≈ index ${n(L.entry_index)}` + (L.level && L.level !== "CONFIRMED" ? ` · signal is ${L.level} — plan only` : "");
+  const rows = clear($("atrRows"));
+  const add = (name, idx, pts, extra, cls) => {
+    const r = el("div", "dc-atr-row " + (cls || ""));
+    r.appendChild(el("span", "", name)); r.appendChild(el("b", "", n(idx)));
+    r.appendChild(el("small", "", `${ce ? (cls === "sl" ? "−" : "+") : (cls === "sl" ? "+" : "−")}${pts} pts${extra ? " · " + extra : ""}`));
+    rows.appendChild(r);
+  };
+  add("Stop-loss", L.sl_index, L.sl_points, `${L.sl_atr_multiple} ATR`, "sl");
+  L.targets.forEach(t => add(t.name, t.index, t.points, `${t.atr_multiple} ATR · ${t.rr}R`, "tg"));
+  const o = L.option;
+  $("atrOption").textContent = o ? `Option (≈ delta ${o.delta_used}): entry ${n(o.ltp)} · SL ${n(o.sl)}${o.sl_clamped ? " (capped)" : ""} · ` + o.targets.map(t => `${t.name} ${n(t.premium)}`).join(" · ") + ". " + o.note : "Option premium levels unavailable (no ATM quote).";
+  fillList("atrManage", L.management, "");
 }
 
 // ---------------- 1. breadth ----------------
@@ -181,43 +203,6 @@ function renderGraph(g) {
   if (fitKey !== key) { fitKey = key; graphChart.timeScale().fitContent(); }
 }
 
-// ---------------- ATR-based underlying risk reference ----------------
-let atrRiskBusy = false;
-function wilderAtr(candles, period=14) {
-  const rows=(candles||[]).map(c=>({t:Date.parse(c.time),h:Number(c.high),l:Number(c.low),c:Number(c.close)}))
-    .filter(x=>Number.isFinite(x.t)&&[x.h,x.l,x.c].every(Number.isFinite)).sort((a,b)=>a.t-b.t);
-  // Exclude a still-forming candle so the ATR and reference levels do not flicker/repaint.
-  const now=Date.now();
-  while(rows.length&&rows[rows.length-1].t+Number($("interval").value||5)*60000>now) rows.pop();
-  if(rows.length<period+1)return null;
-  const tr=[];
-  for(let i=1;i<rows.length;i++)tr.push(Math.max(rows[i].h-rows[i].l,Math.abs(rows[i].h-rows[i-1].c),Math.abs(rows[i].l-rows[i-1].c)));
-  if(tr.length<period)return null;
-  let a=tr.slice(0,period).reduce((s,v)=>s+v,0)/period;
-  for(let i=period;i<tr.length;i++)a=(a*(period-1)+tr[i])/period;
-  return {atr:a, close:rows[rows.length-1].c, lastTime:rows[rows.length-1].t};
-}
-async function loadAtrRisk(){
-  if(atrRiskBusy)return;atrRiskBusy=true;
-  try{
-    const data=await api(`/api/candles?symbol=${sym()}&interval=${$("interval").value}&days=3`);
-    const r=wilderAtr(data.candles||[]);
-    if(!r){$("atrRiskNote").textContent="ATR unavailable: not enough closed candles. No levels are being fabricated.";return}
-    let entry=r.close, source="last closed candle";
-    try{const q=await api(`/api/index-ltp?symbol=${sym()}`);if(q.ltp!=null&&Number.isFinite(Number(q.ltp))){entry=Number(q.ltp);source=q.status==="LIVE_TICK"?"live index tick":"latest REST quote"}}
-    catch{}
-    const risk=r.atr, target=1.5*r.atr;
-    $("atrRiskEntry").textContent=fmt(entry);$("atrRiskAtr").textContent=fmt(r.atr);
-    $("atrCeSl").textContent=fmt(entry-risk);$("atrCeTarget").textContent=fmt(entry+target);
-    $("atrPeSl").textContent=fmt(entry+risk);$("atrPeTarget").textContent=fmt(entry-target);
-    const f=lastSummary?.final;
-    const state=f?.state||"WAIT";
-    $("atrRiskChip").textContent=state==="BULLISH"?"BULLISH":state==="BEARISH"?"BEARISH":"WAIT";
-    $("atrRiskChip").className="dc-chip "+(state==="BULLISH"?"BULLISH":state==="BEARISH"?"BEARISH":"NEUTRAL");
-    $("atrRiskNote").textContent=`ATR uses closed ${$("interval").value}-minute ${sym()} candles; reference price source: ${source}. Stop = 1.0× ATR; target = 1.5× ATR. These are index-point levels, not option premium prices. Use the selected CE/PE's own live quote and premium ATR before trading.`;
-  }catch(e){$("atrRiskNote").textContent="ATR risk reference unavailable: "+e.message}
-  finally{atrRiskBusy=false}
-}
 // ---------------- data loading ----------------
 function qs() { return `symbol=${sym()}&universe=${$("universe").value}&expiry=${$("expiry").value}&interval=${$("interval").value}&offset=${$("offset").value}`; }
 let lastSummary = null;
@@ -231,7 +216,6 @@ async function loadSummary() {
     renderBreadth(d.breadth); renderSectors(d.sectors); renderPremium(d.premium); renderZone(d.zone); renderGraph(d.graph);
     renderSummary(d); renderFinal(d);
     $("dcNote").textContent = d.note;
-    loadAtrRisk();
     $("lastUpdated").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (e) { toast("Dashboard load failed: " + e.message); $("lastUpdated").textContent = "Load failed: " + e.message; }
   finally { summaryBusy = false; btn.disabled = false; }
