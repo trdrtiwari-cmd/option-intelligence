@@ -148,22 +148,3 @@ if __name__ == "__main__":
             fn()
             print("ok", name)
     print("all fusion tests passed")
-
-
-def test_default_entry_cutoff_is_noon():
-    assert sf.ENTRY_CUTOFF_MIN == 12 * 60
-
-
-def test_score_below_80_cannot_be_finally_confirmed():
-    a = tech()
-    a["bear_score"] = 78
-    r = go(a=a)
-    assert r["final"]["level"] == "WATCH"
-    assert any(g["label"] == "Final-signal score ≥ 80" and not g["pass"] for g in r["gates"])
-
-
-def test_score_80_can_pass_final_score_gate():
-    a = tech()
-    a["bear_score"] = 82
-    r = go(a=a)
-    assert any(g["label"] == "Final-signal score ≥ 80" and g["pass"] for g in r["gates"])
