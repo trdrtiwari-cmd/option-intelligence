@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.13.1";
+const FRONTEND_VERSION="1.13.2";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -8,6 +8,7 @@ function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?
 function getSymbol(){return $("symbol").value}
 function getInterval(){return Number($("interval").value)}
 function getMode(){const m=$("signalMode");return m?m.value:"standard"}
+function getScoreMin(){const m=$("scoreMin");return m?Number(m.value||70):70}
 function initChart(){
   const el=$("chart");
   chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:el.clientHeight,layout:{background:{color:"#121d2d"},textColor:"#91a4ba"},grid:{vertLines:{color:"#1e2d40"},horzLines:{color:"#1e2d40"}},rightPriceScale:{borderColor:"#27384d"},timeScale:{borderColor:"#27384d",timeVisible:true,secondsVisible:false,tickMarkFormatter:istTickMarkFormatter},localization:{timeFormatter:istCrosshairTimeFormatter},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
@@ -400,7 +401,7 @@ async function loadOptionVolume(){
 async function refreshSignalContext(){
   const sym=getSymbol(),interval=getInterval();
   const candlePromise=api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`);
-  const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}`);
+  const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}`);
   const c=await candlePromise;
   lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
   let a;try{a=await analysisPromise}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
@@ -417,7 +418,7 @@ async function refresh(){
     const sym=getSymbol(),interval=getInterval();
     // Render candles as soon as their endpoint responds; analysis can be slower because it also fetches HTF data.
     const candlePromise=api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`);
-    const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}`);
+    const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}`);
     const c=await candlePromise;
     lastVolumeSource=c.volume_source||null;
     renderCandles(c.candles);
@@ -568,6 +569,7 @@ $("symbol").addEventListener("change",()=>{
   loadContracts(true); // expiry list -> chain -> derivatives for that real expiry
 });
 $("interval").addEventListener("change",refresh);
+(function(){const m=$("scoreMin");if(!m)return;try{const v=localStorage.getItem("oi-score-min");if(v&&["60","65","70"].includes(v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-score-min",m.value)}catch{}refresh()})})();
 (function(){const m=$("signalMode");if(!m)return;try{const v=localStorage.getItem("oi-signal-mode");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-signal-mode",m.value)}catch{}refresh()})})();
 $("loadContracts").addEventListener("click",()=>loadContracts(true));
 $("loadChain").addEventListener("click",()=>loadChain());
