@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.11.2";
+const FRONTEND_VERSION="1.11.3";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -554,10 +554,10 @@ $("chartMinimize").addEventListener("click",()=>{
 window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.contains("chart-maximized"))$("chartMaximize").click()});
 ["optionTypeFilter","moneynessFilter"].forEach(id=>$(id)?.addEventListener("change",renderFilteredChain));
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
-initChart();checkStatus();refresh();
+let autoTimer=null,refreshBusy=false;
+initChart();checkStatus();
 // Auto refresh: user-selectable (default 10 s). Runs only while the tab is visible and the market is open,
 // and never overlaps a still-running refresh. Between refreshes the live index tick moves the last candle.
-let autoTimer=null,refreshBusy=false;
 function startAutoRefresh(){
   clearInterval(autoTimer);
   const sec=Number($("refreshEvery").value)||10;
@@ -568,8 +568,8 @@ function startAutoRefresh(){
   },sec*1000);
 }
 try{const saved=localStorage.getItem("oi-refresh-sec");if(saved&&[...$("refreshEvery").options].some(o=>o.value===saved))$("refreshEvery").value=saved}catch{}
-$("refreshEvery").addEventListener("change",startAutoRefresh);startAutoRefresh();
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&marketOpen&&!refreshBusy)refresh()});
+$("refreshEvery").addEventListener("change",startAutoRefresh);startAutoRefresh();refresh();
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&!refreshBusy)refresh()});
 let liveSocket=null, lastDerivatives=null, liveSocketGen=0, liveReconnectTimer=null;
 function renderLiveTicks(ticks){
   const body=$("liveTicksRows");
@@ -1027,6 +1027,16 @@ $("paperCalcAtr").addEventListener("click",paperCalculateAtr);
 $("paperBuyBtn").addEventListener("click",paperOpenTrade);
 $("paperRefreshBtn").addEventListener("click",paperRefreshQuotes);
 $("paperExportBtn").addEventListener("click",paperExportCsv);
-$("paperClearBtn").addEventListener("click",()=>{if(!confirm("Clear all CLOSED paper-trade history from this browser? Open trades will be kept."))return;paperSave(paperRead().filter(t=>t.status==="OPEN"));paperRender();});
+$("paperClearBtn").addEventListener("click",()=>{
+   const trades=paperRead(),closed=trades.filter(t=>t.status==="CLOSED");
+   if(!closed.length){toast("No closed paper-trade history to clear.");return}
+   if(!confirm("Clear all CLOSED paper-trade history from your account on every synced device? Open trades will be kept."))return;
+   let deleted=[];try{deleted=JSON.parse(localStorage.getItem("option-intelligence-paper-deleted-v1")||"[]")}catch{}
+   const ids=new Set(Array.isArray(deleted)?deleted.map(String):[]);
+   closed.forEach(t=>ids.add(String(t.id)));
+   // Save tombstones first; account sync uses these to prevent old server copies reappearing.
+   localStorage.setItem("option-intelligence-paper-deleted-v1",JSON.stringify([...ids]));
+   paperSave(trades.filter(t=>t.status==="OPEN"));paperRender();toast("Closed paper-trade history cleared and syncing across devices.");
+ });
 $("paperInitialCapital").value=String(paperGetCapital());
 guardInit();paperUpdateMode();paperRender();setInterval(()=>{if(document.visibilityState==="visible")paperRefreshQuotes()},4000);setInterval(()=>{if(document.visibilityState==="visible")renderGuardStatus()},3000);

@@ -9,6 +9,7 @@
   const NEXT = document.currentScript && document.currentScript.dataset.next;
   const MAP = {                                   // localStorage key -> account data key
     "option-intelligence-paper-trades-v1": "paper-trades",
+    "option-intelligence-paper-deleted-v1": "paper-deleted-trade-ids",
     "option-intelligence-paper-capital-v1": "paper-capital",
     "option-intelligence-paper-guard-v1": "paper-guard",
     "oi-signal-mode": "pref-signal-mode",
@@ -55,7 +56,12 @@
   };
 
   // ---------------------------------------------------------------- merging
+  function deletedTradeIds() {
+    try { const v = JSON.parse(ls.get("option-intelligence-paper-deleted-v1") || "[]"); return new Set(Array.isArray(v) ? v.map(String) : []); }
+    catch { return new Set(); }
+  }
   function mergeTrades(local, server) {
+    const deleted = deletedTradeIds();
     const a = Array.isArray(local) ? local : [], b = Array.isArray(server) ? server : [];
     const byId = new Map();
     [...b, ...a].forEach(t => {                    // local second, so ties go to this device
@@ -65,7 +71,7 @@
       const rank = x => (x.status === "CLOSED" ? 2 : 0) + (x.exit_time ? 1 : 0);
       byId.set(t.id, rank(t) >= rank(old) ? t : old);   // a closed trade beats an open copy of the same trade
     });
-    return [...byId.values()].sort((x, y) => String(y.opened_at || "").localeCompare(String(x.opened_at || "")));
+    return [...byId.values()].filter(t => !deleted.has(String(t.id))).sort((x, y) => String(y.opened_at || "").localeCompare(String(x.opened_at || "")));
   }
   function merge(sKey, local, server, localWins) {
     if (sKey === "paper-trades") return mergeTrades(local, server);
@@ -126,6 +132,18 @@
         }
       }
       lastSig[sKey] = signature(sKey, fromRaw(ls.get(lsKey)));
+    }
+    // The tombstone key may be fetched after paper-trades. Apply it once all keys are loaded
+    // so a deletion on another device cannot be resurrected by the merge.
+    const tradeKey = "option-intelligence-paper-trades-v1";
+    const tradeRaw = ls.get(tradeKey);
+    if (tradeRaw !== null) {
+      const filtered = mergeTrades(fromRaw(tradeRaw), []);
+      if (!same(filtered, fromRaw(tradeRaw))) {
+        ls.set(tradeKey, toRaw(filtered));
+        const tm = kmeta("paper-trades"); tm.dirty = true;
+        if (!toPush.includes("paper-trades")) toPush.push("paper-trades");
+      }
     }
     saveMeta(); offline = false;
     toPush.forEach(k => schedule(k, 300));
