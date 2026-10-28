@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.13.4"
+APP_VERSION = "1.13.6"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1047,8 +1047,7 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
 
 @app.get("/api/index-ltp")
 async def index_ltp(symbol: str = "NIFTY"):
-    """Latest index price: fresh WebSocket tick if there is one, else a REST LTP (cached 1.5 s).
-    The page polls this every few seconds only when the WebSocket is not delivering."""
+    """Latest index price: fresh WebSocket tick if available, otherwise a matched REST quote."""
     sym = symbol.upper()
     if sym not in INDEX_KEYS:
         raise HTTPException(status_code=400, detail="Unknown index symbol.")
@@ -1058,18 +1057,37 @@ async def index_ltp(symbol: str = "NIFTY"):
         view = _tick_view(key, now)
     if view and view["fresh"] and view.get("ltp") is not None:
         return {"status": "LIVE_TICK", "symbol": sym, "ltp": view["ltp"], "close_price": view.get("close_price"),
+                "net_change": (view["ltp"] - view["close_price"]) if view.get("close_price") else None,
                 "age_seconds": view["age_seconds"], "source": "Upstox V3 WebSocket"}
     hit = LTP_CACHE.get(key)
     if hit and now - hit[0] < LTP_CACHE_TTL:
         return hit[1]
     data = await upstox_get(f"{API_BASE}/v2/market-quote/quotes", {"instrument_key": key})
     qd = (data or {}).get("data") or {}
-    q = next((v for v in qd.values() if isinstance(v, dict)), None) or {}
-    ltp = q.get("last_price")
+    # Upstox may key rows by an exchange symbol rather than the requested instrument_key.
+    # Never silently use the first row from a multi-instrument response: that can pair NIFTY's
+    # price with another instrument's previous close and display a false daily change.
+    q = qd.get(key) if isinstance(qd, dict) else None
+    if not isinstance(q, dict) and isinstance(qd, dict):
+        q = next((v for v in qd.values() if isinstance(v, dict) and
+                  str(v.get("instrument_token", "")) == key), None)
+    if not isinstance(q, dict) and isinstance(qd, dict) and len(qd) == 1:
+        only = next(iter(qd.values()))
+        q = only if isinstance(only, dict) else None
+    q = q or {}
+    ltp = q.get("last_price", q.get("ltp"))
     ohlc = q.get("ohlc") or {}
+    close_price = ohlc.get("close") or q.get("close_price") or q.get("prev_close")
+    net_change = q.get("net_change")
+    try:
+        if net_change is None and ltp is not None and close_price is not None:
+            net_change = float(ltp) - float(close_price)
+    except (TypeError, ValueError):
+        net_change = None
     out = {"status": "REST_QUOTE" if ltp is not None else "UNAVAILABLE", "symbol": sym, "ltp": ltp,
-           "close_price": ohlc.get("close") if ohlc.get("close") else None, "age_seconds": 0, "source": "Upstox REST quote",
-           "market_open": market_status()["open"]}
+           "close_price": close_price, "net_change": net_change,
+           "net_change_percent": q.get("net_change_percent", q.get("change_percent")),
+           "age_seconds": 0, "source": "Upstox REST quote", "market_open": market_status()["open"]}
     LTP_CACHE[key] = (now, out)
     return out
 
