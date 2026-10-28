@@ -1,5 +1,12 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## Reliability fixes (v1.11.3)
+- Fixed the main terminal startup race where `refresh()` ran before `refreshBusy` was initialized, preventing the first automatic load.
+- Returning to the main terminal now triggers an immediate refresh even if the market-status poll has not updated yet; automatic polling still respects market-open status.
+- Closed paper-trade history deletion now syncs across signed-in devices with trade-ID tombstones, preventing server-side merge from restoring cleared closed trades. Open paper trades are retained.
+- Kept signal rules unchanged pending stronger out-of-sample evidence; see diagnostics limitations before relying on exit-grid winners.
+
+
 A FastAPI website for NIFTY 50 / BANK NIFTY research and paper-trading. It uses Upstox REST APIs for option-chain snapshots and the official Upstox Python SDK's Market Data Feed V3 WebSocket for subscribed near-ATM option contracts.
 
 ## What this build includes
