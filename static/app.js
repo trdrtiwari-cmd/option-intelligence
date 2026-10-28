@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.11.3";
+const FRONTEND_VERSION="1.12.0";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -295,11 +295,43 @@ function applyChartRange(n){
   const show=Math.min(n,Math.round(perSession*1.6));
   chart.timeScale().setVisibleLogicalRange({from:n-show,to:n+3});
 }
+
+function analyzeRecentPatterns(candles){
+  const rows=[]; const xs=(candles||[]).map(c=>({time:toChartTime(c.time),open:+c.open,high:+c.high,low:+c.low,close:+c.close})).filter(c=>Number.isFinite(c.time)&&[c.open,c.high,c.low,c.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
+  const start=Math.max(1,xs.length-8);
+  for(let i=start;i<xs.length;i++){
+    const p=xs[i-1],c=xs[i],body=Math.abs(c.close-c.open),range=Math.max(c.high-c.low,1e-9),ratio=body/range;
+    let name="Bullish candle",bias=c.close>c.open?"BULLISH":c.close<p.close?"BEARISH":"NEUTRAL",meaning="Limited standalone information";
+    if(ratio<=.12){name="Doji / indecision";bias="NEUTRAL";meaning="Buyers and sellers are balanced; wait for a break."}
+    else if(c.close>c.open&&p.close<p.open&&c.open<=p.close&&c.close>=p.open){name="Bullish engulfing";bias="BULLISH";meaning="Potential bullish reversal; needs follow-through."}
+    else if(c.close<c.open&&p.close>p.open&&c.open>=p.close&&c.close<=p.open){name="Bearish engulfing";bias="BEARISH";meaning="Potential bearish reversal; needs follow-through."}
+    else if(c.close>c.open&&c.close>p.high&&ratio>=.55){name="Bullish breakout candle";bias="BULLISH";meaning="Strong close above prior high; check nearby resistance."}
+    else if(c.close<c.open&&c.close<p.low&&ratio>=.55){name="Bearish breakdown candle";bias="BEARISH";meaning="Strong close below prior low; check nearby support."}
+    else if(c.close<c.open){name="Bearish candle";bias="BEARISH";meaning="Selling pressure on this candle; trend context still matters."}
+    rows.push({time:c.time,name,bias,meaning,price:c.close});
+  }
+  const last=xs.slice(-5); let up=0,down=0;
+  last.forEach(c=>{if(c.close>c.open)up++;else if(c.close<c.open)down++});
+  const closes=xs.map(c=>c.close);const e9=calcEMA(closes,9).at(-1),e21=calcEMA(closes,21).at(-1),lastClose=closes.at(-1);
+  let trend="MIXED / WAIT";if(up>=3&&lastClose>e9&&e9>e21)trend="BULLISH MOMENTUM";else if(down>=3&&lastClose<e9&&e9<e21)trend="BEARISH MOMENTUM";
+  return {rows,trend,up,down};
+}
+function renderRecentPatterns(candles){
+  const out=analyzeRecentPatterns(candles),trendEl=$("patternTrend"),summary=$("patternSummary"),tbody=$("patternRows");
+  if(!trendEl||!summary||!tbody)return;
+  trendEl.textContent=out.trend;trendEl.className="pattern-badge "+(out.trend.startsWith("BULLISH")?"bull":out.trend.startsWith("BEARISH")?"bear":"neutral");
+  summary.textContent=`Last 5 candles: ${out.up} bullish, ${out.down} bearish. Trend requires candle direction plus EMA 9/21 alignment. This is context only; wait when patterns conflict with the broader signal or data is stale.`;
+  if(!out.rows.length){tbody.innerHTML='<tr><td colspan="4" class="empty">Need at least two candles.</td></tr>';return}
+  tbody.innerHTML=out.rows.slice().reverse().map(r=>`<tr><td>${new Date(r.time*1000).toLocaleString()}</td><td>${r.name}</td><td class="${r.bias==='BULLISH'?'green':r.bias==='BEARISH'?'red':''}">${r.bias}</td><td>${r.meaning}</td></tr>`).join('');
+  try{candleSeries.setMarkers(out.rows.map(r=>({time:r.time,position:r.bias==='BEARISH'?'aboveBar':'belowBar',color:r.bias==='BULLISH'?'#25c58a':r.bias==='BEARISH'?'#ff667a':'#f3c969',shape:r.bias==='BEARISH'?'arrowDown':r.bias==='BULLISH'?'arrowUp':'circle',text:r.name})));}catch{}
+}
+
 function renderCandles(candles){
   currentCandles=candles||[];
   const valid=currentCandles.map(c=>({time:toChartTime(c.time),open:+c.open,high:+c.high,low:+c.low,close:+c.close,volume:+c.volume||0})).filter(c=>Number.isFinite(c.time)&&[c.open,c.high,c.low,c.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
   const unique=[];for(const c of valid){if(!unique.length||unique[unique.length-1].time!==c.time)unique.push(c)}
   candleSeries.setData(unique);
+  renderRecentPatterns(unique);
   const closes=unique.map(c=>c.close), e9=calcEMA(closes,9),e21=calcEMA(closes,21),vw=calcVWAP(unique);
   ema9Series.setData(unique.map((c,i)=>({time:c.time,value:e9[i]})));ema21Series.setData(unique.map((c,i)=>({time:c.time,value:e21[i]})));vwapSeries.setData(vw.map(({time,value})=>({time,value})));
   const showEma=$("showEma")?.checked!==false,showVwap=$("showVWAP")?.checked!==false,showSR=$("showSR")?.checked!==false;
@@ -365,8 +397,11 @@ async function loadOptionVolume(){
 // or borrows the option-premium chart's support/resistance.
 async function refreshSignalContext(){
   const sym=getSymbol(),interval=getInterval();
-  const [c,a]=await Promise.all([api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}`)]);
+  const candlePromise=api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`);
+  const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}`);
+  const c=await candlePromise;
   lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
+  let a;try{a=await analysisPromise}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
   lastAnalysis=a;lastAnalysisAt=Date.now();
   $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
   $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
@@ -378,12 +413,13 @@ async function refresh(){
   const manual=!refreshBusy;if(manual){$("refreshBtn").disabled=true;$("refreshBtn").textContent="Loading…"}
   try{
     const sym=getSymbol(),interval=getInterval();
-    const [c,a]=await Promise.all([
-      api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`),
-      api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}`)
-    ]);
+    // Render candles as soon as their endpoint responds; analysis can be slower because it also fetches HTF data.
+    const candlePromise=api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`);
+    const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}`);
+    const c=await candlePromise;
     lastVolumeSource=c.volume_source||null;
     renderCandles(c.candles);
+    let a;try{a=await analysisPromise}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
     if(lastVolumeSource)$("chartNote").textContent+=` Volume and VWAP weights come from ${lastVolumeSource} (the index itself has no volume).`;
     $("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()}`;
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";

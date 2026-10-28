@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.11.3">
+  <link rel="stylesheet" href="/static/style.css?v=1.12.0">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
 <body>
 <header class="topbar">
   <div><div class="brand">OPTION <span>INTELLIGENCE</span></div><div class="sub">Intraday options research terminal</div></div>
-  <div class="top-actions"><span id="marketStatus" class="pill muted">Market status…</span><span id="apiStatus" class="pill muted">Checking API…</span><a class="button secondary" href="/diagnostics">Diagnostics</a><a class="button secondary" href="/dashboard">Data Check Dashboard</a><a class="button secondary" href="/api/login" id="connectBtn">Connect Upstox</a></div>
+  <div class="top-actions"><span id="marketStatus" class="pill muted">Market status…</span><span id="apiStatus" class="pill muted">Checking API…</span><a class="button secondary" href="/diagnostics">Diagnostics</a><a class="button secondary" href="/dashboard">Data Check Dashboard</a><a class="button secondary" href="/signals">Daily Signal Log</a><a class="button secondary" href="/api/login" id="connectBtn">Connect Upstox</a></div>
 </header>
 <main>
   <div id="staleBanner" class="notice warning stale-banner" hidden></div>
@@ -48,6 +48,7 @@
         <div><span>Volume</span><b id="chartVolume">—</b></div>
       </div>
       <div class="chart-note" id="chartNote">Historical candles. Select an option contract to view its premium candles.</div>
+      <section class="pattern-panel" aria-live="polite"><div class="section-head"><div><h3>Recent candle patterns & trend context</h3><p>Last 8 completed candles · descriptive confirmation, not a guarantee</p></div><b id="patternTrend" class="pattern-badge">WAIT</b></div><div id="patternSummary" class="notice">Waiting for completed candles…</div><div class="table-wrap pattern-table-wrap"><table><thead><tr><th>Time</th><th>Pattern</th><th>Bias</th><th>Interpretation</th></tr></thead><tbody id="patternRows"><tr><td colspan="4" class="empty">Waiting for candles…</td></tr></tbody></table></div></section>
     </div>
     <aside class="panel intelligence">
       <div class="section-head"><div><h2>Market intelligence</h2><p>Indicators calculated from available candles</p></div></div>
@@ -220,5 +221,5 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/sync.js?v=1.11.3" data-next="/static/app.js?v=1.11.3"></script>
+<script src="/static/sync.js?v=1.12.0" data-next="/static/app.js?v=1.12.0"></script>
 </body></html>

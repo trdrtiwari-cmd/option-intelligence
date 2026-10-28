@@ -103,3 +103,6 @@ button.danger{background:#7a2433;border-color:#a33648;color:#fff}
 .dc-atr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:8px 0}
 .dc-atr-row{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,.04)}
 .dc-atr-row.sl b{color:var(--red)} .dc-atr-row.tg b{color:var(--green)}
+
+/* v1.12 recent candle patterns */
+.pattern-panel{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.pattern-panel h3{font-size:14px;margin:0 0 4px}.pattern-panel .section-head{align-items:center}.pattern-badge{font-size:11px;padding:6px 9px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}.pattern-badge.bull{color:var(--green);border-color:#24634f}.pattern-badge.bear{color:var(--red);border-color:#6c3542}.pattern-badge.neutral{color:var(--yellow);border-color:#66552c}.pattern-table-wrap{max-height:230px;margin-top:8px}.pattern-table-wrap td,.pattern-table-wrap th{text-align:left;white-space:normal}
