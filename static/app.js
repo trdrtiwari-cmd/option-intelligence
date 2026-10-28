@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.13.2";
+const FRONTEND_VERSION="1.13.4";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -596,11 +596,11 @@ window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
 let autoTimer=null,refreshBusy=false;
 initChart();checkStatus();
-// Auto refresh: user-selectable (default 10 s). Runs only while the tab is visible and the market is open,
-// and never overlaps a still-running refresh. Between refreshes the live index tick moves the last candle.
+// Auto refresh: user-selectable (default 2 s). Runs only while the tab is visible and the market is open,
+// and never overlaps a still-running refresh. Slow requests are skipped rather than stacked. Between refreshes the live index tick moves the last candle.
 function startAutoRefresh(){
   clearInterval(autoTimer);
-  const sec=Number($("refreshEvery").value)||10;
+  const sec=Math.max(2,Number($("refreshEvery").value)||2);
   try{localStorage.setItem("oi-refresh-sec",String(sec))}catch{}
   autoTimer=setInterval(async()=>{
     if(document.visibilityState!=="visible"||!marketOpen||refreshBusy)return;
@@ -666,8 +666,9 @@ function applyOptionTick(t){
   try{candleSeries.update(c)}catch{}
 }
 // REST fallback: if the WebSocket is not delivering index ticks, poll the quote every 3 s.
+// Keep the last price and daily change populated after market close as well.
 setInterval(async()=>{
-  if(document.visibilityState!=="visible"||!marketOpen||restPriceBusy)return;
+  if(document.visibilityState!=="visible"||restPriceBusy)return;
   if(lastIdxTick&&Date.now()-lastIdxTick<5000)return;
   restPriceBusy=true;
   try{const q=await api(`/api/index-ltp?symbol=${getSymbol()}`);

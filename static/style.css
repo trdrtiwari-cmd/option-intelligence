@@ -106,3 +106,6 @@ button.danger{background:#7a2433;border-color:#a33648;color:#fff}
 
 /* v1.12 recent candle patterns */
 .pattern-panel{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.pattern-panel h3{font-size:14px;margin:0 0 4px}.pattern-panel .section-head{align-items:center}.pattern-badge{font-size:11px;padding:6px 9px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}.pattern-badge.bull{color:var(--green);border-color:#24634f}.pattern-badge.bear{color:var(--red);border-color:#6c3542}.pattern-badge.neutral{color:var(--yellow);border-color:#66552c}.pattern-table-wrap{max-height:230px;margin-top:8px}.pattern-table-wrap td,.pattern-table-wrap th{text-align:left;white-space:normal}
+
+/* Keep the full index quote and its daily change legible on narrow cards. */
+#lastPrice{font-variant-numeric:tabular-nums;white-space:nowrap;font-size:clamp(19px,2vw,24px);letter-spacing:-.25px;overflow-wrap:normal;}#priceChange{display:block;min-width:0;line-height:1.45;overflow-wrap:anywhere;}
