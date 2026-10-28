@@ -391,6 +391,32 @@ def directional_structure(cs, e9, e21, atr, vwap, n=20):
     return out
 
 
+
+def candle_confirmation(cs, side):
+    """Classify the last closed candle and require directional continuation for CE/PE."""
+    if len(cs) < 2 or side not in ("CE", "PE"):
+        return {"pattern": "INSUFFICIENT_CANDLES", "confirmed": False, "detail": "Need two closed candles and a directional bias."}
+    prev, cur = cs[-2], cs[-1]
+    po, pc = float(prev["open"]), float(prev["close"])
+    o, h, l, c = float(cur["open"]), float(cur["high"]), float(cur["low"]), float(cur["close"])
+    body, span = abs(c-o), max(h-l, 1e-9)
+    if body / span <= 0.12:
+        pattern = "DOJI_INDECISION"
+    elif c > o and pc < po and o <= pc and c >= po:
+        pattern = "BULLISH_ENGULFING"
+    elif c < o and pc > po and o >= pc and c <= po:
+        pattern = "BEARISH_ENGULFING"
+    elif c > o and c > float(prev["high"]) and body / span >= 0.55:
+        pattern = "BULLISH_BREAKOUT_CANDLE"
+    elif c < o and c < float(prev["low"]) and body / span >= 0.55:
+        pattern = "BEARISH_BREAKDOWN_CANDLE"
+    else:
+        pattern = "BULLISH_CANDLE" if c > o else "BEARISH_CANDLE" if c < o else "DOJI_INDECISION"
+    # For the entry gate, a directional close plus progress beyond the prior close is sufficient;
+    # the named pattern remains descriptive and does not require a rare engulfing candle.
+    confirmed = (c > o and c > pc) if side == "CE" else (c < o and c < pc)
+    return {"pattern": pattern, "confirmed": bool(confirmed), "detail": f"{pattern.replace('_', ' ').title()} · body {body:.2f} ({body/span:.0%} of range)"}
+
 def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard"):
     rules = mode_rules(mode)
     mode = mode if mode in MODES else "standard"
@@ -529,6 +555,9 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         if side == "CE" and rules.get("ce_needs_structure"):
             gates.append({"label": "CE needs price-structure uptrend (not indicators alone)", "pass": trend_dir == 1,
                           "detail": regime_note if trend_dir == 1 else "No higher-high / EMA / range-break proof of an uptrend yet — CE entries on lagging indicators alone won 2 of 9 in the replay"})
+        candle_check = candle_confirmation(cs, side)
+        if rules["micro_trigger"]:
+            gates.append({"label": "Closed-candle price-action confirmation", "pass": candle_check["confirmed"], "detail": candle_check["detail"]})
         if atr:
             # Anti-chase gates: most of the day's losses came from entering after the move had already happened.
             stretch = (last - e9[-1]) if side == "CE" else (e9[-1] - last)
@@ -558,7 +587,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "mode_rules": {k: rules[k] for k in ("room_atr", "fresh_bars", "expire_bars", "max_chase_atr")},
         "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
         "regime": regime, "regime_label": regime_label, "regime_phase": regime_phase, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
-        "trend_evidence": ds["evidence"],
+        "trend_evidence": ds["evidence"], "candle_confirmation": candle_confirmation(cs, side) if side else {"pattern": "NO_DIRECTIONAL_BIAS", "confirmed": False, "detail": "No CE/PE bias to confirm."},
         "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
                   "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"], "broke_out": ds["broke_out"]}, "checks": checks, "gates": gates,
         "rsi": round(rsi, 2) if rsi is not None else None,

@@ -1,11 +1,11 @@
-import os, re, base64, secrets, threading, time, asyncio, json, logging, importlib.util
+import os, re, base64, secrets, threading, time, asyncio, json, logging, importlib.util, sqlite3, csv, io
 from datetime import date, timedelta, datetime, timezone, time as dtime
 from pathlib import Path
 from urllib.parse import urlencode
 from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.11.3"
+APP_VERSION = "1.12.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1149,6 +1149,102 @@ async def _dashboard_final_for(sym, interval):
         return hit["final"] if hit and time.time() - hit["at"] < 60 else None
 
 
+SIGNAL_LOG_DB = Path(os.getenv("SIGNAL_LOG_DB", str(BASE_DIR / "signal_log.sqlite3")))
+SIGNAL_LOG_LOCK = threading.Lock()
+SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "reason"]
+
+def init_signal_log():
+    SIGNAL_LOG_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(SIGNAL_LOG_DB) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS signal_log (id INTEGER PRIMARY KEY AUTOINCREMENT, generated_at TEXT NOT NULL, session_date TEXT NOT NULL, symbol TEXT NOT NULL, interval INTEGER NOT NULL, mode TEXT NOT NULL, candle_time TEXT NOT NULL, decision TEXT, final_action TEXT, side TEXT, score REAL, regime TEXT, pattern TEXT, pattern_confirmed INTEGER, last_close REAL, entry REAL, stop_loss REAL, target REAL, reason TEXT, UNIQUE(symbol, interval, mode, candle_time, final_action))")
+        db.commit()
+
+def record_signal_row(symbol, interval, mode, a):
+    try:
+        now_ist = datetime.now(IST)
+        final = a.get("final") or {}
+        action = final.get("action") or a.get("decision") or "WAIT"
+        candle_time = str(a.get("last_closed_bar") or a.get("last_candle_time") or a.get("last_time") or a.get("timestamp") or a.get("last_close_time") or "")
+        # Use the last closed candle time from the analysis output where available; otherwise the data generation minute.
+        if not candle_time:
+            candle_time = now_ist.strftime("%Y-%m-%d %H:%M")
+        levels = a.get("atr_levels") or {}
+        pat = a.get("candle_confirmation") or {}
+        row = (now_ist.isoformat(timespec="seconds"), now_ist.date().isoformat(), symbol, int(interval), mode, candle_time,
+               str(a.get("decision") or "WAIT"), str(action), str(a.get("side") or ""), float(a.get("score") or 0),
+               str(a.get("regime_label") or a.get("regime") or ""), str(pat.get("pattern") or ""), int(bool(pat.get("confirmed"))),
+               _float_or_none(a.get("last_close")), _float_or_none(levels.get("entry")), _float_or_none(levels.get("stop_loss") or levels.get("sl")),
+               _float_or_none(levels.get("target") or levels.get("target_1")), str(final.get("reason") or a.get("message") or a.get("note") or "")[:500])
+        with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+            db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            db.commit()
+    except Exception as exc:
+        logger.warning("Signal log write failed: %s", str(exc)[:160])
+
+def _float_or_none(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+init_signal_log()
+
+@app.get("/signals")
+async def signal_log_page():
+    return FileResponse(BASE_DIR / "static" / "signals.html", headers={"Cache-Control": "no-cache"})
+
+@app.get("/api/signals")
+async def get_signal_log(start: str = "", end: str = "", symbol: str = "", limit: int = 2000):
+    clauses, params = [], []
+    if start: clauses.append("session_date >= ?"); params.append(start)
+    if end: clauses.append("session_date <= ?"); params.append(end)
+    if symbol and symbol.upper() in ("NIFTY", "BANKNIFTY"): clauses.append("symbol = ?"); params.append(symbol.upper())
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+        db.row_factory = sqlite3.Row
+        rows = [dict(r) for r in db.execute("SELECT * FROM signal_log" + where + " ORDER BY generated_at DESC LIMIT ?", params + [max(1, min(limit, 10000))]).fetchall()]
+    return {"rows": rows, "count": len(rows), "note": "Logs are created from analysis refreshes; duplicate decisions for the same candle are suppressed."}
+
+@app.get("/api/signals/export.csv")
+async def export_signal_log_csv(start: str = "", end: str = "", symbol: str = ""):
+    data = await get_signal_log(start, end, symbol, 10000)
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=SIGNAL_LOG_FIELDS, extrasaction="ignore")
+    writer.writeheader(); writer.writerows(data["rows"])
+    payload = io.BytesIO(output.getvalue().encode("utf-8-sig")); payload.seek(0)
+    return StreamingResponse(payload, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=option_intelligence_signals.csv"})
+
+@app.get("/api/signals/export.xlsx")
+async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = ""):
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Excel export dependency missing; redeploy after installing requirements.txt")
+    data = await get_signal_log(start, end, symbol, 10000)
+    wb = Workbook(); ws = wb.active; ws.title = "Signal Log"
+    ws.append(SIGNAL_LOG_FIELDS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D"); cell.alignment = Alignment(wrap_text=True)
+    for row in data["rows"]: ws.append([row.get(k) for k in SIGNAL_LOG_FIELDS])
+    ws.freeze_panes = "A2"; ws.auto_filter.ref = ws.dimensions
+    for col in ws.columns:
+        letter = col[0].column_letter
+        ws.column_dimensions[letter].width = min(42, max(12, max(len(str(c.value or "")) for c in col[:100]) + 2))
+    summary = wb.create_sheet("Daily Summary"); summary.append(["Session Date", "Signals", "BUY CE", "BUY PE", "WAIT / WATCH"])
+    from collections import defaultdict
+    groups = defaultdict(lambda: [0,0,0,0])
+    for row in data["rows"]:
+        g=groups[row.get("session_date") or "Unknown"]; g[0]+=1
+        act=(row.get("final_action") or row.get("decision") or "").upper()
+        if "CE" in act: g[1]+=1
+        elif "PE" in act: g[2]+=1
+        else: g[3]+=1
+    for day, g in sorted(groups.items()): summary.append([day,*g])
+    summary.freeze_panes="A2"; summary.auto_filter.ref=summary.dimensions
+    bio=io.BytesIO(); wb.save(bio); bio.seek(0)
+    return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
+
 @app.get("/api/analysis")
 async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard"):
     """Transparent confirmation engine from index candles + a higher-timeframe trend read, fused with the Data Check
@@ -1195,6 +1291,7 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
     except Exception as exc:          # fusion must never take the whole analysis down
         logger.warning("Signal fusion failed: %s", exc)
         a["fusion_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+    record_signal_row(sym, interval, mode, a)
     return a
 
 
