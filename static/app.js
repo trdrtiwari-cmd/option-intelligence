@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.12.0";
+const FRONTEND_VERSION="1.13.1";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -323,7 +323,9 @@ function renderRecentPatterns(candles){
   summary.textContent=`Last 5 candles: ${out.up} bullish, ${out.down} bearish. Trend requires candle direction plus EMA 9/21 alignment. This is context only; wait when patterns conflict with the broader signal or data is stale.`;
   if(!out.rows.length){tbody.innerHTML='<tr><td colspan="4" class="empty">Need at least two candles.</td></tr>';return}
   tbody.innerHTML=out.rows.slice().reverse().map(r=>`<tr><td>${new Date(r.time*1000).toLocaleString()}</td><td>${r.name}</td><td class="${r.bias==='BULLISH'?'green':r.bias==='BEARISH'?'red':''}">${r.bias}</td><td>${r.meaning}</td></tr>`).join('');
-  try{candleSeries.setMarkers(out.rows.map(r=>({time:r.time,position:r.bias==='BEARISH'?'aboveBar':'belowBar',color:r.bias==='BULLISH'?'#25c58a':r.bias==='BEARISH'?'#ff667a':'#f3c969',shape:r.bias==='BEARISH'?'arrowDown':r.bias==='BULLISH'?'arrowUp':'circle',text:r.name})));}catch{}
+  // Candle patterns remain available in the separate analysis panel and signal engine.
+  // Do not draw pattern labels/markers over the price chart (prevents overlapping annotations).
+  try{candleSeries.setMarkers([]);}catch{}
 }
 
 function renderCandles(candles){
