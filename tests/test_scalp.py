@@ -101,3 +101,13 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn(); print("ok", name)
     print("all scalp tests passed")
+
+
+def test_score_threshold_is_configurable_without_changing_other_gates():
+    rows = selloff([-20])
+    now = ind.parse_time(rows[-1]["time"]) + timedelta(minutes=10)
+    strict = ind.analyze(rows, "NIFTY", 5, now=now, mode="scalp", score_min=70)
+    relaxed = ind.analyze(rows, "NIFTY", 5, now=now, mode="scalp", score_min=60)
+    assert next(g for g in strict["gates"] if g["label"].startswith("Score"))["label"] == "Score ≥ 70"
+    assert next(g for g in relaxed["gates"] if g["label"].startswith("Score"))["label"] == "Score ≥ 60"
+    assert len(strict["gates"]) == len(relaxed["gates"])
