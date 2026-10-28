@@ -417,7 +417,7 @@ def candle_confirmation(cs, side):
     confirmed = (c > o and c > pc) if side == "CE" else (c < o and c < pc)
     return {"pattern": pattern, "confirmed": bool(confirmed), "detail": f"{pattern.replace('_', ' ').title()} · body {body:.2f} ({body/span:.0%} of range)"}
 
-def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard"):
+def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard", score_min=70):
     rules = mode_rules(mode)
     mode = mode if mode in MODES else "standard"
     cs, forming_dropped = drop_forming(normalize_candles(raw_candles), interval, now)
@@ -536,8 +536,9 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         else:
             htf_ok, htf_label = True, "Higher timeframe (unavailable)"
         rsi_lo, rsi_hi = (rules["rsi_lo"], rules["rsi_hi"]) if (relax and trend_agree) else (30, 70)
+        score_min = max(50, min(70, int(score_min)))
         gates = [
-            {"label": "Score ≥ 70", "pass": dom >= 70, "detail": f"{dom}/100"},
+            {"label": f"Score ≥ {score_min}", "pass": dom >= score_min, "detail": f"{dom}/100"},
             {"label": "Trend strength (ADX ≥ 20, DI agrees)" + (" or price-structure trend" if relax else ""), "pass": bool(adx_ok),
              "detail": by_key["adx"]["detail"] + (lag_note if adx_ok and not by_key["adx"][want] else "")},
             {"label": "Supertrend agrees" + (" or price-structure trend" if relax else ""), "pass": bool(st_ok),

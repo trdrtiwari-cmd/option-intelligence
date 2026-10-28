@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.13.1"
+APP_VERSION = "1.13.2"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1272,13 +1272,15 @@ async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = "
     return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
 
 @app.get("/api/analysis")
-async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard"):
+async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70):
     """Transparent confirmation engine from index candles + a higher-timeframe trend read, fused with the Data Check
     dashboard signal and stamped with the time the signal was generated (v1.9).
     Not a guarantee and not an order instruction."""
     sym = symbol.upper()
     if mode not in MODES:
         raise HTTPException(status_code=400, detail="mode must be one of: " + ", ".join(MODES))
+    if score_min not in (60, 65, 70):
+        raise HTTPException(status_code=400, detail="score_min must be 60, 65, or 70")
     dash_task = asyncio.create_task(_dashboard_final_for(sym, interval)) if sym in INDEX_KEYS else None
     try:
         result = await candles(symbol=symbol, interval=interval, days=10)
@@ -1292,7 +1294,7 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
                     raise
                 logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
         a = analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval,
-                    volume_source=result.get("volume_source"), mode=mode)  # the still-forming candle is ignored inside analyze()
+                    volume_source=result.get("volume_source"), mode=mode, score_min=score_min)  # forming candle ignored inside analyze()
         dash = await dash_task if dash_task else None
     except BaseException:
         if dash_task:

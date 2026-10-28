@@ -1,5 +1,10 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## Experimental score threshold (v1.13.2)
+- Main terminal has a configurable minimum directional score: 70 (strict, default), 65 (test), or 60 (relaxed test).
+- The chosen threshold is passed to the analysis endpoint and saved in browser local storage. Other safety gates remain unchanged.
+- This is an experiment control, not evidence that a lower threshold is more profitable. Compare against score ≥70 on identical out-of-sample dates and costs before changing the live default.
+
 ## Reliability fixes (v1.11.3)
 - Fixed the main terminal startup race where `refresh()` ran before `refreshBusy` was initialized, preventing the first automatic load.
 - Returning to the main terminal now triggers an immediate refresh even if the market-status poll has not updated yet; automatic polling still respects market-open status.
