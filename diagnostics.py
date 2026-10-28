@@ -34,7 +34,7 @@ MIN_N = 8          # fewer samples than this are shown but never used to draw a 
 
 # ---------------------------------------------------------------- replay
 def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None, first_bar=40,
-           window=None, progress=None):
+           window=None, progress=None, score_min=70):
     """One record per closed bar from `first_bar` on: the technical signal as it stood when that bar closed."""
     cs = normalize_candles(raw_candles)
     htf = normalize_candles(htf_raw) if htf_raw and htf_interval else []
@@ -48,7 +48,7 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
             h += 1
         sub = htf[:h]
         a = analyze(cs[max(0, i + 1 - window):i + 1], symbol, interval, htf_raw=sub or None, htf_interval=htf_interval if sub else None,
-                    volume_source=volume_source, now=close_dt, mode=mode)
+                    volume_source=volume_source, now=close_dt, mode=mode, score_min=score_min)
         if a.get("status") != "ok":
             continue
         side, atr = a.get("side"), a.get("atr")
@@ -387,8 +387,8 @@ def verdict(rep):
 
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=30, stop=20, progress=None):
-    cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress)
+        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70):
+    cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress, score_min=score_min)
     confirmed, near = events_from(replayed)
     conf_rows = evaluate(cs, confirmed, interval, horizon, cost, target, stop, with_extras=True)
     near_rows = evaluate(cs, near, interval, horizon, cost, target, stop)

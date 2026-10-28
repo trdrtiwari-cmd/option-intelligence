@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.13.2"
+APP_VERSION = "1.13.4"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -705,7 +705,7 @@ async def diagnostics_page():
 
 @app.post("/api/diagnostics/start")
 async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 15, mode: str = "scalp",
-                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12):
+                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 70):
     """Replays the technical engine over the last `days` of candles and measures what happened after every signal.
     Runs in a background thread (a 20-day replay takes several seconds locally and longer on a free instance)."""
     _need_user(request)
@@ -719,6 +719,8 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
     max_days = max(2, int(2500 / (375 / interval)))
     if not 2 <= days <= min(30, max_days):
         raise HTTPException(status_code=400, detail=f"days must be between 2 and {min(30, max_days)} for a {interval}-minute chart.")
+    if score_min not in (0, 60, 65, 70):
+        raise HTTPException(status_code=400, detail="score_min must be 0, 60, 65 or 70.")
     if not (0 <= cost <= 30 and 5 <= target <= 100 and 5 <= stop <= 100 and 3 <= horizon <= 48):
         raise HTTPException(status_code=400, detail="cost 0-30, target/stop 5-100 points, horizon 3-48 candles.")
     with DIAG_LOCK:
@@ -751,7 +753,7 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
         job["stage"] = "Replaying signals bar by bar"
         try:
             rep = dgn.run(result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw, htf_interval=htf_interval,
-                          volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop,
+                          volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop, score_min=score_min,
                           progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
             rep["params"]["volume_source"] = result.get("volume_source")
             job.update(status="done", report=rep, progress=1.0, stage="Done")

@@ -1,5 +1,11 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## Threshold comparison (v1.13.4)
+- Diagnostics supports minimum score 70, 65, 60, and 0 (research-only) with all non-score safety gates retained.
+- Compare thresholds on the same symbol, dates, timeframe, costs, target, stop and horizon. Treat threshold 0 as research only; it does not mean a live trade can bypass safety gates.
+- The live terminal still defaults to score 70 unless the user selects a test threshold.
+
+
 ## Experimental score threshold (v1.13.2)
 - Main terminal has a configurable minimum directional score: 70 (strict, default), 65 (test), or 60 (relaxed test).
 - The chosen threshold is passed to the analysis endpoint and saved in browser local storage. Other safety gates remain unchanged.
