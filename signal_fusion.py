@@ -212,6 +212,18 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
     if fresh_gate:
         gates.append(fresh_gate)
 
+    if side:
+        # Experimental risk filters from the supplied 51-trade replay. Apply after timing is evaluated
+        # so freshness/staleness diagnostics remain independent of these extra guards.
+        minute_now = now_dt.hour * 60 + now_dt.minute
+        gates.append({"label": "Avoid late-session entries (before 13:30 IST)",
+                      "pass": minute_now < 13 * 60 + 30,
+                      "detail": f"Current time {now_dt.strftime('%H:%M')} IST; supplied replay's 13:30+ group was negative."})
+        dom_score = max(a.get("bull_score") or 0, a.get("bear_score") or 0)
+        gates.append({"label": "Avoid extreme score bucket (score < 90)",
+                      "pass": dom_score < 90,
+                      "detail": f"Technical score {dom_score}/100; supplied replay's 90–100 bucket had negative average P/L."})
+
     all_pass = tech_level == "CONFIRMED" and all(g["pass"] for g in gates)
     dom = max(a.get("bull_score") or 0, a.get("bear_score") or 0)
     dash_part = max(0.0, (summary["score"] or 0) * want) if d_ok and side else 0.0
@@ -220,10 +232,11 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
     reasons, blockers = [], []
     if side:
         reasons.append(f"Terminal: {sig.replace('_', ' ')} · score {dom}/100 · regime {a.get('regime_label') or a.get('regime')}")
-        (reasons if agrees else blockers).append(gates[0]["detail"])
-        for g in gates[1:]:
+        for g in gates:
             if not g["pass"]:
                 blockers.append(f"{g['label']}: {g['detail']}")
+        if agrees:
+            reasons.append(gates[2]["detail"] if len(gates) > 2 else "Data Check agrees with the technical side.")
     if all_pass:
         level, action = "CONFIRMED", f"CONFIRMED {side} SETUP"
         headline = f"{side} confirmed by the terminal AND the Data Check dashboard. Signal generated {timing['generated_at_text']} ({timing['age_minutes']:.0f} min ago) — inside the entry window."

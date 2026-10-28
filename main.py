@@ -33,7 +33,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.1"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1151,12 +1151,16 @@ async def _dashboard_final_for(sym, interval):
 
 SIGNAL_LOG_DB = Path(os.getenv("SIGNAL_LOG_DB", str(BASE_DIR / "signal_log.sqlite3")))
 SIGNAL_LOG_LOCK = threading.Lock()
-SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "reason"]
+SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "trade_status", "exit_price", "gross_pnl_points", "net_pnl_points", "reason"]
 
 def init_signal_log():
     SIGNAL_LOG_DB.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(SIGNAL_LOG_DB) as db:
         db.execute("CREATE TABLE IF NOT EXISTS signal_log (id INTEGER PRIMARY KEY AUTOINCREMENT, generated_at TEXT NOT NULL, session_date TEXT NOT NULL, symbol TEXT NOT NULL, interval INTEGER NOT NULL, mode TEXT NOT NULL, candle_time TEXT NOT NULL, decision TEXT, final_action TEXT, side TEXT, score REAL, regime TEXT, pattern TEXT, pattern_confirmed INTEGER, last_close REAL, entry REAL, stop_loss REAL, target REAL, reason TEXT, UNIQUE(symbol, interval, mode, candle_time, final_action))")
+        existing = {r[1] for r in db.execute("PRAGMA table_info(signal_log)").fetchall()}
+        for col, typ in [("trade_status", "TEXT DEFAULT 'OPEN'"), ("exit_price", "REAL"), ("gross_pnl_points", "REAL"), ("net_pnl_points", "REAL")]:
+            if col not in existing:
+                db.execute(f"ALTER TABLE signal_log ADD COLUMN {col} {typ}")
         db.commit()
 
 def record_signal_row(symbol, interval, mode, a):
@@ -1164,6 +1168,10 @@ def record_signal_row(symbol, interval, mode, a):
         now_ist = datetime.now(IST)
         final = a.get("final") or {}
         action = final.get("action") or a.get("decision") or "WAIT"
+        side = str(final.get("side") or a.get("side") or "").upper()
+        # Keep only genuinely confirmed CE/PE setups; WAIT/WATCH/CONFLICT/STALE are never logged.
+        if str(final.get("level") or "").upper() != "CONFIRMED" or side not in ("CE", "PE"):
+            return
         candle_time = str(a.get("last_closed_bar") or a.get("last_candle_time") or a.get("last_time") or a.get("timestamp") or a.get("last_close_time") or "")
         # Use the last closed candle time from the analysis output where available; otherwise the data generation minute.
         if not candle_time:
@@ -1177,6 +1185,24 @@ def record_signal_row(symbol, interval, mode, a):
                _float_or_none(levels.get("target") or levels.get("target_1")), str(final.get("reason") or a.get("message") or a.get("note") or "")[:500])
         with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
             db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            # Mark open paper signals from subsequent observed index prices. This is an index-point proxy,
+            # not option-premium/rupee P&L. Exit on observed close crossing SL/target; never infer unseen intrabar fills.
+            price = _float_or_none(a.get("last_close"))
+            if price is not None:
+                open_rows = db.execute("SELECT id,side,entry,stop_loss,target FROM signal_log WHERE symbol=? AND interval=? AND mode=? AND trade_status='OPEN' AND entry IS NOT NULL", (symbol, int(interval), mode)).fetchall()
+                cost_points = float(os.getenv("SIGNAL_LOG_COST_POINTS", "4"))
+                for rid, rside, entry_px, sl_px, target_px in open_rows:
+                    if entry_px is None: continue
+                    side_sign = 1 if str(rside).upper() == "CE" else -1
+                    exit_reason = None
+                    if sl_px is not None and ((side_sign == 1 and price <= sl_px) or (side_sign == -1 and price >= sl_px)):
+                        exit_reason = "STOP"
+                    elif target_px is not None and ((side_sign == 1 and price >= target_px) or (side_sign == -1 and price <= target_px)):
+                        exit_reason = "TARGET"
+                    if exit_reason:
+                        gross = (price - entry_px) * side_sign
+                        db.execute("UPDATE signal_log SET trade_status=?,exit_price=?,gross_pnl_points=?,net_pnl_points=? WHERE id=?",
+                                   (exit_reason, price, gross, gross-cost_points, rid))
             db.commit()
     except Exception as exc:
         logger.warning("Signal log write failed: %s", str(exc)[:160])
