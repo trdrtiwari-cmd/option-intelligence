@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.13.4";
+const FRONTEND_VERSION="1.13.6";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -596,20 +596,22 @@ window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
 let autoTimer=null,refreshBusy=false;
 initChart();checkStatus();
-// Auto refresh: user-selectable (default 2 s). Runs only while the tab is visible and the market is open,
-// and never overlaps a still-running refresh. Slow requests are skipped rather than stacked. Between refreshes the live index tick moves the last candle.
+// Auto refresh: user-selectable (default 2 s). It also runs after market close so REST quote/status
+// and stale-data messaging can update. It never overlaps a prior refresh; a slow request delays the
+// next cycle rather than causing a backlog. WebSocket ticks update the forming candle between cycles.
 function startAutoRefresh(){
   clearInterval(autoTimer);
   const sec=Math.max(2,Number($("refreshEvery").value)||2);
   try{localStorage.setItem("oi-refresh-sec",String(sec))}catch{}
   autoTimer=setInterval(async()=>{
-    if(document.visibilityState!=="visible"||!marketOpen||refreshBusy)return;
-    refreshBusy=true;try{await refresh()}finally{refreshBusy=false}
+    if(document.visibilityState!=="visible"||refreshBusy)return;
+    refreshBusy=true;
+    try{await refresh()}catch(e){console.warn("Auto-refresh failed:",e)}finally{refreshBusy=false}
   },sec*1000);
 }
 try{const saved=localStorage.getItem("oi-refresh-sec");if(saved&&[...$("refreshEvery").options].some(o=>o.value===saved))$("refreshEvery").value=saved}catch{}
 $("refreshEvery").addEventListener("change",startAutoRefresh);startAutoRefresh();refresh();
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&!refreshBusy)refresh()});
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&!refreshBusy){refresh();checkStatus()}});
 let liveSocket=null, lastDerivatives=null, liveSocketGen=0, liveReconnectTimer=null;
 function renderLiveTicks(ticks){
   const body=$("liveTicksRows");
@@ -625,11 +627,16 @@ function renderLiveTicks(ticks){
 }
 // ---------------- Real-time index price (V3 WebSocket tick -> forming candle) ----------------
 let liveTickMap={},lastChainPaint=0,lastIdxTick=null,restPriceBusy=false;
-function setLivePrice(ltp,closePrice,ageText,srcText){
+function setLivePrice(ltp,closePrice,ageText,srcText,netChange=null,netChangePercent=null){
   if($("chartView").value!=="index")return;
   $("lastPrice").textContent=fmt(ltp);
-  if(closePrice>0){const ch=ltp-closePrice,pc=ch/closePrice*100;$("priceChange").textContent=`${ch>=0?"+":""}${fmt(ch)} (${pc>=0?"+":""}${fmt(pc)}%) · ${srcText} ${ageText}`;$("priceChange").style.color=ch>=0?"var(--green)":"var(--red)"}
-  else $("priceChange").textContent=`${srcText} ${ageText}`;
+  const cp=Number(closePrice), supplied=Number(netChange);
+  let ch=Number.isFinite(supplied)&&netChange!==null&&netChange!==""?supplied:
+    (Number.isFinite(cp)&&cp>0?Number(ltp)-cp:null);
+  let pc=Number.isFinite(Number(netChangePercent))&&netChangePercent!==null&&netChangePercent!==""?Number(netChangePercent):
+    (ch!==null&&Number.isFinite(cp)&&cp>0?ch/cp*100:null);
+  if(ch!==null){$("priceChange").textContent=`${ch>=0?"+":""}${fmt(ch)}${pc===null?"":` (${pc>=0?"+":""}${fmt(pc)}%)`} · ${srcText}${ageText?` ${ageText}`:""}`;$("priceChange").style.color=ch>=0?"var(--green)":"var(--red)"}
+  else $("priceChange").textContent=`Daily change unavailable · ${srcText}${ageText?` ${ageText}`:""}`;
 }
 function applyIndexTick(t){
   if(!t||!Number.isFinite(Number(t.ltp))||!t.fresh)return;
@@ -672,7 +679,7 @@ setInterval(async()=>{
   if(lastIdxTick&&Date.now()-lastIdxTick<5000)return;
   restPriceBusy=true;
   try{const q=await api(`/api/index-ltp?symbol=${getSymbol()}`);
-    if(q.ltp!=null&&Number.isFinite(Number(q.ltp)))setLivePrice(Number(q.ltp),Number(q.close_price),"",q.status==="LIVE_TICK"?"● LIVE tick":"REST quote (WebSocket idle)")}
+    if(q.ltp!=null&&Number.isFinite(Number(q.ltp)))setLivePrice(Number(q.ltp),q.close_price,"",q.status==="LIVE_TICK"?"● LIVE tick":"REST quote (WebSocket idle)",q.net_change,q.net_change_percent)}
   catch{}finally{restPriceBusy=false}
 },3000);
 function connectLiveSocket(){
