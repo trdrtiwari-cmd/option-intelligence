@@ -79,9 +79,9 @@ def test_backfill_for_old_rows_without_levels():
     p = make_db()
     with sqlite3.connect(p) as db:   # row as the old logger saved it: no entry / stop / target
         db.execute("INSERT INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,side,last_close) VALUES ('x','2026-10-29','NIFTY',5,'scalp','c','CE',22854.55)")
-    bf = sx.backfill_points(lambda a: dd.trade_levels({"side": "CE"}, {}, atr=a, price=100.0), 16.5, "T1")
-    assert bf and bf["target_points"] > 20
-    sx.settle_open_signals(p, "NIFTY", 22854.55 + 30, DAY, atr_backfill=bf)
+    bf = sx.backfill_points(lambda a: dd.trade_levels({"side": "CE"}, {}, atr=a, price=100.0), 16.5, "T2")
+    assert bf and bf["target_points"] > 45
+    sx.settle_open_signals(p, "NIFTY", 22854.55 + 60, DAY, atr_backfill=bf)
     r = row(p)
     assert r["trade_status"] == "TARGET" and r["levels_backfilled"] == 1 and r["net_pnl_points"] > 0
 
