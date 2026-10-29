@@ -12,7 +12,7 @@ If stop and target are both crossed in the same observation the STOP wins (pessi
 Net P/L = gross points - round-trip cost allowance (SIGNAL_LOG_COST_POINTS, default 4 index points).
 
 Environment:
-  SIGNAL_LOG_TARGET        T1 | T2 | T3   which ATR target is the auto-exit target (default T1 = 1.5 ATR, the "safe" one)
+  SIGNAL_LOG_TARGET        T1 | T2 | T3   which ATR target is the auto-exit target (default T2 = 3 ATR; T1 = 1.5 ATR lost money in the replays)
   SIGNAL_LOG_COST_POINTS   round-trip cost allowance in index points (default 4)
   SIGNAL_LOG_SQUAREOFF     HH:MM IST time-stop for same-day trades (default 15:20)
 """
@@ -27,9 +27,9 @@ EXTRA_COLUMNS = [("trade_status", "TEXT DEFAULT 'OPEN'"), ("exit_price", "REAL")
 
 
 def config():
-    target = os.getenv("SIGNAL_LOG_TARGET", "T1").strip().upper()
+    target = os.getenv("SIGNAL_LOG_TARGET", "T2").strip().upper()
     if target not in TARGET_NAMES:
-        target = "T1"
+        target = "T2"
     try:
         cost = float(os.getenv("SIGNAL_LOG_COST_POINTS", "4"))
     except ValueError:
