@@ -17,6 +17,7 @@ import accounts as acc
 import dashboard_data as dd
 import diagnostics as dgn
 import signal_fusion as sf
+import signal_exits as sx
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_TITLE = "Option Intelligence"
@@ -33,7 +34,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.13.6"
+APP_VERSION = "1.13.7"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1171,16 +1172,13 @@ async def _dashboard_final_for(sym, interval):
 
 SIGNAL_LOG_DB = Path(os.getenv("SIGNAL_LOG_DB", str(BASE_DIR / "signal_log.sqlite3")))
 SIGNAL_LOG_LOCK = threading.Lock()
-SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "trade_status", "exit_price", "gross_pnl_points", "net_pnl_points", "reason"]
+SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "target_name", "trade_status", "exit_price", "exit_time", "exit_reason", "gross_pnl_points", "net_pnl_points", "peak_points", "worst_points", "levels_backfilled", "reason"]
 
 def init_signal_log():
     SIGNAL_LOG_DB.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(SIGNAL_LOG_DB) as db:
         db.execute("CREATE TABLE IF NOT EXISTS signal_log (id INTEGER PRIMARY KEY AUTOINCREMENT, generated_at TEXT NOT NULL, session_date TEXT NOT NULL, symbol TEXT NOT NULL, interval INTEGER NOT NULL, mode TEXT NOT NULL, candle_time TEXT NOT NULL, decision TEXT, final_action TEXT, side TEXT, score REAL, regime TEXT, pattern TEXT, pattern_confirmed INTEGER, last_close REAL, entry REAL, stop_loss REAL, target REAL, reason TEXT, UNIQUE(symbol, interval, mode, candle_time, final_action))")
-        existing = {r[1] for r in db.execute("PRAGMA table_info(signal_log)").fetchall()}
-        for col, typ in [("trade_status", "TEXT DEFAULT 'OPEN'"), ("exit_price", "REAL"), ("gross_pnl_points", "REAL"), ("net_pnl_points", "REAL")]:
-            if col not in existing:
-                db.execute(f"ALTER TABLE signal_log ADD COLUMN {col} {typ}")
+        sx.ensure_columns(db)
         db.commit()
 
 def record_signal_row(symbol, interval, mode, a):
@@ -1196,33 +1194,17 @@ def record_signal_row(symbol, interval, mode, a):
         # Use the last closed candle time from the analysis output where available; otherwise the data generation minute.
         if not candle_time:
             candle_time = now_ist.strftime("%Y-%m-%d %H:%M")
-        levels = a.get("atr_levels") or {}
+        # trade_levels() returns entry_index / sl_index / targets[]; the old code read keys that do not exist,
+        # so every row was logged with blank stop and target and could never auto-exit.
+        entry_px, stop_px, target_px, target_name = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
         pat = a.get("candle_confirmation") or {}
         row = (now_ist.isoformat(timespec="seconds"), now_ist.date().isoformat(), symbol, int(interval), mode, candle_time,
                str(a.get("decision") or "WAIT"), str(action), str(a.get("side") or ""), float(a.get("score") or 0),
                str(a.get("regime_label") or a.get("regime") or ""), str(pat.get("pattern") or ""), int(bool(pat.get("confirmed"))),
-               _float_or_none(a.get("last_close")), _float_or_none(levels.get("entry")), _float_or_none(levels.get("stop_loss") or levels.get("sl")),
-               _float_or_none(levels.get("target") or levels.get("target_1")), str(final.get("reason") or a.get("message") or a.get("note") or "")[:500])
+               _float_or_none(a.get("last_close")), entry_px, stop_px,
+               target_px, str(final.get("reason") or a.get("message") or a.get("note") or "")[:500], target_name)
         with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
-            db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
-            # Mark open paper signals from subsequent observed index prices. This is an index-point proxy,
-            # not option-premium/rupee P&L. Exit on observed close crossing SL/target; never infer unseen intrabar fills.
-            price = _float_or_none(a.get("last_close"))
-            if price is not None:
-                open_rows = db.execute("SELECT id,side,entry,stop_loss,target FROM signal_log WHERE symbol=? AND interval=? AND mode=? AND trade_status='OPEN' AND entry IS NOT NULL", (symbol, int(interval), mode)).fetchall()
-                cost_points = float(os.getenv("SIGNAL_LOG_COST_POINTS", "4"))
-                for rid, rside, entry_px, sl_px, target_px in open_rows:
-                    if entry_px is None: continue
-                    side_sign = 1 if str(rside).upper() == "CE" else -1
-                    exit_reason = None
-                    if sl_px is not None and ((side_sign == 1 and price <= sl_px) or (side_sign == -1 and price >= sl_px)):
-                        exit_reason = "STOP"
-                    elif target_px is not None and ((side_sign == 1 and price >= target_px) or (side_sign == -1 and price <= target_px)):
-                        exit_reason = "TARGET"
-                    if exit_reason:
-                        gross = (price - entry_px) * side_sign
-                        db.execute("UPDATE signal_log SET trade_status=?,exit_price=?,gross_pnl_points=?,net_pnl_points=? WHERE id=?",
-                                   (exit_reason, price, gross, gross-cost_points, rid))
+            db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason,target_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
             db.commit()
     except Exception as exc:
         logger.warning("Signal log write failed: %s", str(exc)[:160])
@@ -1234,6 +1216,97 @@ def _float_or_none(value):
         return None
 
 init_signal_log()
+
+
+def _live_index_price(sym):
+    """Fresh WebSocket index tick, or None."""
+    key = INDEX_KEYS.get(sym)
+    if not key:
+        return None
+    with STREAM_LOCK:
+        view = _tick_view(key, time.time())
+    return view["ltp"] if view and view.get("fresh") and view.get("ltp") is not None else None
+
+
+def settle_signal_exits(sym, price, atr=None):
+    """Auto-exit every OPEN logged trade of `sym` that hit stop / safe target / square-off at `price`."""
+    try:
+        cfg = sx.config()
+        backfill = None
+        if atr:
+            backfill = sx.backfill_points(
+                lambda x: dd.trade_levels({"side": "CE"}, {}, atr=x, price=100.0), float(atr), cfg["target"])
+        closed = sx.settle_open_signals(SIGNAL_LOG_DB, sym, price, datetime.now(IST), atr_backfill=backfill, lock=SIGNAL_LOG_LOCK)
+        for c in closed:
+            logger.info("Signal log auto-exit %s #%s: %s net %s pts", sym, c["id"], c["status"],
+                        None if c.get("net") is None else round(c["net"], 2))
+        return closed
+    except Exception as exc:
+        logger.warning("Signal auto-exit failed: %s", str(exc)[:160])
+        return []
+
+
+_EXIT_WATCHER_TASK = None
+
+
+async def _signal_exit_watcher():
+    """Background loop: checks open logged trades against the live index price every 3 s while the market is open
+    (every 60 s otherwise, so trades from today are squared off at the close and old ones are marked expired).
+    Does nothing, and calls no API, when there are no open trades."""
+    while True:
+        delay = 3.0
+        try:
+            open_by_symbol = await asyncio.to_thread(sx.open_trade_count, SIGNAL_LOG_DB, SIGNAL_LOG_LOCK)
+            is_open = market_status()["open"]
+            delay = 3.0 if is_open else 60.0
+            if open_by_symbol and runtime_token:
+                for sym in list(open_by_symbol):
+                    if sym not in INDEX_KEYS:
+                        continue
+                    price = _live_index_price(sym)
+                    if price is None:
+                        try:
+                            q = await index_ltp(sym)
+                            price = _float_or_none(q.get("ltp"))
+                        except Exception as exc:
+                            logger.debug("Exit watcher quote unavailable: %s", str(exc)[:120])
+                    if price is not None:
+                        await asyncio.to_thread(settle_signal_exits, sym, price)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Exit watcher error: %s", str(exc)[:160])
+        await asyncio.sleep(delay)
+
+
+@app.on_event("startup")
+async def _start_signal_exit_watcher():
+    global _EXIT_WATCHER_TASK
+    if _EXIT_WATCHER_TASK is None or _EXIT_WATCHER_TASK.done():
+        _EXIT_WATCHER_TASK = asyncio.create_task(_signal_exit_watcher())
+
+
+@app.post("/api/signals/settle")
+async def settle_signals_now(symbol: str = ""):
+    """'Check exits now' button: evaluates open trades against the latest index price immediately."""
+    syms = [symbol.upper()] if symbol.upper() in INDEX_KEYS else list(INDEX_KEYS)
+    closed = []
+    for sym in syms:
+        price = _live_index_price(sym)
+        if price is None:
+            try:
+                price = _float_or_none((await index_ltp(sym)).get("ltp"))
+            except HTTPException:
+                price = None
+        if price is not None:
+            closed += await asyncio.to_thread(settle_signal_exits, sym, price)
+    return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
+
+
+@app.get("/api/signals/config")
+async def signal_log_config():
+    c = sx.config()
+    return {"target": c["target"], "cost_points": c["cost"], "squareoff": c["squareoff"].strftime("%H:%M")}
 
 @app.get("/signals")
 async def signal_log_page():
@@ -1277,16 +1350,23 @@ async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = "
     for col in ws.columns:
         letter = col[0].column_letter
         ws.column_dimensions[letter].width = min(42, max(12, max(len(str(c.value or "")) for c in col[:100]) + 2))
-    summary = wb.create_sheet("Daily Summary"); summary.append(["Session Date", "Signals", "BUY CE", "BUY PE", "WAIT / WATCH"])
-    from collections import defaultdict
-    groups = defaultdict(lambda: [0,0,0,0])
+    summary = wb.create_sheet("Daily Summary")
+    summary.append(["Session Date", "Signals", "BUY CE", "BUY PE", "Open", "Target exits", "Stop exits", "Time exits", "Win rate %", "Gross P/L (pts)", "Net P/L (pts)"])
+    days = {}
     for row in data["rows"]:
-        g=groups[row.get("session_date") or "Unknown"]; g[0]+=1
-        act=(row.get("final_action") or row.get("decision") or "").upper()
-        if "CE" in act: g[1]+=1
-        elif "PE" in act: g[2]+=1
-        else: g[3]+=1
-    for day, g in sorted(groups.items()): summary.append([day,*g])
+        g = days.setdefault(row.get("session_date") or "Unknown", {"n": 0, "ce": 0, "pe": 0, "open": 0, "T": 0, "S": 0, "Q": 0, "w": 0, "closed": 0, "gross": 0.0, "net": 0.0})
+        g["n"] += 1
+        side = str(row.get("side") or "").upper()
+        g["ce"] += side == "CE"; g["pe"] += side == "PE"
+        st = (row.get("trade_status") or "OPEN").upper()
+        if st == "OPEN": g["open"] += 1
+        elif st in ("TARGET", "STOP", "SQUAREOFF"):
+            g["closed"] += 1; g[{"TARGET": "T", "STOP": "S", "SQUAREOFF": "Q"}[st]] += 1
+            g["gross"] += row.get("gross_pnl_points") or 0; g["net"] += row.get("net_pnl_points") or 0
+            g["w"] += (row.get("net_pnl_points") or 0) > 0
+    for day, g in sorted(days.items()):
+        summary.append([day, g["n"], g["ce"], g["pe"], g["open"], g["T"], g["S"], g["Q"],
+                        round(g["w"] / g["closed"] * 100, 1) if g["closed"] else None, round(g["gross"], 2), round(g["net"], 2)])
     summary.freeze_panes="A2"; summary.auto_filter.ref=summary.dimensions
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
     return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
@@ -1339,6 +1419,8 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
     except Exception as exc:          # fusion must never take the whole analysis down
         logger.warning("Signal fusion failed: %s", exc)
         a["fusion_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+    # Auto-exit first (uses the live tick when there is one), then log any new confirmed setup.
+    settle_signal_exits(sym, _live_index_price(sym) or _float_or_none(a.get("last_close")), atr=a.get("atr"))
     record_signal_row(sym, interval, mode, a)
     return a
 

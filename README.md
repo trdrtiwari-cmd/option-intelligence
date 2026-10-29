@@ -1,5 +1,14 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.13.7 — signal-log auto-exit, net P/L, live-price label fix
+- **Why the log never closed a trade:** the logger read `entry` / `stop_loss` / `target` from the ATR plan, but the plan returns `entry_index` / `sl_index` / `targets[]`, so every row was saved with a blank stop and target. Exits were also only checked when a *new* confirmed signal appeared. Both fixed.
+- **Auto-exit** (`signal_exits.py`): every logged trade closes at the first of STOP (filled at the observed price), TARGET (filled at the target level), or SQUAREOFF at 15:20 IST. Stop wins if both are crossed in one observation. Trades from an earlier session that were never settled become EXPIRED with no invented P/L. A background watcher checks the live index price every 3 s while the market is open; every analysis refresh and the **Check exits now** button also settle trades.
+- **Net P/L** = gross index points − `SIGNAL_LOG_COST_POINTS` (default 4). The page shows win rate, exit counts, closed net P/L, open (mark-to-market) P/L and an optional rupee estimate (points × option delta × quantity). Excel/CSV exports include exit time, reason, peak/worst points; the Daily Summary sheet has per-day P/L.
+- **Safe target** is `SIGNAL_LOG_TARGET` = `T1` (1.5 ATR, default), `T2` (3 ATR) or `T3` (4.5 ATR). Time exit: `SIGNAL_LOG_SQUAREOFF` (default `15:20`).
+- Old rows saved without levels are given a stop/target from the current ATR the next time analysis runs (marked `*`). Their entry is the logged index price.
+- **Price label:** "REST quote (WebSocket idle)" was shown whenever no tick had arrived, including after the market closes when no ticks exist. It now reads "Last close · market closed" after hours, and during market hours "REST quote · waiting for live tick" or "REST quote · reconnecting live feed" (and the browser socket is reconnected if it dropped).
+- Tests: `python tests/test_signal_exits.py`.
+
 ## Threshold comparison (v1.13.4)
 - Diagnostics supports minimum score 70, 65, 60, and 0 (research-only) with all non-score safety gates retained.
 - Compare thresholds on the same symbol, dates, timeframe, costs, target, stop and horizon. Treat threshold 0 as research only; it does not mean a live trade can bypass safety gates.
