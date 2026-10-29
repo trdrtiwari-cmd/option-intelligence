@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.13.6";
+const FRONTEND_VERSION="1.13.7";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -672,14 +672,25 @@ function applyOptionTick(t){
   $("priceChange").textContent=`● LIVE option tick ${fmt(t.age_seconds,1)}s ago`+(ch===null?"":` · ${ch>=0?"+":""}${fmt(ch)} vs prev close`);
   try{candleSeries.update(c)}catch{}
 }
-// REST fallback: if the WebSocket is not delivering index ticks, poll the quote every 3 s.
-// Keep the last price and daily change populated after market close as well.
+// REST fallback: if the WebSocket is not delivering index ticks, poll the quote.
+// The label says WHY the REST quote is shown, instead of always claiming the WebSocket is idle:
+//  - market closed  -> no ticks exist, so a REST "last close" is the correct data (poll slowly)
+//  - market open    -> the feed really is stale: say so, and reconnect the browser socket if it has dropped
+let lastRestPoll=0,idleReconnectAt=0;
+function restPriceLabel(status){
+  if(status==="LIVE_TICK")return"● LIVE tick";
+  if(!marketOpen)return"Last close · market closed";
+  const open=liveSocket&&liveSocket.readyState===WebSocket.OPEN;
+  return open?"REST quote · waiting for live tick":"REST quote · reconnecting live feed";
+}
 setInterval(async()=>{
   if(document.visibilityState!=="visible"||restPriceBusy)return;
   if(lastIdxTick&&Date.now()-lastIdxTick<5000)return;
-  restPriceBusy=true;
+  if(!marketOpen&&lastRestPoll&&Date.now()-lastRestPoll<30000)return;   // closed: ticks cannot arrive, poll every 30 s
+  if(marketOpen&&(!liveSocket||liveSocket.readyState>WebSocket.OPEN)&&Date.now()-idleReconnectAt>10000){idleReconnectAt=Date.now();connectLiveSocket()}
+  restPriceBusy=true;lastRestPoll=Date.now();
   try{const q=await api(`/api/index-ltp?symbol=${getSymbol()}`);
-    if(q.ltp!=null&&Number.isFinite(Number(q.ltp)))setLivePrice(Number(q.ltp),q.close_price,"",q.status==="LIVE_TICK"?"● LIVE tick":"REST quote (WebSocket idle)",q.net_change,q.net_change_percent)}
+    if(q.ltp!=null&&Number.isFinite(Number(q.ltp)))setLivePrice(Number(q.ltp),q.close_price,"",restPriceLabel(q.status),q.net_change,q.net_change_percent)}
   catch{}finally{restPriceBusy=false}
 },3000);
 function connectLiveSocket(){
