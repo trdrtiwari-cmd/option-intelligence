@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.13.7";
+const FRONTEND_VERSION="1.13.8";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -416,15 +416,25 @@ async function refresh(){
   const manual=!refreshBusy;if(manual){$("refreshBtn").disabled=true;$("refreshBtn").textContent="Loading…"}
   try{
     const sym=getSymbol(),interval=getInterval();
-    // Render candles as soon as their endpoint responds; analysis can be slower because it also fetches HTF data.
-    const candlePromise=api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`);
-    const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}`);
-    const c=await candlePromise;
+    // Candles + price render immediately. The heavier analysis runs on its own loop so it can never hold the chart back.
+    const c=await api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`);
     lastVolumeSource=c.volume_source||null;
     renderCandles(c.candles);
-    let a;try{a=await analysisPromise}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
     if(lastVolumeSource)$("chartNote").textContent+=` Volume and VWAP weights come from ${lastVolumeSource} (the index itself has no volume).`;
-    $("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()}`;
+    const f=c.feed;
+    $("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()}`+(f&&f.price_source&&f.price_source!=="CLOSED"?` · price: ${f.price_source==="WEBSOCKET"?"live tick":f.price_source==="REST_QUOTE"?"REST quote":"candles only"}${f.bars_behind>0?` · candle feed ${f.bars_behind} bar${f.bars_behind>1?"s":""} behind`:""}`:"");
+    runAnalysis(manual);
+  }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
+  finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}
+}
+let analysisBusy=false;
+async function runAnalysis(force){
+  if(analysisBusy||(!force&&Date.now()-lastAnalysisAt<4000))return;   // analysis is heavy: at most every ~4 s, never overlapping
+  analysisBusy=true;
+  try{
+    const sym=getSymbol(),interval=getInterval();
+    let a;try{a=await api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}`)}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
+    if(sym!==getSymbol()||interval!==getInterval())return;   // the user switched symbol/timeframe while this was running
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";
     $("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
     $("decision").textContent=a.decision||"WAIT";
@@ -437,8 +447,8 @@ async function refresh(){
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
     $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
     lastAnalysis=a;lastAnalysisAt=Date.now();renderSignal();loadOptionVolume();
-  }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
-  finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}
+  }catch(e){$("analysisNote").textContent=e.message}
+  finally{analysisBusy=false}
 }
 function renderMarketPill(m){
   const el=$("marketStatus");if(!el||!m)return;
@@ -640,8 +650,8 @@ function setLivePrice(ltp,closePrice,ageText,srcText,netChange=null,netChangePer
 }
 function applyIndexTick(t){
   if(!t||!Number.isFinite(Number(t.ltp))||!t.fresh)return;
-  const ltp=Number(t.ltp);lastIdxTick=Date.now();lastIdxLtp=ltp;
-  setLivePrice(ltp,Number(t.close_price),`${fmt(t.age_seconds,1)}s ago`,"● LIVE tick");
+  const ltp=Number(t.ltp);if(!t.rest)lastIdxTick=Date.now();lastIdxLtp=ltp;
+  if(!t.rest)setLivePrice(ltp,Number(t.close_price),`${fmt(t.age_seconds,1)}s ago`,"● LIVE tick");
   if(chartSource!=="index"||$("chartView").value!=="index"||!currentCandles.length||!marketOpen)return;
   const step=getInterval()*60,last=currentCandles[currentCandles.length-1],lt=toChartTime(last.time);
   if(!Number.isFinite(lt))return;
@@ -690,9 +700,10 @@ setInterval(async()=>{
   if(marketOpen&&(!liveSocket||liveSocket.readyState>WebSocket.OPEN)&&Date.now()-idleReconnectAt>10000){idleReconnectAt=Date.now();connectLiveSocket()}
   restPriceBusy=true;lastRestPoll=Date.now();
   try{const q=await api(`/api/index-ltp?symbol=${getSymbol()}`);
-    if(q.ltp!=null&&Number.isFinite(Number(q.ltp)))setLivePrice(Number(q.ltp),q.close_price,"",restPriceLabel(q.status),q.net_change,q.net_change_percent)}
+    if(q.ltp!=null&&Number.isFinite(Number(q.ltp))){setLivePrice(Number(q.ltp),q.close_price,"",restPriceLabel(q.status),q.net_change,q.net_change_percent);
+      if(q.status!=="LIVE_TICK"&&marketOpen)applyIndexTick({ltp:q.ltp,close_price:q.close_price,age_seconds:0,fresh:true,rest:true})}}
   catch{}finally{restPriceBusy=false}
-},3000);
+},2000);
 function connectLiveSocket(){
   // One socket at a time. Old handlers are detached first so closing it cannot schedule a second reconnect.
   clearTimeout(liveReconnectTimer);
