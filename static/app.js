@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.13.8";
+const FRONTEND_VERSION="1.14.0";
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -8,6 +8,7 @@ function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?
 function getSymbol(){return $("symbol").value}
 function getInterval(){return Number($("interval").value)}
 function getMode(){const m=$("signalMode");return m?m.value:"standard"}
+function getReconfirm(){const m=$("reconfirmSec");return m?Number(m.value||0):60}
 function getScoreMin(){const m=$("scoreMin");return m?Number(m.value||70):70}
 function initChart(){
   const el=$("chart");
@@ -152,6 +153,48 @@ function computeSR(cs,interval,symbol,isIndex){
   return {supports,resistances,support:supports[0]?.price??null,resistance:resistances[0]?.price??null,last,atr,tol,note:notes.join(" ")};
 }
 // ---------------- v1.9: signal generation time + Data Check dashboard read ----------------
+// ---------------- Alerts (v1.14): beep + browser notification + tab-title flash on signal transitions ----------------
+let audioCtx=null,alertSoundOn=true,alertPrev=null,titleTimer=null;const baseTitle=document.title,lastAlertAt={};
+try{alertSoundOn=localStorage.getItem("oi-alert-sound")!=="0"}catch{}
+function unlockAudio(){try{if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();if(audioCtx.state==="suspended")audioCtx.resume()}catch{}}
+document.addEventListener("click",unlockAudio,{once:true});document.addEventListener("keydown",unlockAudio,{once:true});
+function tone(hz,at,dur,vol,type){const o=audioCtx.createOscillator(),g=audioCtx.createGain();o.type=type||"sine";o.frequency.value=hz;
+  g.gain.setValueAtTime(0.0001,at);g.gain.exponentialRampToValueAtTime(vol,at+0.02);g.gain.exponentialRampToValueAtTime(0.0001,at+dur);o.connect(g);g.connect(audioCtx.destination);o.start(at);o.stop(at+dur+0.05)}
+function playAlert(kind,side,force){
+  if(!alertSoundOn&&!force)return;unlockAudio();if(!audioCtx)return;const t=audioCtx.currentTime+0.03;
+  if(kind==="confirmed"){const f=side==="PE"?[1175,880,660]:[660,880,1175];for(let r=0;r<2;r++)f.forEach((hz,i)=>tone(hz,t+r*0.95+i*0.24,0.2,0.35,"square"))}   // CE rises, PE falls; played twice
+  else if(kind==="start"){tone(880,t,0.12,0.22);tone(880,t+0.2,0.12,0.22)}
+  else if(kind==="failed"){tone(220,t,0.55,0.25,"sawtooth")}
+}
+function flashTitle(msg){clearInterval(titleTimer);let on=false;titleTimer=setInterval(()=>{document.title=(on=!on)?`🔔 ${msg}`:baseTitle},900);
+  const stop=()=>{clearInterval(titleTimer);document.title=baseTitle;window.removeEventListener("focus",stop)};window.addEventListener("focus",stop);setTimeout(stop,60000)}
+function showNotice(title,body){
+  try{if("Notification"in window&&Notification.permission==="granted")new Notification(title,{body,tag:"oi-signal"})}catch{}
+  try{navigator.vibrate&&navigator.vibrate([200,100,200])}catch{}
+  if(document.hidden)flashTitle(title)}
+// Fires once per transition (never on the first paint after loading the page, never while the market is closed, and at most once per 20 s per kind).
+function alertTransitions(a,gstatus,side,fin){
+  const rc=a.reconfirm&&a.reconfirm.state||"NONE";
+  const cur={side:side||null,confirmed:gstatus==="CONFIRMED",pending:!!(fin&&fin.level==="PENDING"),failed:rc==="FAILED"};
+  const prev=alertPrev;alertPrev=cur;
+  if(!prev||!marketOpen)return;
+  const fire=(kind,fn)=>{const k=kind+"|"+cur.side,now=Date.now();if(now-(lastAlertAt[k]||0)<20000)return;lastAlertAt[k]=now;fn()};
+  if(cur.confirmed&&(!prev.confirmed||prev.side!==cur.side))fire("confirmed",()=>{playAlert("confirmed",side);showNotice(`CONFIRMED ${side} — ${getSymbol()}`,`Reconfirmed, all gates pass. Index ${fmt(a.last_close)}.`)});
+  else if(cur.pending&&(!prev.pending||prev.side!==cur.side))fire("start",()=>{playAlert("start",side);showNotice(`${side} setup detected — reconfirming`,`Not an entry yet: it must hold ${a.reconfirm?a.reconfirm.window:""}s.`)});
+  else if(cur.failed&&prev.pending)fire("failed",()=>playAlert("failed",side));
+}
+(function(){const m=$("alertSound");if(!m)return;m.value=alertSoundOn?"1":"0";m.addEventListener("change",()=>{alertSoundOn=m.value==="1";try{localStorage.setItem("oi-alert-sound",m.value)}catch{}unlockAudio();if(alertSoundOn)playAlert("start","CE")})})();
+async function loadAlertConfig(){
+  try{const c=await api("/api/alerts/config"),on=Object.entries(c.channels||{}).filter(([,v])=>v).map(([k])=>({telegram:"Telegram",ntfy:"ntfy",email_api:"Email (API)",email_smtp:"Email (SMTP)"}[k]||k));
+    $("alertChannels").textContent=on.length?`Alerts → beep + ${on.join(", ")}${c.background_poller?" · server watches even when this tab is closed":""}`:"Alerts → beep only (set TELEGRAM_*, NTFY_TOPIC or RESEND_API_KEY on the server for phone/email)"}catch{}}
+(function(){const b=$("testAlert");if(!b)return;b.addEventListener("click",async()=>{
+  unlockAudio();playAlert("confirmed","CE",true);
+  try{if("Notification"in window&&Notification.permission==="default")await Notification.requestPermission()}catch{}
+  b.disabled=true;b.textContent="Sending…";
+  try{const r=await fetch("/api/alerts/test",{method:"POST"});const d=await r.json();
+    const bad=(d.results||[]).filter(x=>!x.ok);toast(d.results&&d.results.length?(bad.length?"Test message problem: "+bad.map(x=>`${x.channel}: ${x.error}`).join("; "):"Test message sent to "+d.results.map(x=>x.channel).join(", ")):d.message||"No server channel configured — beep only.")}
+  catch(e){toast("Test alert failed: "+e.message)}finally{b.disabled=false;b.textContent="Test alert"}})})();
+loadAlertConfig();
 function renderSignalTime(a){
   const box=$("signalTimeBox");if(!box)return;
   const t=a&&a.timing;
@@ -208,8 +251,9 @@ function renderSignal(){
   else if(side&&dom>=55&&failed.length<=2){text=`WATCH ${side}`;sub="No entry yet — waiting for: "+failed.map(g=>g.label).join("; ");cls="stale"}
   const gstatus=(side&&gates.length&&!failed.length)?"CONFIRMED":(side&&dom>=55&&failed.length<=2)?"WATCH":"WAIT";
   const fin=a.final||null;
-  if(fin&&gstatus!=="CONFIRMED"&&(fin.level==="STALE"||fin.level==="CONFLICT")){text=fin.action;sub=fin.headline;cls="stale";color="var(--yellow)"}
+  if(fin&&gstatus!=="CONFIRMED"&&(fin.level==="STALE"||fin.level==="CONFLICT"||fin.level==="PENDING")){text=fin.action;sub=fin.headline;cls="stale";color="var(--yellow)"}
   lastGateState={side,text,status:gstatus,failed:failed.map(g=>g.label),dom,gates:gates.map(g=>({label:g.label,pass:g.pass,detail:g.detail||""})),timing:a.timing||null,final:fin};
+  alertTransitions(a,gstatus,side,fin);
   const tm=a.timing&&a.timing.generated_at_text?a.timing:null;
   if($("decisionSub"))$("decisionSub").textContent=(gstatus==="CONFIRMED"?"Gates pass — enter only on a held retest":"No entry — hard gates not met")+(tm&&side?` · signal ${tm.generated_at_text}`:"");
   renderSignalTime(a);renderDashChecks(a);
@@ -401,7 +445,7 @@ async function loadOptionVolume(){
 async function refreshSignalContext(){
   const sym=getSymbol(),interval=getInterval();
   const candlePromise=api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`);
-  const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}`);
+  const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}&reconfirm=${getReconfirm()}`);
   const c=await candlePromise;
   lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
   let a;try{a=await analysisPromise}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
@@ -433,7 +477,7 @@ async function runAnalysis(force){
   analysisBusy=true;
   try{
     const sym=getSymbol(),interval=getInterval();
-    let a;try{a=await api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}`)}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
+    let a;try{a=await api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}&reconfirm=${getReconfirm()}`)}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
     if(sym!==getSymbol()||interval!==getInterval())return;   // the user switched symbol/timeframe while this was running
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";
     $("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
@@ -580,6 +624,7 @@ $("symbol").addEventListener("change",()=>{
 });
 $("interval").addEventListener("change",refresh);
 (function(){const m=$("scoreMin");if(!m)return;try{const v=localStorage.getItem("oi-score-min");if(v&&["60","65","70"].includes(v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-score-min",m.value)}catch{}refresh()})})();
+(function(){const m=$("reconfirmSec");if(!m)return;try{const v=localStorage.getItem("oi-reconfirm");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-reconfirm",m.value)}catch{}runAnalysis(true)})})();
 (function(){const m=$("signalMode");if(!m)return;try{const v=localStorage.getItem("oi-signal-mode");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-signal-mode",m.value)}catch{}refresh()})})();
 $("loadContracts").addEventListener("click",()=>loadContracts(true));
 $("loadChain").addEventListener("click",()=>loadChain());
