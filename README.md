@@ -1,6 +1,6 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
-## v1.13.8 — signal-log auto-exit, net P/L, live-price label fix
+## v1.14.0 — signal-log auto-exit, net P/L, live-price label fix
 - **Why the log never closed a trade:** the logger read `entry` / `stop_loss` / `target` from the ATR plan, but the plan returns `entry_index` / `sl_index` / `targets[]`, so every row was saved with a blank stop and target. Exits were also only checked when a *new* confirmed signal appeared. Both fixed.
 - **Auto-exit** (`signal_exits.py`): every logged trade closes at the first of STOP (filled at the observed price), TARGET (filled at the target level), or SQUAREOFF at 15:20 IST. Stop wins if both are crossed in one observation. Trades from an earlier session that were never settled become EXPIRED with no invented P/L. A background watcher checks the live index price every 3 s while the market is open; every analysis refresh and the **Check exits now** button also settle trades.
 - **Net P/L** = gross index points − `SIGNAL_LOG_COST_POINTS` (default 4). The page shows win rate, exit counts, closed net P/L, open (mark-to-market) P/L and an optional rupee estimate (points × option delta × quantity). Excel/CSV exports include exit time, reason, peak/worst points; the Daily Summary sheet has per-day P/L.
@@ -319,3 +319,25 @@ What the data showed, and what changed:
 | Score 90–100 lost in scalp (n=7), stretch < 0.5 ATR lost (n=18) | small samples | Not changed — watch in the next run |
 
 Applying only the RSI gate to the replayed trades would have turned −0.9 → +2.9 (standard, n=26) and +1.8 → +4.3 (scalp, n=46) per trade at 30/20; adding the CE rule gives +6.0 in both. These were chosen **after** seeing the same 31/51 trades, so they are optimistic — confirm on a different period before trusting them.
+
+
+## v1.14 - side-specific RSI, reconfirmation window, alerts
+
+**RSI per side.** CE and PE now have their own RSI limits instead of one shared rule. Defaults keep the replay-tested values:
+CE needs RSI 60-70 (momentum floor 60, exhaustion ceiling 70), PE needs RSI 30-40. In scalp mode, once the price-structure trend is
+confirmed, only the momentum edge relaxes (CE >= 58, PE <= 42); the exhaustion edge stays strict. Each edge can be changed from the
+environment (`RSI_CE_MIN`, `RSI_CE_MAX`, `RSI_PE_MIN`, `RSI_PE_MAX`, `*_SCALP`). A new gate also asks that RSI is moving with the trade
+on the last closed bar (rising for CE, falling for PE); `RSI_SLOPE=0` removes it.
+
+**Reconfirmation.** A setup that passes every gate is shown as `RECONFIRMING CE/PE - Ns left` and is not logged or alerted as an entry.
+It becomes CONFIRMED only after it has kept passing every gate for the chosen hold time (page selector "Reconfirm hold", default 60 s,
+server default `RECONFIRM_SECONDS`) across at least two looks, and price has not moved more than `RECONFIRM_MAX_ADVERSE_ATR` (0.5 ATR)
+against the price at which it was first seen. A short flicker (20 s) does not reset the clock; if price moves against it the attempt
+FAILS and stays failed until the setup disappears and forms again. The clock needs the server to keep looking: an open page does it, and
+the background alert poller does it when no tab is open.
+
+**Alerts.** In the page: a beep (CE rises, PE falls, played twice when confirmed; a double tick when a setup is first detected; a low buzz
+when a reconfirmation fails), a browser notification and a flashing tab title. Browsers only allow sound after you click something on the
+page once; press **Test alert**. On the server: Telegram, ntfy, or email through the Resend HTTPS API (see `.env.example`). Plain SMTP is
+included but Render's free plan blocks SMTP ports (25/465/587), so it only works locally or on a paid instance. Server alerts do not know
+the page-only S/R-room and option-volume gates, so check the page before entering.

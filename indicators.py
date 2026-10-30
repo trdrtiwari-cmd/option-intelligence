@@ -88,6 +88,33 @@ import os as _os
 CE_NEEDS_STRUCTURE = _os.getenv("CE_NEEDS_STRUCTURE", "1") != "0"
 RSI_MOMENTUM = float(_os.getenv("RSI_MOMENTUM", "40"))
 
+
+def _envf(name, default):
+    try:
+        return float(_os.getenv(name, "").strip() or default)
+    except ValueError:
+        return float(default)
+
+
+# v1.14 side-specific RSI bands (CE and PE are NOT mirror images any more - each has its own floor and ceiling):
+#   CE needs RSI ABOVE its momentum floor but BELOW the exhaustion ceiling      -> CE band = (floor, ceiling)
+#   PE needs RSI BELOW its momentum ceiling but ABOVE the exhaustion floor      -> PE band = (floor, ceiling)
+# Defaults keep the replay-tested limits (CE 60-70, PE 30-40). Scalp mode relaxes only the MOMENTUM side, and only when the
+# price-structure trend is already confirmed; the exhaustion side stays strict (RSI < 30 for PE lost in 14 real days).
+# Override any edge from the environment: RSI_CE_MIN, RSI_CE_MAX, RSI_PE_MIN, RSI_PE_MAX (and *_SCALP variants for the relaxed band).
+RSI_SLOPE = _os.getenv("RSI_SLOPE", "1") != "0"     # CE needs RSI rising on the last closed bar, PE needs it falling
+RSI_BANDS = {
+    "strict": {"CE": (_envf("RSI_CE_MIN", 100 - RSI_MOMENTUM if RSI_MOMENTUM else 0), _envf("RSI_CE_MAX", 70)),
+               "PE": (_envf("RSI_PE_MIN", 30), _envf("RSI_PE_MAX", RSI_MOMENTUM if RSI_MOMENTUM else 100))},
+    "wide":   {"CE": (_envf("RSI_CE_MIN_SCALP", 58), _envf("RSI_CE_MAX_SCALP", 70)),
+               "PE": (_envf("RSI_PE_MIN_SCALP", 30), _envf("RSI_PE_MAX_SCALP", 42))},
+}
+
+
+def rsi_band(side, wide=False):
+    """(low, high) RSI limits for a CE or PE entry. `wide` = scalp mode with a confirmed price-structure trend."""
+    return RSI_BANDS["wide" if wide else "strict"][side]
+
 MODES = {
     "standard": {"label": "Standard", "rsi_lo": 30, "rsi_hi": 70, "rsi_score_lo": 20, "rsi_score_hi": 80, "chase_atr": 1.0,
                  "room_atr": 1.0, "relax_lagging": False, "micro_trigger": False,
@@ -432,6 +459,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     last = closes[-1]
     e9, e21 = ema(closes, 9), ema(closes, 21)
     rsi = rsi_wilder(closes)
+    rsi_prev = rsi_wilder(closes[:-1]) if len(closes) > 16 else None
     atr = atr_wilder(cs)
     vwap, vwap_source = session_vwap(cs)
     mc = macd(closes)
@@ -459,9 +487,10 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         {"key": "macd", "label": "MACD (12, 26, 9) momentum", "weight": 10, "ok": mc is not None,
          "bull": bool(mc and mc[2] > 0 and mc[2] >= mc[3]), "bear": bool(mc and mc[2] < 0 and mc[2] <= mc[3]),
          "detail": f"Hist {mc[2]:+.2f} ({'rising' if mc[2] >= mc[3] else 'falling'})" if mc else "n/a"},
-        {"key": "rsi", "label": "RSI (14) — strong but not stretched", "weight": 8, "ok": rsi is not None,
-         "bull": bool(rsi and 55 < rsi < rules["rsi_score_hi"]), "bear": bool(rsi and rules["rsi_score_lo"] < rsi < 45),
-         "detail": f"RSI {rsi:.1f}" if rsi is not None else "n/a"},
+        {"key": "rsi", "label": "RSI (14) — in the CE band (rising) / PE band (falling)", "weight": 8, "ok": rsi is not None,
+         "bull": bool(rsi is not None and rsi_band("CE", rules["relax_lagging"])[0] <= rsi <= rsi_band("CE", rules["relax_lagging"])[1]),
+         "bear": bool(rsi is not None and rsi_band("PE", rules["relax_lagging"])[0] <= rsi <= rsi_band("PE", rules["relax_lagging"])[1]),
+         "detail": (f"RSI {rsi:.1f}" + (f" ({rsi - rsi_prev:+.1f} vs previous bar)" if rsi_prev is not None else "")) if rsi is not None else "n/a"},
         {"key": "adx", "label": "ADX (14) trend strength ≥ 20", "weight": 12, "ok": adx is not None,
          "bull": bool(adx and adx[0] >= 20 and adx[1] > adx[2]), "bear": bool(adx and adx[0] >= 20 and adx[2] > adx[1]),
          "detail": f"ADX {adx[0]:.1f} · +DI {adx[1]:.1f} · −DI {adx[2]:.1f}" if adx else "n/a"},
@@ -535,7 +564,9 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
             htf_label = "Higher timeframe not against" if relax else "Higher timeframe agrees"
         else:
             htf_ok, htf_label = True, "Higher timeframe (unavailable)"
-        rsi_lo, rsi_hi = (rules["rsi_lo"], rules["rsi_hi"]) if (relax and trend_agree) else (30, 70)
+        rsi_wide = bool(relax and trend_agree)
+        band_lo, band_hi = rsi_band(side, rsi_wide)           # this side's own limits
+        strict_lo, strict_hi = rsi_band(side, False)
         score_min = max(50, min(70, int(score_min)))
         gates = [
             {"label": f"Score ≥ {score_min}", "pass": dom >= score_min, "detail": f"{dom}/100"},
@@ -545,14 +576,24 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
              "detail": by_key["supertrend"]["detail"] + (lag_note if st_ok and not by_key["supertrend"][want] else "")},
             {"label": htf_label, "pass": bool(htf_ok), "detail": by_key["htf"]["detail"]},
             {"label": "Not sideways / not in a range", "pass": not sideways, "detail": regime_note},
-            {"label": f"Momentum not overextended (RSI < {rsi_hi} / > {rsi_lo})", "pass": rsi is None or (rsi < rsi_hi if side == "CE" else rsi > rsi_lo),
-             "detail": (f"RSI {rsi:.1f}" if rsi is not None else "n/a") + (" · wider limit because the trend is confirmed" if (relax and trend_agree and (rsi_lo, rsi_hi) != (30, 70)) else "")},
+            {"label": "Momentum not overextended (" + ("RSI < %g for CE" % band_hi if side == "CE" else "RSI > %g for PE" % band_lo) + ")",
+             "pass": rsi is None or (rsi < band_hi + 1e-9 if side == "CE" else rsi > band_lo - 1e-9),
+             "detail": (f"RSI {rsi:.1f}" if rsi is not None else "n/a") + (" · stretched — most of the move is already done" if rsi is not None and (rsi >= band_hi if side == "CE" else rsi <= band_lo) else "")},
         ]
-        mom = RSI_MOMENTUM
-        if mom and rsi is not None:
-            ext = rsi if side == "PE" else 100 - rsi
-            gates.append({"label": f"Momentum present (RSI {'≤ %g' % mom if side == 'PE' else '≥ %g' % (100 - mom)})", "pass": ext < mom,
-                          "detail": f"RSI {rsi:.1f} — entries with weak momentum (RSI still near 50) lost 5 of 5 in the replay"})
+        if rsi is not None:
+            if side == "CE":
+                floor, floor_ok = band_lo, rsi >= band_lo
+            else:
+                floor, floor_ok = band_hi, rsi <= band_hi
+            if (side == "CE" and band_lo <= 0) or (side == "PE" and band_hi >= 100):
+                floor_ok = True       # RSI_MOMENTUM=0 switches the momentum floor off
+            gates.append({"label": f"Momentum present (RSI {'≥ %g' % floor if side == 'CE' else '≤ %g' % floor} for {side})", "pass": floor_ok,
+                          "detail": f"RSI {rsi:.1f} — CE needs RSI ≥ {band_lo:g}, PE needs RSI ≤ {band_hi:g} (entries with RSI still near 50 lost 5 of 5 in the replay)" + (" · wider scalp limit (trend confirmed)" if rsi_wide and (band_lo, band_hi) != (strict_lo, strict_hi) else "")})
+            if RSI_SLOPE and rsi_prev is not None:
+                slope = rsi - rsi_prev
+                gates.append({"label": f"RSI direction supports {side} ({'rising' if side == 'CE' else 'falling'} vs the previous bar)",
+                              "pass": slope >= 0 if side == "CE" else slope <= 0,
+                              "detail": f"RSI {rsi_prev:.1f} → {rsi:.1f} ({slope:+.1f})"})
         if side == "CE" and rules.get("ce_needs_structure"):
             gates.append({"label": "CE needs price-structure uptrend (not indicators alone)", "pass": trend_dir == 1,
                           "detail": regime_note if trend_dir == 1 else "No higher-high / EMA / range-break proof of an uptrend yet — CE entries on lagging indicators alone won 2 of 9 in the replay"})
@@ -591,7 +632,8 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "trend_evidence": ds["evidence"], "candle_confirmation": candle_confirmation(cs, side) if side else {"pattern": "NO_DIRECTIONAL_BIAS", "confirmed": False, "detail": "No CE/PE bias to confirm."},
         "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
                   "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"], "broke_out": ds["broke_out"]}, "checks": checks, "gates": gates,
-        "rsi": round(rsi, 2) if rsi is not None else None,
+        "rsi": round(rsi, 2) if rsi is not None else None, "rsi_prev": round(rsi_prev, 2) if rsi_prev is not None else None,
+        "rsi_band": {"CE": list(rsi_band("CE", rules["relax_lagging"])), "PE": list(rsi_band("PE", rules["relax_lagging"]))},
         "ema9": round(e9[-1], 2), "ema21": round(e21[-1], 2),
         "vwap_approx": round(vwap, 2), "vwap_source": vwap_source + (f" ({volume_source})" if volume_source and vwap_source == "VOLUME_VWAP" else ""),
         "volume_source": volume_source,

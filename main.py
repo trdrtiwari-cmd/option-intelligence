@@ -18,6 +18,7 @@ import dashboard_data as dd
 import diagnostics as dgn
 import signal_fusion as sf
 import signal_exits as sx
+import notifier
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_TITLE = "Option Intelligence"
@@ -34,7 +35,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.13.8"
+APP_VERSION = "1.14.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1181,6 +1182,8 @@ async def option_quote(instrument_key: str):
 
 
 SIGNAL_TRACKER = sf.SignalTracker()
+RECONFIRM = sf.ReconfirmTracker()      # v1.14: holds a fresh setup in PENDING until it has survived the reconfirmation window
+LAST_ANALYSIS_AT = {}                  # tracker name -> time.time() of the last analysis (the background alert poller skips fresh ones)
 FUSION_CACHE = {}
 FUSION_TTL = 8          # seconds the dashboard read is reused between terminal refreshes
 
@@ -1318,6 +1321,74 @@ async def _start_signal_exit_watcher():
         _EXIT_WATCHER_TASK = asyncio.create_task(_signal_exit_watcher())
 
 
+async def _send_signal_alert(event, sym, interval, mode, a, fused):
+    """Fire-and-forget: Telegram / ntfy / email message for a reconfirmation event. Never raises."""
+    try:
+        side = (fused.get("final") or {}).get("side") or a.get("side") or ""
+        entry, stop, target, _ = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
+        title, body, prio = notifier.format_event(event, sym, interval, mode, side, a, fused.get("reconfirm") or {},
+                                                  {"entry": entry, "stop_loss": stop, "target": target}, datetime.now(IST).strftime("%H:%M:%S IST"))
+        res = await notifier.send_alert(title, body, prio)
+        logger.info("Signal alert %s %s %s -> %s", event, sym, side, res)
+    except Exception as exc:
+        logger.warning("Signal alert failed: %s", str(exc)[:160])
+
+
+@app.get("/api/alerts/config")
+async def alerts_config():
+    return {"channels": notifier.channels(), "events": sorted(notifier.events()), "reconfirm_default_seconds": sf.RECONFIRM_SECONDS,
+            "max_adverse_atr": sf.RECONFIRM_MAX_ADVERSE_ATR, "background_poller": ALERT_BACKGROUND_ON(),
+            "note": "Render free web services block SMTP; Telegram, ntfy and the Resend email API use HTTPS and work there."}
+
+
+@app.post("/api/alerts/test")
+async def alerts_test():
+    results = await notifier.send_alert("Option Intelligence - test alert", f"Test message sent {datetime.now(IST).strftime('%H:%M:%S IST')}. If you can read this on your phone/email, signal alerts will reach you.", force=True)
+    return {"configured": notifier.channels(), "results": results,
+            "message": "No server channel is configured (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, or NTFY_TOPIC, or RESEND_API_KEY + ALERT_EMAIL_TO). The browser beep still works." if not results else "Sent."}
+
+
+def ALERT_BACKGROUND_ON():
+    return notifier.any_configured() and os.getenv("ALERT_BACKGROUND", "1").strip() != "0"
+
+
+_ALERT_POLLER_TASK = None
+
+
+async def _alert_poller():
+    """Keeps the reconfirmation clock running and sends alerts even when no browser tab is open. It only analyses a
+    symbol when no page has done so in the last 10 s, so an open terminal is not doubled up. Needs the server awake."""
+    syms = [x.strip().upper() for x in os.getenv("ALERT_SYMBOLS", "NIFTY").split(",") if x.strip().upper() in INDEX_KEYS] or ["NIFTY"]
+    try:
+        interval = int(os.getenv("ALERT_INTERVAL", "5"))
+    except ValueError:
+        interval = 5
+    mode = os.getenv("ALERT_MODE", "scalp") if os.getenv("ALERT_MODE", "scalp") in MODES else "scalp"
+    try:
+        score_min = int(os.getenv("ALERT_SCORE_MIN", "70"))
+    except ValueError:
+        score_min = 70
+    delay = max(5, int(os.getenv("ALERT_POLL_SECONDS", "10") or 10))
+    while True:
+        try:
+            if market_status()["open"] and runtime_token and ALERT_BACKGROUND_ON():
+                for sym in syms:
+                    if time.time() - LAST_ANALYSIS_AT.get(f"{sym}|{interval}|{mode}|{score_min}", 0) > 10:
+                        await analysis(symbol=sym, interval=interval, mode=mode, score_min=score_min, reconfirm=-1)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Alert poller: %s", str(exc)[:160])
+        await asyncio.sleep(delay)
+
+
+@app.on_event("startup")
+async def _start_alert_poller():
+    global _ALERT_POLLER_TASK
+    if ALERT_BACKGROUND_ON() and (_ALERT_POLLER_TASK is None or _ALERT_POLLER_TASK.done()):
+        _ALERT_POLLER_TASK = asyncio.create_task(_alert_poller())
+
+
 @app.post("/api/signals/settle")
 async def settle_signals_now(symbol: str = ""):
     """'Check exits now' button: evaluates open trades against the latest index price immediately."""
@@ -1404,7 +1475,7 @@ async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = "
     return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
 
 @app.get("/api/analysis")
-async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70):
+async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70, reconfirm: int = -1):
     """Transparent confirmation engine from index candles + a higher-timeframe trend read, fused with the Data Check
     dashboard signal and stamped with the time the signal was generated (v1.9).
     Not a guarantee and not an order instruction."""
@@ -1413,6 +1484,10 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
         raise HTTPException(status_code=400, detail="mode must be one of: " + ", ".join(MODES))
     if score_min not in (60, 65, 70):
         raise HTTPException(status_code=400, detail="score_min must be 60, 65, or 70")
+    if reconfirm == -1:
+        reconfirm = sf.RECONFIRM_SECONDS          # -1 = server default (RECONFIRM_SECONDS, 60 s); 0 = off
+    if not 0 <= reconfirm <= 600:
+        raise HTTPException(status_code=400, detail="reconfirm must be 0 (off) to 600 seconds")
     dash_task = asyncio.create_task(_dashboard_final_for(sym, interval)) if sym in INDEX_KEYS else None
     try:
         result = await candles(symbol=symbol, interval=interval, days=10)
@@ -1443,7 +1518,15 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
         replay = sf.replay_signal_start(result["candles"], interval, a, htf_raw=htf_raw, htf_interval=htf_interval,
                                         volume_source=result.get("volume_source"), mode=mode)
         track = SIGNAL_TRACKER.update(sym, sf.dash_key(dash), a.get("last_close"), time.time())
-        fused = sf.fuse(a, dash, replay, track, datetime.now(IST), market["open"], interval, mode=mode)
+        rc_name = f"{sym}|{interval}|{mode}|{score_min}"
+        LAST_ANALYSIS_AT[rc_name] = time.time()
+        live_px = _live_index_price(sym) or (_float_or_none(result["candles"][-1].get("close")) if result.get("candles") else None)
+        fused = sf.fuse(a, dash, replay, track, datetime.now(IST), market["open"], interval, mode=mode,
+                        reconfirm={"tracker": RECONFIRM, "name": rc_name, "window": reconfirm, "price": live_px, "ts": time.time()} if sym in INDEX_KEYS else None)
+        a["reconfirm"] = fused.get("reconfirm")
+        ev = (fused.get("reconfirm") or {}).get("event")
+        if ev and market["open"] and ev in notifier.events() and notifier.any_configured():
+            asyncio.create_task(_send_signal_alert(ev, sym, interval, mode, a, fused))
         a["gates"] = (a.get("gates") or []) + fused["gates"]
         a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],
                   "signal_technical": a.get("signal"), "decision_technical": a.get("decision"),

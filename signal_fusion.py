@@ -105,6 +105,63 @@ class SignalTracker:
         return dict(e)
 
 
+RECONFIRM_SECONDS = int(os.getenv("RECONFIRM_SECONDS", "60") or 0)       # default hold time; 0 turns reconfirmation off
+RECONFIRM_MAX_ADVERSE_ATR = float(os.getenv("RECONFIRM_MAX_ADVERSE_ATR", "0.5") or 0.5)   # price may not fall this far against the signal
+RECONFIRM_GRACE = float(os.getenv("RECONFIRM_GRACE_SECONDS", "20") or 20)  # a setup may vanish this long without resetting the timer
+RECONFIRM_MIN_POLLS = 2
+
+
+class ReconfirmTracker:
+    """Second look at a freshly generated setup (v1.14). A setup that passes every gate does NOT become CONFIRMED at once:
+    it is PENDING until it has (a) kept passing every gate for `window` seconds across at least two looks and (b) price has
+    not moved more than `max_adverse_atr` ATR against the signal price. If the setup vanishes (beyond a short grace) the
+    clock resets; if price moves against it the attempt FAILS and stays failed until the setup disappears and re-forms.
+    Pure Python / in-memory, one entry per symbol|interval|mode. update() returns an `event` exactly once per transition."""
+
+    def __init__(self):
+        self.state = {}
+
+    def update(self, name, cand, side, price, atr, ts, window, max_adverse_atr=None, grace=None, min_polls=None):
+        max_adv = RECONFIRM_MAX_ADVERSE_ATR if max_adverse_atr is None else max_adverse_atr
+        grace = RECONFIRM_GRACE if grace is None else grace
+        min_polls = RECONFIRM_MIN_POLLS if min_polls is None else min_polls
+        e = self.state.get(name)
+        if window <= 0:
+            self.state.pop(name, None)
+            return {"state": "OFF", "window": 0, "event": None}
+        if not cand:
+            if e is not None:
+                e.setdefault("lost_at", ts)
+                if ts - e["lost_at"] > grace:
+                    self.state.pop(name, None)
+                    return {"state": "NONE", "window": window, "event": "LOST" if e["state"] in ("PENDING", "CONFIRMED") else None, "side": e.get("side")}
+            return {"state": "NONE", "window": window, "event": None}
+        event = None
+        if e is not None and e.get("side") != side:
+            e = None                                     # the setup flipped CE <-> PE: a brand-new attempt
+        if e is None:
+            e = self.state[name] = {"state": "PENDING", "side": side, "since": ts, "price0": price, "worst": 0.0, "polls": 0, "last_price": price}
+            event = "STARTED"
+        e.pop("lost_at", None)
+        e["polls"] += 1
+        e["last_price"] = price
+        want = 1 if side == "CE" else -1
+        adverse = ((e["price0"] - price) * want / atr) if (atr and price is not None and e["price0"] is not None) else 0.0
+        e["worst"] = max(e["worst"], adverse)
+        elapsed = ts - e["since"]
+        if e["state"] == "PENDING":
+            if e["worst"] > max_adv:
+                e["state"], e["failed_at"] = "FAILED", ts
+                e["reason"] = f"price moved {e['worst']:.2f} ATR against the signal price within {elapsed:.0f}s (limit {max_adv:g} ATR)"
+                event = "FAILED"
+            elif elapsed >= window and e["polls"] >= min_polls:
+                e["state"], e["confirmed_at"], e["confirmed_price"] = "CONFIRMED", ts, price
+                event = "CONFIRMED"
+        return {"state": e["state"], "side": side, "window": window, "elapsed": round(elapsed, 1), "remaining": round(max(0.0, window - elapsed), 1),
+                "since": e["since"], "price0": e["price0"], "price_now": price, "worst_adverse_atr": round(e["worst"], 2), "adverse_now_atr": round(adverse, 2),
+                "limit_atr": max_adv, "polls": e["polls"], "confirmed_at": e.get("confirmed_at"), "reason": e.get("reason"), "event": event}
+
+
 def dash_key(dash):
     """Tracker key: side + whether the dashboard is aligned enough to count (CONFIRMED / BIAS)."""
     if not dash or dash.get("action") == "NO SIGNAL" or not dash.get("side"):
@@ -124,9 +181,10 @@ def dashboard_summary(dash):
                         "detail": c.get("detail", "")} for c in dash.get("contributions", [])]}
 
 
-def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard"):
+def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard", reconfirm=None):
     """Combine technical analysis `a` (indicators.analyze output) with the dashboard final signal `dash`
-    (dashboard_data.final_signal output). Returns {"gates": [...extra hard gates...], "final": {...}, "timing": {...}, "dashboard": {...}}."""
+    (dashboard_data.final_signal output). `reconfirm` = {"tracker", "name", "window", "price", "ts"} switches on the hold-and-recheck
+    step: a setup that passes every other gate is PENDING until the tracker has seen it hold for `window` seconds. Returns {"gates": [...extra hard gates...], "final": {...}, "timing": {...}, "dashboard": {...}}."""
     now_dt = now_dt.astimezone(IST)
     rules = mode_rules(mode)
     fresh_bars, expire_bars, max_chase = rules["fresh_bars"], rules["expire_bars"], rules["max_chase_atr"]
@@ -224,6 +282,21 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
                       "pass": dom_score < 90,
                       "detail": f"Technical score {dom_score}/100; supplied replay's 90–100 bucket had negative average P/L."})
 
+    rc = None
+    cand = bool(side) and tech_level == "CONFIRMED" and all(g["pass"] for g in gates)
+    if reconfirm:
+        price_now = reconfirm.get("price") if reconfirm.get("price") is not None else a.get("last_close")
+        rc = reconfirm["tracker"].update(reconfirm["name"], cand, side, price_now, a.get("atr"), reconfirm["ts"], reconfirm["window"])
+        if cand and rc["state"] in ("PENDING", "FAILED", "CONFIRMED"):
+            w = rc["window"]
+            mv = f"price {rc['adverse_now_atr']:+.2f} ATR against, worst {rc['worst_adverse_atr']:.2f} (limit {rc['limit_atr']:g})"
+            if rc["state"] == "PENDING":
+                detail = f"Holding {rc['elapsed']:.0f}s of {w}s · {rc['remaining']:.0f}s left · {mv}"
+            elif rc["state"] == "FAILED":
+                detail = f"Failed — {rc['reason']}. Wait for the setup to re-form."
+            else:
+                detail = f"Held {w}s with the setup intact · {mv}"
+            gates.append({"label": f"Reconfirmed ({w}s hold: setup persists, price holds)", "pass": rc["state"] == "CONFIRMED", "detail": detail})
     all_pass = tech_level == "CONFIRMED" and all(g["pass"] for g in gates)
     dom = max(a.get("bull_score") or 0, a.get("bear_score") or 0)
     dash_part = max(0.0, (summary["score"] or 0) * want) if d_ok and side else 0.0
@@ -239,7 +312,13 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
             reasons.append(gates[2]["detail"] if len(gates) > 2 else "Data Check agrees with the technical side.")
     if all_pass:
         level, action = "CONFIRMED", f"CONFIRMED {side} SETUP"
-        headline = f"{side} confirmed by the terminal AND the Data Check dashboard. Signal generated {timing['generated_at_text']} ({timing['age_minutes']:.0f} min ago) — inside the entry window."
+        headline = f"{side} confirmed by the terminal AND the Data Check dashboard" + (f", and it held for {rc['window']}s." if rc and rc.get("state") == "CONFIRMED" else ".") + f" Signal generated {timing['generated_at_text']} ({timing['age_minutes']:.0f} min ago) — inside the entry window."
+    elif cand and rc and rc["state"] == "PENDING":
+        level, action = "PENDING", f"RECONFIRMING {side} — {rc['remaining']:.0f}s left"
+        headline = f"{side} setup detected at {timing['generated_at_text'] or 'now'}. Not an entry yet: it must hold for {rc['window']}s ({rc['remaining']:.0f}s left) with price not moving {rc['limit_atr']:g} ATR against it."
+    elif cand and rc and rc["state"] == "FAILED":
+        level, action = "WATCH", f"WATCH {side} — reconfirmation failed"
+        headline = f"The {side} setup did not hold: {rc['reason']}. No entry; wait for a fresh setup."
     elif tech_level == "CONFIRMED" and opposes:
         level, action = "CONFLICT", f"CONFLICT — terminal {side} vs dashboard {d_side}"
         headline = "Terminal and dashboard disagree on direction. Stand aside until they point the same way."
@@ -259,7 +338,7 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
         headline = "No technical setup." + (f" Dashboard leans {d_side} ({d_level}) but a dashboard read alone never creates an entry." if d_ok and d_side and d_level in AGREE_LEVELS else "")
     final = {"level": level, "action": action, "side": side, "confluence_score": confluence, "headline": headline,
              "reasons": reasons, "blockers": blockers, "terminal_signal": sig, "dashboard_level": d_level, "dashboard_side": d_side}
-    return {"gates": gates, "final": final, "timing": timing, "dashboard": summary}
+    return {"gates": gates, "final": final, "timing": timing, "dashboard": summary, "reconfirm": rc}
 
 
 def stamp_dashboard_times(tracker, sym, blocks, final, now_ts):
