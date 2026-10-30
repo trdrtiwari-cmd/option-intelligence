@@ -34,7 +34,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.13.7"
+APP_VERSION = "1.13.8"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -165,6 +165,27 @@ def contract_expiry(row):
 
 
 # ---------------------------------------------------------------- candles
+def _apply_ltp(candles, ltp, interval):
+    """Fold one price into the candle list: stretch the forming bar, or open the new bar(s) the REST candle endpoint has not published yet."""
+    try:
+        last = candles[-1]
+        lt = parse_time(last["time"]).timestamp()
+    except Exception:
+        return candles
+    now = time.time()
+    step = interval * 60
+    if parse_time(last["time"]).astimezone(IST).date() != ist_now().date():
+        return candles
+    k = int((now - lt) // step)
+    out = list(candles)
+    if k <= 0:
+        out[-1] = {**last, "high": max(last["high"], ltp), "low": min(last["low"], ltp), "close": ltp}
+    else:
+        bar_start = datetime.fromtimestamp(lt + k * step, IST)
+        out.append({"time": bar_start.isoformat(), "open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": 0, "oi": None})
+    return out
+
+
 def overlay_live_tick(candles, key, interval):
     """Fold the latest fresh WebSocket tick into the candle list so a REST refresh never shows older data than the
     stream already has. Upstox's intraday-candle endpoint lags the market by tens of seconds; the tick does not."""
@@ -175,24 +196,31 @@ def overlay_live_tick(candles, key, interval):
         view = _tick_view(key, now)
     if not view or not view.get("fresh") or not view.get("ltp") or not market_status()["open"]:
         return candles
-    ltp = float(view["ltp"])
+    return _apply_ltp(candles, float(view["ltp"]), interval)
+
+
+async def overlay_index_price(candles, key, sym, interval):
+    """Index candles: prefer the WebSocket tick; when the stream is idle fall back to the REST quote (1.5 s cache) so the
+    forming bar and the analysis never trail the market by the candle endpoint's lag. Returns (candles, source, bars_behind)."""
+    if not candles or not interval or not market_status()["open"]:
+        return candles, "CLOSED", 0
+    behind = 0
     try:
-        last = candles[-1]
-        lt = parse_time(last["time"]).timestamp()
+        lt = parse_time(candles[-1]["time"]).timestamp()
+        behind = max(0, int((time.time() - lt) // (interval * 60)))
     except Exception:
-        return candles
-    step = interval * 60
-    now_ist = ist_now()
-    if parse_time(last["time"]).astimezone(IST).date() != now_ist.date():
-        return candles
-    k = int((now - lt) // step)
-    out = list(candles)
-    if k <= 0:
-        out[-1] = {**last, "high": max(last["high"], ltp), "low": min(last["low"], ltp), "close": ltp}
-    else:
-        bar_start = datetime.fromtimestamp(lt + k * step, IST)
-        out.append({"time": bar_start.isoformat(), "open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": 0, "oi": None})
-    return out
+        pass
+    with STREAM_LOCK:
+        view = _tick_view(key, time.time())
+    if view and view.get("fresh") and view.get("ltp"):
+        return _apply_ltp(candles, float(view["ltp"]), interval), "WEBSOCKET", behind
+    try:
+        q = await index_ltp(symbol=sym)
+        ltp = float(q.get("ltp"))
+        return _apply_ltp(candles, ltp, interval), "REST_QUOTE", behind
+    except Exception as exc:
+        logger.info("REST price overlay skipped: %s", exc)
+        return candles, "NONE", behind
 
 
 def _rows_to_candles(rows):
@@ -844,6 +872,7 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
             _pin_keys(symbol.upper(), [key])
         data = overlay_live_tick(data, key, interval)
     volume_source = None
+    feed = None
     if not instrument_key.strip() and symbol.upper() in INDEX_KEYS:
         # Indices carry no volume: borrow the front-month future's volume so VWAP / volume checks work.
         try:
@@ -858,7 +887,10 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
             logger.info("Futures candles unavailable: %s", str(exc.detail)[:160])
         except Exception as exc:
             logger.info("Futures volume merge skipped: %s", exc)
-    return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": data, "volume_source": volume_source}
+        # Last step, after the volume merge: fold in the freshest price (WebSocket tick, else REST quote).
+        data, src, behind = await overlay_index_price(data, key, symbol.upper(), interval)
+        feed = {"price_source": src, "bars_behind": behind, "server_time": utc_now_iso()}
+    return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": data, "volume_source": volume_source, "feed": feed}
 
 
 @app.get("/api/pin-option")

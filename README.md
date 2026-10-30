@@ -1,6 +1,6 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
-## v1.13.7 — signal-log auto-exit, net P/L, live-price label fix
+## v1.13.8 — signal-log auto-exit, net P/L, live-price label fix
 - **Why the log never closed a trade:** the logger read `entry` / `stop_loss` / `target` from the ATR plan, but the plan returns `entry_index` / `sl_index` / `targets[]`, so every row was saved with a blank stop and target. Exits were also only checked when a *new* confirmed signal appeared. Both fixed.
 - **Auto-exit** (`signal_exits.py`): every logged trade closes at the first of STOP (filled at the observed price), TARGET (filled at the target level), or SQUAREOFF at 15:20 IST. Stop wins if both are crossed in one observation. Trades from an earlier session that were never settled become EXPIRED with no invented P/L. A background watcher checks the live index price every 3 s while the market is open; every analysis refresh and the **Check exits now** button also settle trades.
 - **Net P/L** = gross index points − `SIGNAL_LOG_COST_POINTS` (default 4). The page shows win rate, exit counts, closed net P/L, open (mark-to-market) P/L and an optional rupee estimate (points × option delta × quantity). Excel/CSV exports include exit time, reason, peak/worst points; the Daily Summary sheet has per-day P/L.
