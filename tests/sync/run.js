@@ -11,14 +11,14 @@ function device(user, store) {
   class Storage { getItem(k) { return mem.has(k) ? mem.get(k) : null; } setItem(k, v) { mem.set(k, String(v)); } removeItem(k) { mem.delete(k); } }
   const localStorage = new Storage();
   const loaded = [], redirects = [], elements = [];
-  const doc = { currentScript: { dataset: { next: "/static/app.js" } }, readyState: "complete", body: { appendChild: s => loaded.push(s.src) },
+  const doc = { currentScript: { dataset: { next: "/static/app.js" } }, readyState: "complete", body: { appendChild: s => { loaded.push(s.src); if (s.onload) setTimeout(s.onload, 0); } },
     querySelector: () => null, querySelectorAll: () => [], addEventListener() { }, createElement: () => ({ style: {}, classList: { add() { } }, append() { }, appendChild() { } }), visibilityState: "visible" };
   const fetchWrap = (url, init = {}) => fetch(BASE + url, { ...init, headers: { ...(init.headers || {}), "X-Test-User": user || "" } });
   const win = { fetch: fetchWrap, addEventListener() { }, location: { pathname: "/", search: "", replace: u => redirects.push(u) } };
   const ctx = vm.createContext({ window: win, document: doc, localStorage, Storage, location: win.location, fetch: fetchWrap, setTimeout, clearTimeout, setInterval: () => 0, AbortController, JSON, Object, Map, Date, Math, Promise, Array, String, encodeURIComponent, console, Error, confirm: () => true });
   win.Storage = Storage; win.localStorage = localStorage;
   vm.runInContext(SRC, ctx);
-  return { mem, loaded, redirects, ls: localStorage, sync: win.OISync, ready: async () => { for (let i = 0; i < 100 && !loaded.length && !redirects.length; i++) await sleep(20); } };
+  return { mem, loaded, redirects, ls: localStorage, sync: win.OISync, ready: async () => { for (let i = 0; i < 100 && !loaded.includes("/static/app.js") && !redirects.length; i++) await sleep(20); } };
 }
 const trade = (id, extra) => ({ id, status: "OPEN", qty: 75, sl: 100, opened_at: "2026-10-23T09:" + id.padStart(2, "0"), ...extra });
 const get = async (user) => (await (await fetch(BASE + "/api/userdata", { headers: { "X-Test-User": user } })).json()).data;
@@ -30,7 +30,7 @@ const get = async (user) => (await (await fetch(BASE + "/api/userdata", { header
 
     // 1. first sign-in on a browser that already has local (pre-account) data: it is uploaded, then the page script loads
     let a = device("alice", { [T]: JSON.stringify([trade("1")]), [CAP]: "150000", [MODE]: "scalp" });
-    await a.ready(); assert.deepStrictEqual(a.loaded, ["/static/app.js"]);
+    await a.ready(); assert.deepStrictEqual(a.loaded, ["/static/prefs.js", "/static/app.js"]);
     await sleep(900);
     let d = await get("alice");
     assert.strictEqual(d["paper-trades"].value.length, 1); assert.strictEqual(d["paper-capital"].value, 150000); assert.strictEqual(d["pref-signal-mode"].value, "scalp");
@@ -100,6 +100,31 @@ const get = async (user) => (await (await fetch(BASE + "/api/userdata", { header
     a.ls.removeItem(MODE); await sleep(2200);
     assert.ok(!("pref-signal-mode" in await get("alice")));
     console.log("ok 9 deletions sync too");
+
+    // 10. v1.17 settings autosave: per-field merge, newest write of each field wins, other-page keys sync too
+    const SET = "oi-settings-v1";
+    let p1 = device("bob"); await p1.ready();
+    p1.ls.setItem(SET, JSON.stringify({ "terminal.symbol": ["BANKNIFTY", 1000], "terminal.interval": ["15", 1000] }));
+    p1.ls.setItem("oi-score-min", "65");
+    await sleep(2200);
+    let sv = await get("bob");
+    assert.strictEqual(sv.settings.value["terminal.symbol"][0], "BANKNIFTY"); assert.strictEqual(sv["pref-score-min"].value, 65);
+    // second device (own copy) changes a DIFFERENT field and an older write of the same field
+    let p2 = device("bob"); await p2.ready();
+    assert.strictEqual(JSON.parse(p2.ls.getItem(SET))["terminal.interval"][0], "15", "new device receives saved settings before the app starts");
+    assert.strictEqual(p2.ls.getItem("oi-score-min"), "65");
+    p2.ls.setItem(SET, JSON.stringify({ ...JSON.parse(p2.ls.getItem(SET)), "terminal.showEma": [false, 3000], "terminal.symbol": ["NIFTY", 500] }));
+    await sleep(2200);
+    sv = await get("bob");
+    assert.strictEqual(sv.settings.value["terminal.showEma"][0], false);
+    assert.strictEqual(sv.settings.value["terminal.interval"][0], "15");
+    p1.ls.setItem(SET, JSON.stringify({ ...JSON.parse(p1.ls.getItem(SET)), "terminal.chartView": ["option", 4000] }));   // p1 is stale: conflict -> per-field merge
+    await sleep(3500);
+    sv = await get("bob");
+    const v = sv.settings.value;
+    assert.strictEqual(v["terminal.symbol"][0], "BANKNIFTY", "older write (ts 500) must not beat the newer one (ts 1000)");
+    assert.strictEqual(v["terminal.showEma"][0], false); assert.strictEqual(v["terminal.chartView"][0], "option");
+    console.log("ok 10 settings merge field by field across devices");
     console.log("all sync tests passed");
   } catch (e) { console.error(e); process.exitCode = 1; }
   finally { srv.kill(); }
