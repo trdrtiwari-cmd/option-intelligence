@@ -1,5 +1,13 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.17.0 — mobile app + every setting saved to your account
+- **Mobile app (installable):** the site is now a PWA - open it on a phone and use *More -> Install app* (Android) or Share -> *Add to Home Screen* (iPhone). Phone layout with a bottom tab bar (Terminal / Data / Signals / Tests / More), larger touch targets, collapsible signal controls, offline screen, "keep screen awake" switch, safe-area support. Static files are cached; prices, signals and accounts are never cached.
+- **Native Android/iOS wrapper:** `mobile/` (Capacitor) loads your hosted site, so every deploy updates the app. A GitHub Action (`.github/workflows/android-apk.yml`) builds an installable APK for you - see `mobile/README.md`.
+- **Automatic settings save:** symbol, timeframe, chart overlays, S/R timeframe, option filters, paper-trade risk-form choices, Data Check and Diagnostics controls, signal-log filters, minimum score, reconfirm hold, alert sound, keep-awake and more are saved to your account a moment after you change them and restored on every device. Per-field merge: the newest change to each setting wins, so two devices changing different settings never overwrite each other. A change made on another device is applied within about a minute. *Account -> Saved settings* lists them and can reset them.
+- The Signal Log and Account pages now use account sync too (they previously kept their inputs only in the browser).
+- New files: `static/prefs.js`, `static/mobile.js`, `static/mobile.css`, `static/sw.js`, `static/manifest.webmanifest`, `static/offline.html`, `static/icons/`. Tests: `python tests/test_mobile.py`, `node tests/sync/run.js`.
+- Not included: push notifications while the app is closed (use the existing Telegram / ntfy / email alerts), and Play Store / App Store publishing.
+
 ## v1.14.0 — signal-log auto-exit, net P/L, live-price label fix
 - **Why the log never closed a trade:** the logger read `entry` / `stop_loss` / `target` from the ATR plan, but the plan returns `entry_index` / `sl_index` / `targets[]`, so every row was saved with a blank stop and target. Exits were also only checked when a *new* confirmed signal appeared. Both fixed.
 - **Auto-exit** (`signal_exits.py`): every logged trade closes at the first of STOP (filled at the observed price), TARGET (filled at the target level), or SQUAREOFF at 15:20 IST. Stop wins if both are crossed in one observation. Trades from an earlier session that were never settled become EXPIRED with no invented P/L. A background watcher checks the live index price every 3 s while the market is open; every analysis refresh and the **Check exits now** button also settle trades.

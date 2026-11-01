@@ -6,3 +6,10 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# mobile wrapper build output
+mobile/node_modules/
+mobile/android/
+mobile/ios/
+mobile/www/*
+!mobile/www/index.html

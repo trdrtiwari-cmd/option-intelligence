@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -35,7 +35,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.16.0"
+APP_VERSION = "1.17.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -549,6 +549,20 @@ def _tick_view(key, now):
 
 
 # ---------------------------------------------------------------- routes
+@app.get("/sw.js")
+async def service_worker():
+    """Service worker must be served from the site root so it can control every page. The version is stamped in so each
+    release gets a fresh cache."""
+    body = (BASE_DIR / "static" / "sw.js").read_text(encoding="utf-8").replace("__VERSION__", APP_VERSION)
+    return Response(body, media_type="application/javascript",
+                    headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse(BASE_DIR / "static" / "favicon.ico", media_type="image/x-icon", headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/")
 async def home():
     return FileResponse(BASE_DIR / "static" / "index.html", headers={"Cache-Control": "no-cache"})

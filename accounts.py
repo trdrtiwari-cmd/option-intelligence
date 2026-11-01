@@ -482,7 +482,11 @@ def delete_data(user_id, key):
 
 # ---------------------------------------------------------------- ASGI middleware
 PUBLIC_PATHS = {"/health", "/login", "/api/auth/login", "/api/auth/signup", "/api/auth/config", "/api/tradingview/webhook",
-                "/static/login.js", "/static/style.css", "/favicon.ico"}
+                "/static/login.js", "/static/style.css", "/favicon.ico",
+                # mobile app shell (v1.17): needed before sign-in so the login page can install / cache the app
+                "/sw.js", "/static/manifest.webmanifest", "/static/offline.html", "/static/mobile.css", "/static/mobile.js",
+                "/static/icons/icon-192.png", "/static/icons/icon-512.png", "/static/icons/icon-maskable-512.png",
+                "/static/icons/apple-touch-icon.png", "/static/icons/favicon-32.png"}
 
 
 def _cookie(headers):
