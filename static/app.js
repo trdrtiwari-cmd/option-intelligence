@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.17.2";
+const FRONTEND_VERSION="1.17.3";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -1157,11 +1157,15 @@ $("paperClearBtn").addEventListener("click",()=>{
  });
 $("paperInitialCapital").value=String(paperGetCapital());
 guardInit();paperUpdateMode();paperRender();setInterval(()=>{if(document.visibilityState==="visible")paperRefreshQuotes()},4000);setInterval(()=>{if(document.visibilityState==="visible")renderGuardStatus()},3000);
-// Restore the last selected option contract (saved to the account) so the saved "Selected option premium" chart view has something to show.
-(function(){try{
+// Restore the selected option contract saved to the account: at startup, and whenever another device changes it, so the
+// "Selected option premium" chart view shows the same contract everywhere.
+function restoreSavedContract(){try{
   const c=window.OIPrefs&&window.OIPrefs.get("terminal.contract",null);
   if(!c||!c.instrument_key||c.symbol!==getSymbol())return;
   if(/^\d{4}-\d{2}-\d{2}$/.test(String(c.expiry))&&c.expiry<new Date().toISOString().slice(0,10))return;   // expired contract: do not revive
+  if(paperSelected&&paperSelected.instrument_key===c.instrument_key)return;                               // already selected
   selectPaperContract(c.type,c.strike,c.instrument_key,null,c.expiry,null);
   if(c.lot&&paperSelected){paperSelected.lot=c.lot;$("paperQty").value=String(c.lot);$("paperQty").step=String(c.lot);$("paperLotHint").textContent=` · 1 lot = ${c.lot}`}
-}catch(e){console.warn("contract restore failed",e)}})();
+}catch(e){console.warn("contract restore failed",e)}}
+restoreSavedContract();
+window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
