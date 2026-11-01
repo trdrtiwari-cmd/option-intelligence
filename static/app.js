@@ -1,4 +1,5 @@
-const FRONTEND_VERSION="1.17.0";
+const FRONTEND_VERSION="1.17.1";
+let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
@@ -807,7 +808,7 @@ document.addEventListener("visibilitychange",()=>{if(document.visibilityState===
 const PAPER_STORAGE_KEY = "option-intelligence-paper-trades-v1";
 const PAPER_CAPITAL_KEY = "option-intelligence-paper-capital-v1";
 const PAPER_DEFAULT_CAPITAL = 100000;
-let paperSelected = null;
+
 let paperAtr = null;
 let paperRefreshBusy = false;
 function paperRead(){try{return JSON.parse(localStorage.getItem(PAPER_STORAGE_KEY)||"[]")}catch{return []}}
@@ -820,6 +821,7 @@ function paperSelectedLabel(){return paperSelected?`${paperSelected.symbol} ${pa
 function selectPaperContract(type,strike,instrumentKey,ltp,expiry,button){
   if(!instrumentKey){toast("This option has no instrument key in the chain response.");return}
   paperSelected={symbol:getSymbol(),type,strike:Number(strike),instrument_key:instrumentKey,expiry:String(expiry||$("expiry").value),ltp:Number(ltp)||null,quoteStatus:"CHAIN_SNAPSHOT",lot:chainLotSize||null};
+  try{const c=paperSelected;window.OIPrefs&&window.OIPrefs.set("terminal.contract",{symbol:c.symbol,type:c.type,strike:c.strike,instrument_key:c.instrument_key,expiry:c.expiry,lot:c.lot})}catch{}   // remembered so "Selected option premium" survives a reload
   {const lot=paperSelected.lot||1;$("paperQty").value=String(lot);$("paperQty").step=String(lot);$("paperLotHint").textContent=paperSelected.lot?` · 1 lot = ${paperSelected.lot}`:""}
   paperAtr=null;$("paperAtrValue").textContent="UNAVAILABLE";
   api(`/api/pin-option?symbol=${encodeURIComponent(paperSelected.symbol)}&instrument_key=${encodeURIComponent(instrumentKey)}`).catch(()=>{}); // put it on the live WebSocket now
@@ -1155,3 +1157,11 @@ $("paperClearBtn").addEventListener("click",()=>{
  });
 $("paperInitialCapital").value=String(paperGetCapital());
 guardInit();paperUpdateMode();paperRender();setInterval(()=>{if(document.visibilityState==="visible")paperRefreshQuotes()},4000);setInterval(()=>{if(document.visibilityState==="visible")renderGuardStatus()},3000);
+// Restore the last selected option contract (saved to the account) so the saved "Selected option premium" chart view has something to show.
+(function(){try{
+  const c=window.OIPrefs&&window.OIPrefs.get("terminal.contract",null);
+  if(!c||!c.instrument_key||c.symbol!==getSymbol())return;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(String(c.expiry))&&c.expiry<new Date().toISOString().slice(0,10))return;   // expired contract: do not revive
+  selectPaperContract(c.type,c.strike,c.instrument_key,null,c.expiry,null);
+  if(c.lot&&paperSelected){paperSelected.lot=c.lot;$("paperQty").value=String(c.lot);$("paperQty").step=String(c.lot);$("paperLotHint").textContent=` · 1 lot = ${c.lot}`}
+}catch(e){console.warn("contract restore failed",e)}})();
