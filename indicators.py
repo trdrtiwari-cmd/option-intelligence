@@ -86,6 +86,9 @@ def pullback_resume(cs, e9, atr, side, lookback=6, tol=0.25):
 #  * CE needs price-structure proof: the 9 CE entries that rested on lagging indicators alone (generic BULLISH label) won 2 of 9.
 import os as _os
 CE_NEEDS_STRUCTURE = _os.getenv("CE_NEEDS_STRUCTURE", "1") != "0"
+# v1.15: 12 scalp CE entries taken inside a fresh BREAKOUT phase won 33% and lost 88 pts (every one of the 12 CE-breakout trades;
+# CE entries in an established TREND made +62). A fresh breakout is the most likely false move, so CE waits for the retest.
+CE_BLOCK_BREAKOUT = _os.getenv("CE_BLOCK_BREAKOUT", "1") != "0"
 RSI_MOMENTUM = float(_os.getenv("RSI_MOMENTUM", "40"))
 
 
@@ -121,7 +124,7 @@ MODES = {
                  "fresh_bars": 3, "expire_bars": 12, "max_chase_atr": 1.0, "rsi_momentum": 40, "ce_needs_structure": CE_NEEDS_STRUCTURE},
     "scalp": {"label": "Scalp (20–40 pt moves)", "rsi_lo": 30, "rsi_hi": 70, "rsi_score_lo": 20, "rsi_score_hi": 80, "chase_atr": 3.5,
               "room_atr": 0.5, "relax_lagging": True, "micro_trigger": True,
-              "fresh_bars": 2, "expire_bars": 6, "max_chase_atr": 0.6, "rsi_momentum": 40, "ce_needs_structure": CE_NEEDS_STRUCTURE},
+              "fresh_bars": 2, "expire_bars": 6, "max_chase_atr": 0.6, "rsi_momentum": 40, "ce_needs_structure": CE_NEEDS_STRUCTURE, "ce_block_breakout": CE_BLOCK_BREAKOUT},
 }
 
 
@@ -597,6 +600,9 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         if side == "CE" and rules.get("ce_needs_structure"):
             gates.append({"label": "CE needs price-structure uptrend (not indicators alone)", "pass": trend_dir == 1,
                           "detail": regime_note if trend_dir == 1 else "No higher-high / EMA / range-break proof of an uptrend yet — CE entries on lagging indicators alone won 2 of 9 in the replay"})
+        if side == "CE" and rules.get("ce_block_breakout"):
+            gates.append({"label": "CE not inside a fresh breakout (wait for the retest)", "pass": regime_phase != "BREAKOUT",
+                          "detail": "Fresh breakout bar — false breakouts are common; the replay's 12 CE entries here won 33% and lost 88 pts" if regime_phase == "BREAKOUT" else "Not a fresh breakout"})
         candle_check = candle_confirmation(cs, side)
         if rules["micro_trigger"]:
             gates.append({"label": "Closed-candle price-action confirmation", "pass": candle_check["confirmed"], "detail": candle_check["detail"]})

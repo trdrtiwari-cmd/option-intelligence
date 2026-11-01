@@ -306,7 +306,7 @@ What the data showed, and what changed:
 
 **Fixes.** `GET /api/pin-option` (called on selection) and a `PINNED_KEYS` set keep the selected contract, the dashboard's ATM ±2 strikes and its graph legs subscribed (they survive the near-ATM re-subscription). Every WebSocket tick of the selected option now moves the last premium candle in the browser (`● LIVE option tick`). `/api/candles` for an option and the dashboard premium graph fold the newest fresh tick into the REST candles (`overlay_live_tick`), so a REST refresh can never show older data than the stream. The dashboard's ATM strike uses the live index tick instead of the 4 s old chain spot, and breadth/sector quotes are cached 2 s (was 5 s). Breadth and sectors are still REST (~2 s) — they are 60+ instruments and I could not test a bulk "ltpc" subscription against your Upstox plan limits.
 
-**ATR stop-loss and targets on the dashboard.** The final-signal panel now has an *ATR stop-loss & targets* block: Wilder ATR(14) of closed 5-minute index candles; stop = 1.0 ATR (never < 10 pts); T1 = 1.5 ATR (sell half, stop to cost), T2 = 3 ATR (main), T3 = 4.5 ATR (runner, trail 1 ATR). It also shows approximate option-premium levels (delta ≈ 0.5, stop capped at 25 % of premium). Settings: `THRESHOLDS["atr_*"]` in `dashboard_data.py`. `/api/analysis` returns `atr_levels` too. Diagnostics now runs an **ATR exit grid** (target 1.5–5 ATR × stop 0.5–1.5 ATR) and prints the best one with the median ATR — re-run it and set the multiples from that.
+**ATR stop-loss and targets on the dashboard.** The final-signal panel now has an *ATR stop-loss & targets* block: Wilder ATR(14) of closed 5-minute index candles; stop = 1.25 ATR since v1.15 (was 1.0; never < 10 pts); T1 = 1.5 ATR (sell half, stop to cost), T2 = 3 ATR (main), T3 = 4.5 ATR (runner, trail 1 ATR). It also shows approximate option-premium levels (delta ≈ 0.5, stop capped at 25 % of premium). Settings: `THRESHOLDS["atr_*"]` in `dashboard_data.py`. `/api/analysis` returns `atr_levels` too. Diagnostics now runs an **ATR exit grid** (target 1.5–5 ATR × stop 0.5–1.5 ATR) and prints the best one with the median ATR — re-run it and set the multiples from that.
 
 **Corrections from your two diagnostics files (NIFTY 5m, 2026-10-12 → 10-26).**
 | Finding | Evidence | Change |
@@ -341,3 +341,17 @@ when a reconfirmation fails), a browser notification and a flashing tab title. B
 page once; press **Test alert**. On the server: Telegram, ntfy, or email through the Resend HTTPS API (see `.env.example`). Plain SMTP is
 included but Render's free plan blocks SMTP ports (25/465/587), so it only works locally or on a paid instance. Server alerts do not know
 the page-only S/R-room and option-volume gates, so check the page before entering.
+
+## v1.15 - corrections from the Oct 15-30 diagnostics (scalp 61 signals, standard 27)
+
+What the replay said, and what changed. All of it rests on 11 trading days, so treat it as a hypothesis to confirm on paper trades.
+
+| Finding | Change |
+|---|---|
+| Exit matters more than entry: 30/20 fixed = +1.0 (scalp) / +1.9 (standard) pts per trade, 3 ATR target / 1.5 ATR stop = +4.5 / +4.1; the edge disappears at 6 pts cost with a 30-pt target | Main target stays 3 ATR (T2); stop 1.0 -> **1.25 ATR** (the earlier 21-day replay favoured 1.0, this one favours 1.5; 1.25 splits the difference). Management notes now say: hold to T2, no early break-even or trailing (all such variants averaged -0.5 to +1.3) |
+| One day (Oct 27: 9 signals, 1 winner, -166 pts) cost 2.6x the whole period's profit; entries right after a loss won 44% vs 52% after a win | New gate **daily loss limit**: no new confirmed entries after 2 stop-outs in a day (`MAX_DAILY_LOSSES`, 0 = off). Scalp 11-day total +63 -> +140 pts; standard unchanged (+52 -> +50) |
+| Every 09:15-09:45 entry lost (4 of 4), 09:45-10:30 averaged +9 pts | Entry window now opens at **09:45** (was 09:30) |
+| CE entries inside a fresh BREAKOUT phase: 12 trades, 33% wins, -88 pts; CE in an established TREND +62 | New scalp gate **CE not inside a fresh breakout** (`CE_BLOCK_BREAKOUT=0` removes it). Lowest-confidence change |
+| Score 90-100: 22% wins, -12.9 pts per trade (already blocked by the live score < 90 gate) | Unchanged; the diagnostics replay simply does not apply live-only gates (time window, score cap, dashboard) |
+
+Not changed on purpose: the "Not sideways" gate (the 10 setups it alone blocked averaged +11 pts, but n = 10, SE 7.6) and the 13:30 cutoff (scalp 13:30-14:30 lost 109 pts but 14:30-15:30 won 82; standard disagreed). Re-run the diagnostics with target 60 / stop 20 to see the random-entry baseline for that exit before trusting any fixed-point exit.

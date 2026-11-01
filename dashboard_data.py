@@ -21,11 +21,15 @@ THRESHOLDS = {
     "premium_gap": 3.0,    # CE% minus PE% gap needed for a directional call
     "zone_up": 3,          # zone score >= this -> UP
     "zone_down": -3,       # zone score <= this -> DOWN
-    # ATR trade levels (index points). Calibrated on the v1.11.2 replay: wide targets with a ~1 ATR stop beat small
-    # fixed targets in both modes (target 60 / stop 15-20 ~ 3 ATR / 1 ATR when 5m ATR is ~20 pts).
+    # ATR trade levels (index points). v1.15 re-check on the 11-day replay (Oct 15-30, 61 scalp / 27 standard signals):
+    #  * target: 3 ATR is the robust choice (1.5 ATR lost money in every replay; 4-5 ATR helped scalp but not standard).
+    #  * stop: the replays DISAGREE. The earlier 21-day replay liked 1.0 ATR; this one has 1.0 as the worst column at every target
+    #    >= 3 ATR and 1.5 as the best (3 ATR / 1.5 ATR = +4.5 scalp, +4.1 standard vs +3.4 / +3.1 at 1.0), because the median adverse
+    #    move after a signal is ~31-35 pts (>1 ATR). 1.25 splits the difference until a longer replay settles it.
+    #  * early break-even / trailing / scale-out variants were all worse than holding to the target (see management notes).
     "atr_period": 14,
-    "atr_sl": 1.0,         # stop-loss distance in ATR
-    "atr_t1": 1.5,         # target 1: sell half / move stop to cost
+    "atr_sl": 1.25,        # stop-loss distance in ATR (was 1.0)
+    "atr_t1": 1.5,         # target 1: partial-profit reference (the auto-exit target is T2)
     "atr_t2": 3.0,         # target 2: main target
     "atr_t3": 4.5,         # target 3: runner (trail behind it)
     "atr_min_sl_pts": 10.0,  # never place the stop closer than this (noise)
@@ -620,10 +624,10 @@ def trade_levels(final, blocks, atr=None, price=None):
     out = {"side": side, "atr": round(atr, 2), "atr_period": t["atr_period"], "entry_index": round(price, 2),
            "sl_points": round(sl_pts, 1), "sl_atr_multiple": round(sl_pts / atr, 2), "sl_index": round(price - d * sl_pts, 2),
            "targets": targets, "level": (final or {}).get("level"),
-           "management": ["Sell half at T1 and move the stop to your entry (cost).",
-                          "Hold the rest for T2; once T2 is hit trail the stop 1 ATR behind price toward T3.",
-                          "Exit if the index closes beyond the stop level — do not widen the stop.",
-                          "The replay showed winners rarely go more than ~15 pts against you, so a trade that is already ~1 ATR wrong is usually wrong."]}
+           "management": ["Main target is T2 (3 ATR). In the replay, holding the full position to T2 beat every trailing / break-even / scale-out variant tested.",
+                          "Do not move the stop to cost early: winners often dip ~30 pts first, and early trailing stops cut them off (trailing variants averaged -0.5 to +1.3 pts vs +4.5 for hold-to-T2).",
+                          "Optional: once T2 is hit, trail the stop 1 ATR behind price toward T3.",
+                          "Never widen the stop. Because the stop is 1.25 ATR, size the trade for that distance (about 20% smaller quantity than for the old 1 ATR stop), not for the old distance."]}
     # approximate option premium plan from the ATM leg of this side
     prem = (blocks or {}).get("premium") or {}
     ltp = num(prem.get("ce_ltp" if side == "CE" else "pe_ltp"))

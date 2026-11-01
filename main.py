@@ -35,7 +35,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.15.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1244,6 +1244,22 @@ def record_signal_row(symbol, interval, mode, a):
     except Exception as exc:
         logger.warning("Signal log write failed: %s", str(exc)[:160])
 
+MAX_DAILY_LOSSES = int(os.getenv("MAX_DAILY_LOSSES", "2") or 0)      # 0 turns the daily loss limit off
+
+
+def stopouts_today(symbol):
+    """How many logged paper trades of `symbol` were closed at a loss today (STOP exits, or a time exit below zero)."""
+    try:
+        today = datetime.now(IST).date().isoformat()
+        with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+            row = db.execute("SELECT COUNT(*) FROM signal_log WHERE session_date=? AND symbol=? AND trade_status IN ('STOP','SQUAREOFF') "
+                             "AND COALESCE(net_pnl_points,0) < 0", (today, symbol)).fetchone()
+        return int(row[0] or 0)
+    except Exception as exc:
+        logger.debug("stopouts_today failed: %s", str(exc)[:120])
+        return None
+
+
 def _float_or_none(value):
     try:
         return float(value) if value is not None else None
@@ -1522,7 +1538,8 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
         LAST_ANALYSIS_AT[rc_name] = time.time()
         live_px = _live_index_price(sym) or (_float_or_none(result["candles"][-1].get("close")) if result.get("candles") else None)
         fused = sf.fuse(a, dash, replay, track, datetime.now(IST), market["open"], interval, mode=mode,
-                        reconfirm={"tracker": RECONFIRM, "name": rc_name, "window": reconfirm, "price": live_px, "ts": time.time()} if sym in INDEX_KEYS else None)
+                        reconfirm={"tracker": RECONFIRM, "name": rc_name, "window": reconfirm, "price": live_px, "ts": time.time()} if sym in INDEX_KEYS else None,
+                        daily_losses=stopouts_today(sym) if MAX_DAILY_LOSSES else None, max_daily_losses=MAX_DAILY_LOSSES)
         a["reconfirm"] = fused.get("reconfirm")
         ev = (fused.get("reconfirm") or {}).get("event")
         if ev and market["open"] and ev in notifier.events() and notifier.any_configured():

@@ -16,7 +16,7 @@ FRESH_BARS = 3            # a signal older than this many candles is LATE (3 x 5
 EXPIRE_BARS = 12          # older than this many candles it is EXPIRED and must re-qualify (12 x 5m = 60 min)
 MAX_CHASE_ATR = 1.0       # price already moved more than this many ATR from the signal price => don't chase
 REPLAY_BARS = 40          # how far back the replay looks for the start of the current signal
-ENTRY_START_MIN = 9 * 60 + 30     # no new entries before 09:30 IST (opening volatility)
+ENTRY_START_MIN = 9 * 60 + 45     # no new entries before 09:45 IST (opening volatility; replay: every 09:15-09:45 entry lost, 09:45-10:30 averaged +9 pts)
 def _env_minutes(name, default):
     """HH:MM from the environment (e.g. ENTRY_CUTOFF=13:30) -> minutes after midnight."""
     try:
@@ -181,7 +181,7 @@ def dashboard_summary(dash):
                         "detail": c.get("detail", "")} for c in dash.get("contributions", [])]}
 
 
-def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard", reconfirm=None):
+def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard", reconfirm=None, daily_losses=None, max_daily_losses=0):
     """Combine technical analysis `a` (indicators.analyze output) with the dashboard final signal `dash`
     (dashboard_data.final_signal output). `reconfirm` = {"tracker", "name", "window", "price", "ts"} switches on the hold-and-recheck
     step: a setup that passes every other gate is PENDING until the tracker has seen it hold for `window` seconds. Returns {"gates": [...extra hard gates...], "final": {...}, "timing": {...}, "dashboard": {...}}."""
@@ -282,6 +282,11 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
                       "pass": dom_score < 90,
                       "detail": f"Technical score {dom_score}/100; supplied replay's 90–100 bucket had negative average P/L."})
 
+    if side and daily_losses is not None and max_daily_losses and max_daily_losses > 0:
+        # v1.15: after N stop-outs the day is done. In the replay one day (9 signals, 1 winner, -166 pts) wiped out 2.6x the whole
+        # period's profit; stopping after 2 losses cut that day's damage and lifted the 11-day total from +63 to +140 pts (scalp).
+        gates.append({"label": f"Daily loss limit (max {max_daily_losses} stop-outs per day)", "pass": daily_losses < max_daily_losses,
+                      "detail": f"{daily_losses} stop-out(s) logged today" + ("" if daily_losses < max_daily_losses else " — no more entries today; the market is not paying this setup")})
     rc = None
     cand = bool(side) and tech_level == "CONFIRMED" and all(g["pass"] for g in gates)
     if reconfirm:
