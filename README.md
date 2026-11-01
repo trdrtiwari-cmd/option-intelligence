@@ -1,5 +1,7 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.17.4 — the "Waiting for data" label is replaced by the update time in the option-premium chart view.
+
 ## v1.17.3 — chart view "Selected option premium" and its option contract now follow you across devices live.
 
 ## v1.17.2 — settings changed on another device now reach an open or backgrounded app as soon as you return to it (and every 30 s), instead of only on a fresh start; risk-guard and capital changes reload the page.
