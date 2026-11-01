@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.17.2 — settings changed on another device now reach an open or backgrounded app as soon as you return to it (and every 30 s), instead of only on a fresh start; risk-guard and capital changes reload the page.
+
+## v1.17.1 — fix: the "Selected option premium" chart view now survives a reload (the selected option contract is saved too).
+
 ## v1.17.0 — mobile app + every setting saved to your account
 - **Mobile app (installable):** the site is now a PWA - open it on a phone and use *More -> Install app* (Android) or Share -> *Add to Home Screen* (iPhone). Phone layout with a bottom tab bar (Terminal / Data / Signals / Tests / More), larger touch targets, collapsible signal controls, offline screen, "keep screen awake" switch, safe-area support. Static files are cached; prices, signals and accounts are never cached.
 - **Native Android/iOS wrapper:** `mobile/` (Capacitor) loads your hosted site, so every deploy updates the app. A GitHub Action (`.github/workflows/android-apk.yml`) builds an installable APK for you - see `mobile/README.md`.
