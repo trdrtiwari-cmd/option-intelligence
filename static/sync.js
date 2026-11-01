@@ -39,7 +39,7 @@
   let meta = (() => { try { const m = JSON.parse(ls.get(META_KEY) || "null"); if (m && m.keys) return m; } catch { } return { user: null, keys: {} }; })();
   let user = null, redirecting = false;
   const timers = {}, inflight = {}, lastSig = {}, lastPushAt = {}, retries = {};
-  let statusEl = null, lastSavedAt = null, offline = false;
+  let statusEl = null, lastSavedAt = null, offline = false, lastOk = null, lastErr = null;
 
   const saveMeta = () => ls.set(META_KEY, JSON.stringify(meta));
   const fromRaw = raw => { try { return JSON.parse(raw); } catch { return raw; } };
@@ -252,12 +252,16 @@
   // Pick up changes made on another device: every 30 s while the page is open, and immediately when the app/tab comes back
   // to the foreground (a phone app that was in the background does not run timers).
   let lastPull = 0;
-  async function pullNow() {
-    if (document.visibilityState !== "visible" || redirecting || Object.keys(inflight).length) return;
-    if (Object.values(meta.keys).some(m => m.dirty)) { Object.keys(REV).forEach(k => { if (kmeta(k).dirty) schedule(k, 200); }); return; }   // upload ours first
-    if (Date.now() - lastPull < 2000) return;
+  async function pullNow(force) {
+    if (redirecting || Object.keys(inflight).length) return;
+    if (force !== true && document.visibilityState !== "visible") return;
+    // Local changes waiting to upload must NOT block checking for other devices' changes (open paper trades keep this flag
+    // set while the market is open). pull() merges them safely; make sure ours are on their way too.
+    Object.keys(REV).forEach(k => { if (kmeta(k).dirty && !timers[k]) schedule(k, 300); });
+    if (force !== true && Date.now() - lastPull < 2000) return;
     lastPull = Date.now();
-    try { await pull(false); refreshStatus(); } catch { offline = true; refreshStatus(); }
+    try { await pull(false); lastOk = Date.now(); lastErr = null; refreshStatus(); }
+    catch (e) { offline = true; lastErr = String((e && e.message) || e); refreshStatus(); }
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushAll(true); else pullNow(); });
   window.addEventListener("focus", pullNow);
@@ -303,5 +307,5 @@
     whenReady(() => { mountChip(); loadNext(); });
   })();
 
-  window.OISync = { flush: () => flushAll(false), pull: pullNow, status: () => ({ user, offline, dirty: Object.entries(meta.keys).filter(([, m]) => m.dirty).map(([k]) => k) }) };
+  window.OISync = { flush: () => flushAll(false), pull: pullNow, sync: async () => { await flushAll(false); await pullNow(true); return { ok: !lastErr, error: lastErr }; }, status: () => ({ user, offline, lastOk, lastErr, dirty: Object.entries(meta.keys).filter(([, m]) => m.dirty).map(([k]) => k) }) };
 })();

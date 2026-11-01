@@ -83,12 +83,25 @@
       '<a class="m-row" id="mUpstox" href="/api/login" hidden><span>Connect Upstox<small>Owner only - refresh the daily token</small></span></a>' +
       '<label class="m-row"><span>Keep screen awake<small>Stops the phone sleeping while the app is open</small></span><input type="checkbox" class="m-switch" id="mAwake"></label>' +
       '<button type="button" class="m-row" id="mInstall"><span>Install app<small></small></span></button>' +
+      '<button type="button" class="m-row" id="mSync"><span>Sync now<small id="mSyncInfo">Checking…</small></span></button>' +
       '<button type="button" class="m-row" id="mRefresh"><span>Reload app<small>Fetch the latest version</small></span></button>';
     const close = () => document.documentElement.classList.remove("m-open");
     more.onclick = () => {
       document.documentElement.classList.toggle("m-open");
       const st = window.OISync && window.OISync.status && window.OISync.status();
       if (st && st.user && st.user.is_admin) sheet.querySelector("#mUpstox").hidden = false;
+      showSync();
+    };
+    const showSync = () => {
+      const st = window.OISync && window.OISync.status && window.OISync.status(), info = sheet.querySelector("#mSyncInfo");
+      if (!st || !st.user) { info.textContent = "Not signed in / sync not running"; return; }
+      const t = st.lastOk ? new Date(st.lastOk).toLocaleTimeString() : "not yet";
+      info.textContent = "Signed in as " + st.user.username + " · last checked " + t + (st.dirty.length ? " · waiting to upload: " + st.dirty.length : "") + (st.lastErr ? " · problem: " + st.lastErr : "");
+    };
+    sheet.querySelector("#mSync").onclick = async () => {
+      const info = sheet.querySelector("#mSyncInfo"); info.textContent = "Syncing…";
+      try { await window.OISync.sync(); } catch { }
+      showSync(); setTimeout(() => location.reload(), 600);
     };
     bg.onclick = close;
     sheet.addEventListener("click", e => { if (e.target.closest("a")) close(); });
