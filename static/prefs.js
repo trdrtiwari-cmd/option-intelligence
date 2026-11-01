@@ -97,6 +97,11 @@
     const ch = (ev.detail && ev.detail.changed) || [];
     if (ch.includes(KEY)) { apply(true); listeners.forEach(fn => { try { fn("*", null); } catch { } }); }
     if (ch.some(k => k !== KEY)) applyLegacy();
+    // Risk guards and starting capital are only read when the page opens, so reload to show the other device's values
+    // (never while you are typing).
+    const loadOnly = ["option-intelligence-paper-guard-v1", "option-intelligence-paper-capital-v1"];
+    const a = document.activeElement;
+    if (ch.some(k => loadOnly.includes(k)) && !(a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName))) location.reload();
   });
 
   window.OIPrefs = { get, set, onChange: fn => listeners.push(fn), KEY };

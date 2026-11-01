@@ -26,7 +26,7 @@
   };
   const REV = Object.fromEntries(Object.entries(MAP).map(([l, s]) => [s, l]));
   const META_KEY = "oi-sync-meta";
-  const DEBOUNCE_MS = 1500, QUOTE_ONLY_THROTTLE_MS = 30000, PULL_EVERY_MS = 60000, KEEPALIVE_LIMIT = 60000;
+  const DEBOUNCE_MS = 1500, QUOTE_ONLY_THROTTLE_MS = 30000, PULL_EVERY_MS = 30000, KEEPALIVE_LIMIT = 60000;
 
   const origSet = Storage.prototype.setItem, origRemove = Storage.prototype.removeItem, origGet = Storage.prototype.getItem;
   const origFetch = window.fetch.bind(window);
@@ -249,13 +249,21 @@
   };
 
   window.addEventListener("online", () => { offline = false; Object.keys(REV).forEach(k => { if (kmeta(k).dirty) schedule(k, 200); }); });
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushAll(true); });
-  window.addEventListener("pagehide", () => flushAll(true));
-  setInterval(async () => {                                              // pick up changes made on another device
+  // Pick up changes made on another device: every 30 s while the page is open, and immediately when the app/tab comes back
+  // to the foreground (a phone app that was in the background does not run timers).
+  let lastPull = 0;
+  async function pullNow() {
     if (document.visibilityState !== "visible" || redirecting || Object.keys(inflight).length) return;
-    if (Object.values(meta.keys).some(m => m.dirty)) return;
+    if (Object.values(meta.keys).some(m => m.dirty)) { Object.keys(REV).forEach(k => { if (kmeta(k).dirty) schedule(k, 200); }); return; }   // upload ours first
+    if (Date.now() - lastPull < 2000) return;
+    lastPull = Date.now();
     try { await pull(false); refreshStatus(); } catch { offline = true; refreshStatus(); }
-  }, PULL_EVERY_MS);
+  }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushAll(true); else pullNow(); });
+  window.addEventListener("focus", pullNow);
+  window.addEventListener("pageshow", pullNow);
+  window.addEventListener("pagehide", () => flushAll(true));
+  setInterval(pullNow, PULL_EVERY_MS);
 
   // ---------------------------------------------------------------- header chip + logout
   function mountChip() {
@@ -295,5 +303,5 @@
     whenReady(() => { mountChip(); loadNext(); });
   })();
 
-  window.OISync = { flush: () => flushAll(false), status: () => ({ user, offline, dirty: Object.entries(meta.keys).filter(([, m]) => m.dirty).map(([k]) => k) }) };
+  window.OISync = { flush: () => flushAll(false), pull: pullNow, status: () => ({ user, offline, dirty: Object.entries(meta.keys).filter(([, m]) => m.dirty).map(([k]) => k) }) };
 })();
