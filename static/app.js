@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.17.3";
+const FRONTEND_VERSION="1.17.4";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -457,7 +457,7 @@ async function refreshSignalContext(){
   renderSignal();
 }
 async function refresh(){
-  if($("chartView").value==="option"){await refreshChartSource();try{await refreshSignalContext()}catch(e){$("analysisNote").textContent=e.message}loadOptionVolume();return}
+  if($("chartView").value==="option"){await refreshChartSource();try{await refreshSignalContext()}catch(e){$("analysisNote").textContent=e.message}loadOptionVolume();$("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()} · option premium view${paperSelected?"":" · select an option contract"}`;return}
   const manual=!refreshBusy;if(manual){$("refreshBtn").disabled=true;$("refreshBtn").textContent="Loading…"}
   try{
     const sym=getSymbol(),interval=getInterval();
