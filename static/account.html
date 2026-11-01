@@ -1,9 +1,15 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>Account · Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.16.0">
+  <meta name="theme-color" content="#0b1220">
+  <meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="OptionIntel">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
+  <link rel="stylesheet" href="/static/style.css?v=1.17.0">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.17.0">
 </head>
 <body>
 <header class="topbar">
@@ -16,6 +22,11 @@
     <p class="sub">Paper trades, capital, risk guards and your preferences are saved to this account automatically a moment after every change.</p>
     <div id="savedList" class="sub">Loading…</div>
     <div class="account-actions"><button id="exportBtn" class="secondary" type="button">Download my data (JSON)</button></div>
+  </section>
+  <section class="panel"><h2>Saved settings</h2>
+    <p class="sub">Every setting you change (symbol, timeframe, chart overlays, filters, paper-trade form, keep-awake...) is saved to this account automatically and applied on every phone or computer you sign in on.</p>
+    <div id="prefList" class="sub pref-list">Loading…</div>
+    <div class="account-actions"><button id="resetPrefs" class="secondary" type="button">Reset saved settings</button><span id="prefMsg" class="sub"></span></div>
   </section>
   <section class="panel"><h2>Change password</h2>
     <form id="pwForm" class="account-form">
@@ -32,6 +43,7 @@
   </section>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/account.js?v=1.16.0"></script>
+<script src="/static/sync.js?v=1.17.0" data-next="/static/account.js?v=1.17.0"></script>
+<script src="/static/mobile.js?v=1.17.0" defer></script>
 </body>
 </html>

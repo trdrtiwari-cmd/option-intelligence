@@ -7,6 +7,7 @@
 (function () {
   "use strict";
   const NEXT = document.currentScript && document.currentScript.dataset.next;
+  const SELF_SRC = (document.currentScript && document.currentScript.src) || "";
   const MAP = {                                   // localStorage key -> account data key
     "option-intelligence-paper-trades-v1": "paper-trades",
     "option-intelligence-paper-deleted-v1": "paper-deleted-trade-ids",
@@ -15,6 +16,13 @@
     "oi-signal-mode": "pref-signal-mode",
     "oi-refresh-sec": "pref-refresh-sec",
     "oi-dc-refresh": "pref-dash-refresh",
+    // v1.17: every other setting is now saved to the account too
+    "oi-score-min": "pref-score-min",
+    "oi-reconfirm": "pref-reconfirm",
+    "oi-alert-sound": "pref-alert-sound",
+    "oi-sig-qty": "pref-sig-qty",
+    "oi-sig-delta": "pref-sig-delta",
+    "oi-settings-v1": "settings",                 // symbol, timeframe, chart overlays, paper-trade form, filters... (see prefs.js)
   };
   const REV = Object.fromEntries(Object.entries(MAP).map(([l, s]) => [s, l]));
   const META_KEY = "oi-sync-meta";
@@ -73,8 +81,21 @@
     });
     return [...byId.values()].filter(t => !deleted.has(String(t.id))).sort((x, y) => String(y.opened_at || "").localeCompare(String(x.opened_at || "")));
   }
+  // settings = { field: [value, savedAtMs] } - the newest write of each field wins, so two devices changing different
+  // settings never overwrite each other.
+  function mergeSettings(a, b) {
+    const ok = x => x && typeof x === "object" && !Array.isArray(x);
+    a = ok(a) ? a : {}; b = ok(b) ? b : {};
+    const out = {};
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      const x = Array.isArray(a[k]) ? a[k] : null, y = Array.isArray(b[k]) ? b[k] : null;
+      out[k] = !x ? y : !y ? x : ((y[1] || 0) > (x[1] || 0) ? y : x);
+    }
+    return out;
+  }
   function merge(sKey, local, server, localWins) {
     if (sKey === "paper-trades") return mergeTrades(local, server);
+    if (sKey === "settings") return mergeSettings(local, server);
     return localWins ? local : server;
   }
   // Fields that change on every price refresh; a change in only these is saved on a slow timer instead of immediately.
@@ -111,7 +132,8 @@
     } else if (meta.user == null) {
       meta.user = user.id;                                              // data from before accounts existed belongs to the first account that signs in
     }
-    const toPush = [];
+    const toPush = [], before = {};
+    for (const lsKey of Object.keys(MAP)) before[lsKey] = ls.get(lsKey);
     for (const [lsKey, sKey] of Object.entries(MAP)) {
       const srv = d.data[sKey], raw = ls.get(lsKey), m = kmeta(sKey);
       if (!srv) {
@@ -147,6 +169,8 @@
     }
     saveMeta(); offline = false;
     toPush.forEach(k => schedule(k, 300));
+    const changed = Object.keys(MAP).filter(k => before[k] !== ls.get(k));
+    if (changed.length) { try { window.dispatchEvent(new CustomEvent("oi-sync-pulled", { detail: { changed } })); } catch { } }
     return true;
   }
 
@@ -255,9 +279,13 @@
   }
   function whenReady(fn) { if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn); else fn(); }
 
+  function loadScript(src, done) {
+    const s = document.createElement("script"); s.src = src; s.onload = s.onerror = done || null; document.body.appendChild(s);
+  }
   function loadNext() {
-    if (!NEXT) return;
-    const s = document.createElement("script"); s.src = NEXT; document.body.appendChild(s);
+    // prefs.js restores the saved settings into the page's controls BEFORE the page script reads them.
+    const v = (SELF_SRC.match(/[?&]v=([\d.]+)/) || [])[1] || "";
+    loadScript("/static/prefs.js" + (v ? "?v=" + v : ""), () => { if (NEXT) loadScript(NEXT); });
   }
 
   (async function boot() {

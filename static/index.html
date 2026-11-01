@@ -1,9 +1,15 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>Option Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.16.0">
+  <meta name="theme-color" content="#0b1220">
+  <meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="OptionIntel">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
+  <link rel="stylesheet" href="/static/style.css?v=1.17.0">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.17.0">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -220,11 +226,12 @@
     </div>
     <div class="section-head paper-table-head"><div><h3>Open paper positions</h3><p>Quotes refresh periodically; automatic SL/target exits use observed quotes, not guaranteed fills.</p></div><button class="secondary" id="paperRefreshBtn">Refresh quotes</button></div>
     <div class="table-wrap"><table><thead><tr><th>Opened</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Last LTP</th><th>SL</th><th>Chosen target</th><th>Unrealized P&amp;L</th><th>Status</th><th>Action</th></tr></thead><tbody id="paperOpenRows"><tr><td colspan="10" class="empty">No open paper trades.</td></tr></tbody></table></div>
-    <div class="section-head paper-table-head"><div><h3>Paper trade history</h3><p>Browser-local history; clearing browser storage or using another device will not sync trades.</p></div><div class="paper-actions"><button class="secondary" id="paperExportBtn">Export CSV</button><button class="secondary" id="paperClearBtn">Clear closed history</button></div></div>
+    <div class="section-head paper-table-head"><div><h3>Paper trade history</h3><p>Saved to your account automatically and available on every device you sign in on.</p></div><div class="paper-actions"><button class="secondary" id="paperExportBtn">Export CSV</button><button class="secondary" id="paperClearBtn">Clear closed history</button></div></div>
     <div class="table-wrap"><table><thead><tr><th>Opened / Closed</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Realized P&amp;L</th><th>Entry context</th></tr></thead><tbody id="paperHistoryRows"><tr><td colspan="8" class="empty">No closed trades yet.</td></tr></tbody></table></div>
   </section>
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/sync.js?v=1.16.0" data-next="/static/app.js?v=1.16.0"></script>
+<script src="/static/sync.js?v=1.17.0" data-next="/static/app.js?v=1.17.0"></script>
+<script src="/static/mobile.js?v=1.17.0" defer></script>
 </body></html>

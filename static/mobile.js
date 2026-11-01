@@ -1,0 +1,147 @@
+/* Option Intelligence - mobile app shell (v1.17).
+   - registers the service worker (installable app, offline screen)
+   - bottom tab bar + "More" sheet on phones
+   - Install app button (Android/desktop prompt, or the Add to Home Screen hint on iPhone)
+   - Keep screen awake (setting saved to your account)
+   - offline banner, collapsible controls on the main terminal
+   Settings used here live in OIPrefs (prefs.js), so they sync to the account automatically. */
+(function () {
+  "use strict";
+  const path = location.pathname.replace(/\/+$/, "") || "/";
+  const isAuth = path === "/login";
+  const prefs = () => window.OIPrefs || { get: (k, d) => d, set() { }, onChange() { } };
+
+  // ------------------------------------------------------------- service worker
+  if ("serviceWorker" in navigator && window.isSecureContext) {
+    window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => { }));
+  }
+
+  // ------------------------------------------------------------- install
+  let deferred = null;
+  const standalone = () => window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferred = e; refreshInstallRow(); });
+  window.addEventListener("appinstalled", () => { deferred = null; refreshInstallRow(); });
+
+  // ------------------------------------------------------------- keep screen awake
+  let lock = null;
+  async function applyWake() {
+    const want = prefs().get("app.keepAwake", false) === true && document.visibilityState === "visible";
+    try {
+      if (want && !lock && "wakeLock" in navigator) {
+        lock = await navigator.wakeLock.request("screen");
+        lock.addEventListener("release", () => { lock = null; });
+      } else if (!want && lock) { await lock.release(); lock = null; }
+    } catch { lock = null; }
+  }
+  document.addEventListener("visibilitychange", applyWake);
+
+  // ------------------------------------------------------------- offline banner
+  function mountOffline() {
+    const b = document.createElement("div"); b.className = "m-offline"; b.hidden = true; b.setAttribute("role", "status");
+    b.textContent = "You're offline - showing the last data. Changes are saved on this device and sync when you're back.";
+    document.body.appendChild(b);
+    const upd = () => { b.hidden = navigator.onLine !== false; };
+    addEventListener("online", upd); addEventListener("offline", upd); upd();
+  }
+
+  // ------------------------------------------------------------- bottom nav
+  const ICONS = {
+    terminal: '<path d="M4 19V5M4 19h16"/><path d="M8 15l3-4 3 2 4-6"/>',
+    data: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
+    signals: '<path d="M5 6h14M5 12h14M5 18h9"/>',
+    diag: '<path d="M4 14l4-6 4 8 3-5 5 3"/>',
+    more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
+  };
+  const TABS = [["/", "Terminal", "terminal"], ["/dashboard", "Data", "data"], ["/signals", "Signals", "signals"], ["/diagnostics", "Tests", "diag"]];
+  const svg = k => '<svg viewBox="0 0 24 24" aria-hidden="true">' + ICONS[k] + "</svg>";
+
+  let sheet = null, installRow = null;
+  function refreshInstallRow() {
+    if (!installRow) return;
+    if (standalone()) { installRow.hidden = true; return; }
+    installRow.hidden = false;
+    const sm = installRow.querySelector("small");
+    sm.textContent = deferred ? "Add Option Intelligence to your home screen" : isIOS ? "In Safari tap Share, then Add to Home Screen" : "Use your browser menu: Install app / Add to Home screen";
+  }
+
+  function mountNav() {
+    const nav = document.createElement("nav"); nav.className = "m-nav"; nav.setAttribute("aria-label", "Main");
+    TABS.forEach(([href, label, icon]) => {
+      const a = document.createElement("a"); a.href = href; a.innerHTML = svg(icon) + "<span>" + label + "</span>";
+      if (path === href) { a.className = "on"; a.setAttribute("aria-current", "page"); }
+      nav.appendChild(a);
+    });
+    const more = document.createElement("button"); more.type = "button"; more.innerHTML = svg("more") + "<span>More</span>";
+    if (path === "/account") more.className = "on";
+    nav.appendChild(more);
+
+    const bg = document.createElement("div"); bg.className = "m-sheet-bg";
+    sheet = document.createElement("div"); sheet.className = "m-sheet"; sheet.setAttribute("role", "dialog"); sheet.setAttribute("aria-label", "More");
+    sheet.innerHTML = '<h3>More</h3>' +
+      '<a class="m-row" href="/account"><span>Account &amp; saved settings<small>Password, saved data, reset preferences</small></span></a>' +
+      '<a class="m-row" id="mUpstox" href="/api/login" hidden><span>Connect Upstox<small>Owner only - refresh the daily token</small></span></a>' +
+      '<label class="m-row"><span>Keep screen awake<small>Stops the phone sleeping while the app is open</small></span><input type="checkbox" class="m-switch" id="mAwake"></label>' +
+      '<button type="button" class="m-row" id="mInstall"><span>Install app<small></small></span></button>' +
+      '<button type="button" class="m-row" id="mRefresh"><span>Reload app<small>Fetch the latest version</small></span></button>';
+    const close = () => document.documentElement.classList.remove("m-open");
+    more.onclick = () => {
+      document.documentElement.classList.toggle("m-open");
+      const st = window.OISync && window.OISync.status && window.OISync.status();
+      if (st && st.user && st.user.is_admin) sheet.querySelector("#mUpstox").hidden = false;
+    };
+    bg.onclick = close;
+    sheet.addEventListener("click", e => { if (e.target.closest("a")) close(); });
+    document.body.append(nav, bg, sheet);
+
+    installRow = sheet.querySelector("#mInstall");
+    installRow.onclick = async () => {
+      if (deferred) { deferred.prompt(); try { await deferred.userChoice; } catch { } deferred = null; refreshInstallRow(); close(); }
+    };
+    sheet.querySelector("#mRefresh").onclick = async () => {
+      try { const keys = await caches.keys(); await Promise.all(keys.map(k => caches.delete(k))); } catch { }
+      try { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(r => r.update())); } catch { }
+      location.reload();
+    };
+    const awake = sheet.querySelector("#mAwake");
+    const sync = () => { awake.checked = prefs().get("app.keepAwake", false) === true; applyWake(); };
+    awake.onchange = () => { prefs().set("app.keepAwake", awake.checked); applyWake(); };
+    prefs().onChange(name => { if (name === "app.keepAwake" || name === "*") sync(); });
+    sync(); refreshInstallRow();
+  }
+
+  // ------------------------------------------------------------- collapsible controls (main terminal only)
+  function mountToggle() {
+    if (path !== "/") return;
+    const bar = document.querySelector("section.toolbar");
+    if (!bar) return;
+    const btn = document.createElement("button"); btn.type = "button"; btn.className = "secondary m-toggle";
+    const show = open => {                       // display only - nothing is saved here
+      bar.classList.toggle("m-collapsed", !open);
+      btn.innerHTML = "<span>Signal &amp; alert controls</span><span>" + (open ? "&#9652;" : "&#9662;") + "</span>";
+      btn.setAttribute("aria-expanded", String(open));
+    };
+    btn.onclick = () => { const open = bar.classList.contains("m-collapsed"); show(open); prefs().set("app.controlsOpen", open); };
+    bar.parentNode.insertBefore(btn, bar);
+    show(prefs().get("app.controlsOpen", false) === true);
+    prefs().onChange(name => { if (name === "app.controlsOpen" || name === "*") show(prefs().get("app.controlsOpen", false) === true); });
+  }
+
+  function init() {
+    if (!isAuth) { mountNav(); mountToggle(); }
+    mountOffline();
+    applyWake();
+  }
+  // Start once the saved settings are available (sync.js -> prefs.js loads them first). If they never arrive (offline
+  // login page etc.) start anyway after a short wait.
+  let started = false;
+  const start = () => { if (started) return; started = true; init(); };
+  const ready = () => document.readyState !== "loading";
+  function boot() {
+    if (!ready()) return document.addEventListener("DOMContentLoaded", boot, { once: true });
+    if (window.OIPrefs || isAuth) return start();
+    window.addEventListener("oi-prefs-ready", start, { once: true });
+    setTimeout(start, 5000);
+  }
+  boot();
+})();
