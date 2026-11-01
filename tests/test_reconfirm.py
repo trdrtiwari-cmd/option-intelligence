@@ -92,8 +92,17 @@ def test_fuse_without_reconfirm_unchanged_and_no_extra_gate_on_weak_setup():
 
 
 def test_rsi_bands_are_side_specific():
-    assert ind.rsi_band("CE") == (60.0, 70.0) and ind.rsi_band("PE") == (30.0, 40.0)
-    assert ind.rsi_band("CE", True) == (58.0, 70.0) and ind.rsi_band("PE", True) == (30.0, 42.0)   # scalp relaxes only the momentum edge
+    assert ind.rsi_band("CE") == (60.0, 68.0) and ind.rsi_band("PE") == (32.0, 40.0)
+    assert ind.rsi_band("CE", True) == (58.0, 68.0) and ind.rsi_band("PE", True) == (32.0, 42.0)   # scalp relaxes only the momentum edge
+
+
+def test_rsi_exhaustion_edges_v116():
+    # PE RSI 30-32 and CE RSI 68-70 (within 2 points of the old edges) must now be rejected; RSI < 30 still is
+    import test_scalp as S2
+    for mode in ("scalp", "standard"):
+        a = S2.run(S2.selloff([-20]), mode)
+        g = [x for x in a["gates"] if x["label"].startswith("Momentum not overextended")][0]
+        assert "RSI > 32 for PE" in g["label"], g["label"]
 
 
 def test_rsi_gates_present_and_pe_direction_checked():
