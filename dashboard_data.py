@@ -21,18 +21,18 @@ THRESHOLDS = {
     "premium_gap": 3.0,    # CE% minus PE% gap needed for a directional call
     "zone_up": 3,          # zone score >= this -> UP
     "zone_down": -3,       # zone score <= this -> DOWN
-    # ATR trade levels (index points). v1.15 re-check on the 11-day replay (Oct 15-30, 61 scalp / 27 standard signals):
-    #  * target: 3 ATR is the robust choice (1.5 ATR lost money in every replay; 4-5 ATR helped scalp but not standard).
-    #  * stop: the replays DISAGREE. The earlier 21-day replay liked 1.0 ATR; this one has 1.0 as the worst column at every target
-    #    >= 3 ATR and 1.5 as the best (3 ATR / 1.5 ATR = +4.5 scalp, +4.1 standard vs +3.4 / +3.1 at 1.0), because the median adverse
-    #    move after a signal is ~31-35 pts (>1 ATR). 1.25 splits the difference until a longer replay settles it.
-    #  * early break-even / trailing / scale-out variants were all worse than holding to the target (see management notes).
+    # ATR trade levels (index points). v1.16 calibration on SIX replays (19-day and 9-day windows, scalp and standard, plus the
+    # older 11-day pair). Stop distance at a 3 ATR target, averaged over the six: 0.5 ATR +4.0 | 0.75 ATR +4.4 | 1.0 ATR +2.7 | 1.5 ATR +2.8
+    # pts per trade; 0.75 ATR was best or within 0.3 of best in four of six and never more than 0.8 below the best (v1.15's 1.25 sat in the weak 1.0-1.5 zone: reverted).
+    # Fixed-point grids agree: a 20-pt stop with a 60-pt target is the best cell in all six (+3.4 to +9.8 pts per trade) and a 10-pt stop
+    # is clearly worse than 15-20, hence the 15-pt floor. A 3 ATR target is flat against 4-5 ATR (scalp slightly prefers 4-5, standard 3).
+    # Early break-even / trailing / scale-out variants lost to simply holding to the target in every replay (see management notes).
     "atr_period": 14,
-    "atr_sl": 1.25,        # stop-loss distance in ATR (was 1.0)
+    "atr_sl": 0.75,        # stop-loss distance in ATR
     "atr_t1": 1.5,         # target 1: partial-profit reference (the auto-exit target is T2)
     "atr_t2": 3.0,         # target 2: main target
     "atr_t3": 4.5,         # target 3: runner (trail behind it)
-    "atr_min_sl_pts": 10.0,  # never place the stop closer than this (noise)
+    "atr_min_sl_pts": 15.0,  # never place the stop closer than this (a 10-pt stop averaged 3-5 pts less per trade than 15-20)
     "option_delta": 0.5,   # ATM option delta used to translate index points into premium
     "max_premium_sl_pct": 25.0,  # premium stop never wider than this % of entry premium
 }
@@ -625,9 +625,9 @@ def trade_levels(final, blocks, atr=None, price=None):
            "sl_points": round(sl_pts, 1), "sl_atr_multiple": round(sl_pts / atr, 2), "sl_index": round(price - d * sl_pts, 2),
            "targets": targets, "level": (final or {}).get("level"),
            "management": ["Main target is T2 (3 ATR). In the replay, holding the full position to T2 beat every trailing / break-even / scale-out variant tested.",
-                          "Do not move the stop to cost early: winners often dip ~30 pts first, and early trailing stops cut them off (trailing variants averaged -0.5 to +1.3 pts vs +4.5 for hold-to-T2).",
+                          "Do not move the stop to cost early: in all four recent replays every trailing / break-even / scale-out variant averaged less than simply holding to the target (e.g. +0.7 to +5.5 vs +9.7 for a fixed 60-pt target on the scalp signals).",
                           "Optional: once T2 is hit, trail the stop 1 ATR behind price toward T3.",
-                          "Never widen the stop. Because the stop is 1.25 ATR, size the trade for that distance (about 20% smaller quantity than for the old 1 ATR stop), not for the old distance."]}
+                          "Never widen the stop. The stop is tight (0.75 ATR, about 20 pts): expect roughly 4 losers in 10, with winners about 3-4x larger than losers. Size for the stop distance, and judge the system over 20+ trades, not one."]}
     # approximate option premium plan from the ATM leg of this side
     prem = (blocks or {}).get("premium") or {}
     ltp = num(prem.get("ce_ltp" if side == "CE" else "pe_ltp"))

@@ -99,18 +99,20 @@ def _envf(name, default):
         return float(default)
 
 
-# v1.14 side-specific RSI bands (CE and PE are NOT mirror images any more - each has its own floor and ceiling):
+# v1.14 side-specific RSI bands (CE and PE each have their own floor and ceiling):
 #   CE needs RSI ABOVE its momentum floor but BELOW the exhaustion ceiling      -> CE band = (floor, ceiling)
 #   PE needs RSI BELOW its momentum ceiling but ABOVE the exhaustion floor      -> PE band = (floor, ceiling)
-# Defaults keep the replay-tested limits (CE 60-70, PE 30-40). Scalp mode relaxes only the MOMENTUM side, and only when the
-# price-structure trend is already confirmed; the exhaustion side stays strict (RSI < 30 for PE lost in 14 real days).
+# v1.16: the exhaustion edges moved from 30 / 70 to 32 / 68. In the 19-day replay (Oct 5-30) every entry whose RSI was within 2 points
+# of the old edge (PE RSI 30-32, CE RSI 68-70) was the biggest single source of losses: 28 of 81 scalp signals, 39% winners, -133 pts,
+# while the other 53 made +428 (avg +8.1). The same cut helped the standard mode (+160 -> +264) and the older 11-day replays, and the
+# gain peaked at 32-33 in all four data sets. Scalp mode relaxes only the MOMENTUM side, and only when the price trend is confirmed.
 # Override any edge from the environment: RSI_CE_MIN, RSI_CE_MAX, RSI_PE_MIN, RSI_PE_MAX (and *_SCALP variants for the relaxed band).
 RSI_SLOPE = _os.getenv("RSI_SLOPE", "1") != "0"     # CE needs RSI rising on the last closed bar, PE needs it falling
 RSI_BANDS = {
-    "strict": {"CE": (_envf("RSI_CE_MIN", 100 - RSI_MOMENTUM if RSI_MOMENTUM else 0), _envf("RSI_CE_MAX", 70)),
-               "PE": (_envf("RSI_PE_MIN", 30), _envf("RSI_PE_MAX", RSI_MOMENTUM if RSI_MOMENTUM else 100))},
-    "wide":   {"CE": (_envf("RSI_CE_MIN_SCALP", 58), _envf("RSI_CE_MAX_SCALP", 70)),
-               "PE": (_envf("RSI_PE_MIN_SCALP", 30), _envf("RSI_PE_MAX_SCALP", 42))},
+    "strict": {"CE": (_envf("RSI_CE_MIN", 100 - RSI_MOMENTUM if RSI_MOMENTUM else 0), _envf("RSI_CE_MAX", 68)),
+               "PE": (_envf("RSI_PE_MIN", 32), _envf("RSI_PE_MAX", RSI_MOMENTUM if RSI_MOMENTUM else 100))},
+    "wide":   {"CE": (_envf("RSI_CE_MIN_SCALP", 58), _envf("RSI_CE_MAX_SCALP", 68)),
+               "PE": (_envf("RSI_PE_MIN_SCALP", 32), _envf("RSI_PE_MAX_SCALP", 42))},
 }
 
 

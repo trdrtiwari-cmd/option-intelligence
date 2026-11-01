@@ -324,7 +324,7 @@ Applying only the RSI gate to the replayed trades would have turned −0.9 → +
 ## v1.14 - side-specific RSI, reconfirmation window, alerts
 
 **RSI per side.** CE and PE now have their own RSI limits instead of one shared rule. Defaults keep the replay-tested values:
-CE needs RSI 60-70 (momentum floor 60, exhaustion ceiling 70), PE needs RSI 30-40. In scalp mode, once the price-structure trend is
+CE needs RSI 60-68 (momentum floor 60, exhaustion ceiling 68 since v1.16), PE needs RSI 32-40 (exhaustion floor 32 since v1.16). In scalp mode, once the price-structure trend is
 confirmed, only the momentum edge relaxes (CE >= 58, PE <= 42); the exhaustion edge stays strict. Each edge can be changed from the
 environment (`RSI_CE_MIN`, `RSI_CE_MAX`, `RSI_PE_MIN`, `RSI_PE_MAX`, `*_SCALP`). A new gate also asks that RSI is moving with the trade
 on the last closed bar (rising for CE, falling for PE); `RSI_SLOPE=0` removes it.
@@ -355,3 +355,18 @@ What the replay said, and what changed. All of it rests on 11 trading days, so t
 | Score 90-100: 22% wins, -12.9 pts per trade (already blocked by the live score < 90 gate) | Unchanged; the diagnostics replay simply does not apply live-only gates (time window, score cap, dashboard) |
 
 Not changed on purpose: the "Not sideways" gate (the 10 setups it alone blocked averaged +11 pts, but n = 10, SE 7.6) and the 13:30 cutoff (scalp 13:30-14:30 lost 109 pts but 14:30-15:30 won 82; standard disagreed). Re-run the diagnostics with target 60 / stop 20 to see the random-entry baseline for that exit before trusting any fixed-point exit.
+
+
+## v1.16 - corrections from the Oct 5-30 diagnostics (scalp 81 signals, standard 52; plus 9-day re-runs)
+
+These files were produced by v1.15, so they measure the current engine. Method: every finding had to point the same way in both halves of the window (Oct 5-16 and Oct 19-30) and in both modes before it changed a number; findings that flipped between halves were left alone.
+
+| Finding | Evidence | Change |
+|---|---|---|
+| **Largest loss source: entries with RSI already stretched.** PE with RSI 30-32 / CE with RSI 68-70 (within 2 points of the old exhaustion edge) | 28 of 81 scalp signals, 39% winners, -133 pts; the other 53 made +428 (+8.1 avg). Raising the floor helped scalp (+295 to +436 at floor 32), standard (+160 to +264) and both older 11-day replays; the gain peaks at 32-33 in all four | PE RSI floor 30 -> **32**, CE ceiling 70 -> **68** (`RSI_PE_MIN`, `RSI_CE_MAX`) |
+| **Stop too wide for the current engine.** v1.15 set 1.25 ATR from the older replay; the new replays reverse it | ATR grid at a 3 ATR target, averaged over six replays: stop 0.5 ATR +4.0, **0.75 ATR +4.4**, 1.0 +2.7, 1.5 +2.8. A 20-pt stop with a 60-pt target is the best fixed cell in all six (+3.4 to +9.8 pts per trade); a 10-pt stop is clearly worse | Stop **0.75 ATR**, minimum **15 pts** (was 1.25 ATR / 10); main target stays 3 ATR |
+| Early break-even / trailing / scale-out | Every variant lost to holding to the target in all four new replays (scalp: +0.7 to +5.5 vs +9.7 for a fixed 60-pt target) | Management notes say hold to T2 (unchanged from v1.15) |
+| Daily loss limit | Before the RSI fix it lifted scalp from +295 to +427; after the fix it rarely triggers (worst day -22 to -24 pts) | Kept at 2 stop-outs as a safety net |
+| 13:30 cutoff and 09:45 start | After the RSI fix, a 14:30 cutoff adds +40 for scalp but loses 38 for standard; a 09:45 start beats 09:15/09:30 (+486 vs +436 scalp) | Unchanged |
+
+Checked and deliberately **not** changed: "Not sideways" gate (the 18 / 16 setups it alone blocked averaged -1.8 / -2.1 pts, so the gate is right; the earlier "relax it" hint was noise), "CE needs structure" and "CE not inside a fresh breakout" (blocked 21 and 32 setups averaging -7.9 and -1.7), scalp chase limit (a 1.5 ATR cap looked good alone but cost -108 pts once the RSI fix was in), score gate (the 10 setups blocked only by score < 70 averaged +11, n = 10, SE 7.6; the page's Minimum score 65 option tests this), ATR-size buckets and the 12:00-13:00 window (non-monotone or opposite signs in the two halves).
