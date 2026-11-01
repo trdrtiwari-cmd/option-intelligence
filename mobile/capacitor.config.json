@@ -6,8 +6,18 @@
   "server": {
     "url": "https://YOUR-SERVICE.onrender.com",
     "cleartext": false,
-    "allowNavigation": ["*.upstox.com", "api.upstox.com", "account.upstox.com"]
+    "allowNavigation": [
+      "*.upstox.com",
+      "api.upstox.com",
+      "account.upstox.com"
+    ]
   },
-  "android": { "backgroundColor": "#0b1220", "allowMixedContent": false },
-  "ios": { "backgroundColor": "#0b1220", "contentInset": "always" }
+  "android": {
+    "backgroundColor": "#0b1220",
+    "allowMixedContent": false
+  },
+  "ios": {
+    "backgroundColor": "#0b1220",
+    "contentInset": "always"
+  }
 }
