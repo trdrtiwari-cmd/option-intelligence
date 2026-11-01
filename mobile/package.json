@@ -1,6 +1,6 @@
 {
   "name": "option-intelligence-mobile",
-  "version": "1.17.4",
+  "version": "1.17.5",
   "private": true,
   "description": "Native Android / iOS shell for the Option Intelligence web app (loads your hosted site).",
   "scripts": {
