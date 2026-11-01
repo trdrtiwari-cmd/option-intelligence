@@ -104,6 +104,37 @@ def test_rsi_gates_present_and_pe_direction_checked():
     assert a["rsi_band"]["PE"][1] >= 40 and a["rsi_prev"] is not None
 
 
+def test_daily_loss_limit_blocks_third_entry():
+    ok = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, daily_losses=1, max_daily_losses=2)
+    assert ok["final"]["level"] == "CONFIRMED" and any(g["label"].startswith("Daily loss limit") and g["pass"] for g in ok["gates"])
+    blocked = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, daily_losses=2, max_daily_losses=2)
+    assert blocked["final"]["level"] != "CONFIRMED" and any(g["label"].startswith("Daily loss limit") and not g["pass"] for g in blocked["gates"])
+    # off switch / unknown count must never block
+    assert sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, daily_losses=5, max_daily_losses=0)["final"]["level"] == "CONFIRMED"
+    assert sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, daily_losses=None, max_daily_losses=2)["final"]["level"] == "CONFIRMED"
+
+
+def test_entry_window_starts_at_0945():
+    from datetime import datetime
+    early = datetime(2026, 10, 21, 9, 35, tzinfo=sf.IST)
+    r = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, early, True, 5)
+    assert not [g for g in r["gates"] if g["label"].startswith("Entry time window")][0]["pass"]
+    ok = datetime(2026, 10, 21, 9, 50, tzinfo=sf.IST)
+    r = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, ok, True, 5)
+    assert [g for g in r["gates"] if g["label"].startswith("Entry time window")][0]["pass"]
+
+
+def test_ce_fresh_breakout_gate_scalp_only():
+    import test_regime as R
+    rows = R.build([(14, 22800, 22810), (30, 22810, 23000)])
+    now = ind.parse_time(rows[-1]["time"]) + __import__("datetime").timedelta(minutes=10)
+    sc = ind.analyze(rows, "NIFTY", 5, now=now, mode="scalp")
+    std = ind.analyze(rows, "NIFTY", 5, now=now, mode="standard")
+    g = [x for x in sc["gates"] if x["label"].startswith("CE not inside a fresh breakout")]
+    assert sc["side"] == "CE" and g and g[0]["pass"] == (sc["regime_phase"] != "BREAKOUT"), (sc["side"], sc["regime_phase"], g)
+    assert not [x for x in std["gates"] if x["label"].startswith("CE not inside a fresh breakout")]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
