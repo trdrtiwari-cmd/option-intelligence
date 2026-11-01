@@ -1,5 +1,7 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.17.5 — a pending local change (e.g. an open paper trade) no longer blocks pulling changes from other devices; More -> Sync now shows the signed-in account, last check and any sync problem.
+
 ## v1.17.4 — the "Waiting for data" label is replaced by the update time in the option-premium chart view.
 
 ## v1.17.3 — chart view "Selected option premium" and its option contract now follow you across devices live.
