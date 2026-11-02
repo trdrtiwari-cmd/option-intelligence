@@ -1196,21 +1196,29 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
             fn(value);
           };
           const timer=setTimeout(()=>finish(reject,new Error("Timed out waiting for Firebase device token. Check Google Services configuration and internet access.")),25000);
-          native.addListener("registration",async t=>{
-            try{
-              if(!t?.value)throw new Error("Firebase returned an empty device token");
-              await api("/api/push/native/register",{
-                method:"POST",
-                headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({token:t.value})
+          (async()=>{
+            try {
+              // Capacitor versions/plugins may return either a Promise or a
+              // listener handle directly. await safely supports both forms.
+              registrationHandle = await native.addListener("registration", async t => {
+                try {
+                  if(!t?.value) throw new Error("Firebase returned an empty device token");
+                  await api("/api/push/native/register", {
+                    method:"POST",
+                    headers:{"Content-Type":"application/json"},
+                    body:JSON.stringify({token:t.value})
+                  });
+                  finish(resolve,true);
+                } catch(e) { finish(reject,e); }
               });
-              finish(resolve,true);
-            }catch(e){finish(reject,e)}
-          }).then(h=>{registrationHandle=h}).catch(e=>finish(reject,e));
-          native.addListener("registrationError",e=>{
-            finish(reject,new Error(e?.error||"Firebase device registration failed"));
-          }).then(h=>{errorHandle=h}).catch(e=>finish(reject,e));
-          native.register().catch(e=>finish(reject,e));
+              errorHandle = await native.addListener("registrationError", e => {
+                finish(reject,new Error(e?.error||"Firebase device registration failed"));
+              });
+              await native.register();
+            } catch(e) {
+              finish(reject,e);
+            }
+          })();
         });
         enabled.push("native push");
       }
