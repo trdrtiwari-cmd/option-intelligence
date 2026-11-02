@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.18.5"
+const FRONTEND_VERSION="1.18.5";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -1172,64 +1172,65 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.18.5: choose the notification transport by runtime. Native Android must not
-// depend on browser VAPID configuration; browser/PWA must not claim native FCM.
+// v1.18.5: push storage initialization compatibility; synchronized frontend version.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
-  const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/") + "===".slice((s.length+3)%4)),c=>c.charCodeAt(0));
-  const getNativeRuntime=()=>{
-    const cap=window.Capacitor;
-    const platform=String(cap?.getPlatform?.()||"").toLowerCase();
-    const native=platform==="android"||platform==="ios"||cap?.isNativePlatform?.()===true;
-    const plugin=cap?.Plugins?.PushNotifications||window.PushNotifications||null;
-    return {native,platform:platform|| (native?"native":"web"),plugin};
-  };
+  const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
   btn.addEventListener("click",async()=>{
     const old=btn.textContent; btn.disabled=true; btn.textContent="Enabling…";
     try {
-      const cfg=await api("/api/push/config");
-      const runtime=getNativeRuntime();
-      if(runtime.native){
-        if(!cfg.native_push)throw new Error("Android push is not configured on the server. Check FIREBASE_SERVICE_ACCOUNT_JSON in Render.");
-        const native=runtime.plugin;
-        if(!native||typeof native.addListener!=="function"||typeof native.register!=="function"){
-          throw new Error("Native PushNotifications plugin is missing in this APK. Rebuild and reinstall the Android APK with @capacitor/push-notifications included and Firebase google-services.json configured.");
-        }
+      const cfg=await api("/api/push/config"); let enabled=[];
+      // Native Capacitor Android/iOS push (FCM on Android; Firebase project setup required).
+      const native=window.Capacitor?.isNativePlatform?.() && window.Capacitor?.Plugins?.PushNotifications;
+      if(native){
         const perm=await native.requestPermissions();
-        if(perm.receive!=="granted")throw new Error("Android notification permission was not granted. Allow notifications in Android Settings and retry.");
+        if(perm.receive!=="granted")throw new Error("Push permission not granted");
+        // Wait for the FCM token and for the server to confirm it was saved.
+        // Do not report success merely because the native register() call started.
         await new Promise((resolve,reject)=>{
           let settled=false, registrationHandle=null, errorHandle=null;
-          const cleanup=()=>{try{registrationHandle?.remove?.()}catch{};try{errorHandle?.remove?.()}catch{}};
-          const finish=(fn,value)=>{if(settled)return;settled=true;clearTimeout(timer);cleanup();fn(value)};
-          const timer=setTimeout(()=>finish(reject,new Error("Timed out waiting for the FCM device token. Check the APK Firebase configuration and internet connection.")),25000);
+          const finish=(fn,value)=>{
+            if(settled)return; settled=true; clearTimeout(timer);
+            try{registrationHandle?.remove()}catch{}
+            try{errorHandle?.remove()}catch{}
+            fn(value);
+          };
+          const timer=setTimeout(()=>finish(reject,new Error("Timed out waiting for Firebase device token. Check Google Services configuration and internet access.")),25000);
           (async()=>{
-            try{
-              registrationHandle=await native.addListener("registration",async t=>{
-                try{
-                  if(!t?.value)throw new Error("Firebase returned an empty device token");
-                  const saved=await api("/api/push/native/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token:t.value})});
-                  if(saved?.ok!==true)throw new Error("Server did not confirm saving the Android device token");
+            try {
+              // Capacitor versions/plugins may return either a Promise or a
+              // listener handle directly. await safely supports both forms.
+              registrationHandle = await native.addListener("registration", async t => {
+                try {
+                  if(!t?.value) throw new Error("Firebase returned an empty device token");
+                  await api("/api/push/native/register", {
+                    method:"POST",
+                    headers:{"Content-Type":"application/json"},
+                    body:JSON.stringify({token:t.value})
+                  });
                   finish(resolve,true);
-                }catch(e){finish(reject,e)}
+                } catch(e) { finish(reject,e); }
               });
-              errorHandle=await native.addListener("registrationError",e=>finish(reject,new Error(e?.error||"Firebase device registration failed")));
+              errorHandle = await native.addListener("registrationError", e => {
+                finish(reject,new Error(e?.error||"Firebase device registration failed"));
+              });
               await native.register();
-            }catch(e){finish(reject,e)}
+            } catch(e) {
+              finish(reject,e);
+            }
           })();
         });
-        toast("Android push enabled: FCM device token registered successfully.");
-        return;
+        enabled.push("native push");
       }
-      // Browser/PWA path only. Missing VAPID must not block native Android setup.
-      if(!("serviceWorker" in navigator)||!("PushManager" in window))throw new Error("This browser does not support Web Push. Use the installed Android app for native notifications.");
-      if(!cfg.web_push||!cfg.vapid_public_key)throw new Error("Web Push is not configured: VAPID keys are missing on the server. This does not affect Android native push.");
-      const perm=await Notification.requestPermission();
-      if(perm!=="granted")throw new Error("Browser notification permission was not granted.");
-      const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
-      if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
-      await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})});
-      toast("Web Push enabled successfully.");
-    }catch(e){toast("Push setup: "+(e?.message||String(e)));}
-    finally{btn.disabled=false;btn.textContent=old;}
+      // Browser/PWA Web Push. Requires VAPID keys configured on the server.
+      if("serviceWorker" in navigator && "PushManager" in window && cfg.web_push && cfg.vapid_public_key){
+        const perm=await Notification.requestPermission(); if(perm!=="granted")throw new Error("Browser notification permission not granted");
+        const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
+        if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
+        await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})}); enabled.push("Web Push");
+      }
+      if(!enabled.length)throw new Error("Push is not configured on the server yet. Configure VAPID keys for Web Push and Firebase service account for Android.");
+      toast("Enabled: "+enabled.join(" + "));
+    } catch(e){toast("Push setup: "+e.message);} finally {btn.disabled=false;btn.textContent=old;}
   });
 })();
