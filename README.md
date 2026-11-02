@@ -413,3 +413,15 @@ Checked and deliberately **not** changed: "Not sideways" gate (the 18 / 16 setup
 ### v1.18.0 deployment hotfix
 - Fixed `BASE_DIR` initialization order so `PUSH_DB` can be configured without a startup `NameError`.
 - Verified module import, Python compilation, frontend/service-worker JavaScript syntax, and all 89 existing tests.
+
+
+## v1.18.5 — Native Android push setup correction
+
+- Separates Capacitor Android/iOS push setup from browser Web Push setup.
+- Android native push no longer depends on VAPID keys being configured.
+- Browser/PWA setup reports a VAPID-specific message when Web Push is not configured.
+- Native runtime with a missing PushNotifications plugin now reports that the APK must be rebuilt, instead of incorrectly reporting that server push is unconfigured.
+- Native registration waits for the FCM token and verifies the server response before reporting success.
+- Frontend/server/static asset versions synchronized to 1.18.5.
+
+Deployment: replace project source files in GitHub and let Render deploy. Keep Render secrets and persistent database files unchanged. If the Android app reports that the native PushNotifications plugin is missing, rebuild and reinstall the APK using the existing GitHub Actions Android workflow and the Firebase Android `google-services.json` secret.
