@@ -27,6 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent
 PUSH_DB = Path(os.getenv("PUSH_DB", str(BASE_DIR / "push_notifications.sqlite3")))
 PUSH_LOCK = threading.Lock()
 def _push_db():
+    """Create push tables idempotently in this worker before any read/write."""
     PUSH_DB.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(PUSH_DB, timeout=10) as db:
         db.row_factory = sqlite3.Row
@@ -40,6 +41,7 @@ def _push_user(request):
     return int(u.get("id") if isinstance(u, dict) else getattr(u, "id", 0) or 0)
 
 async def _send_native_fcm(title, body, data=None):
+    _push_db()  # FCM may run in a worker that has not handled a registration request.
     raw = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw: return {"configured": False, "sent": 0}
     try:
@@ -63,6 +65,7 @@ async def _send_native_fcm(title, body, data=None):
         logger.warning("FCM delivery unavailable: %s", str(exc)[:180]); return {"configured": True, "sent": 0, "error": str(exc)[:160]}
 
 async def _send_web_push(title, body, data=None):
+    _push_db()  # Ensure the per-worker SQLite schema exists before querying subscriptions.
     public=os.getenv("VAPID_PUBLIC_KEY","").strip(); private=os.getenv("VAPID_PRIVATE_KEY","").strip(); subject=os.getenv("VAPID_SUBJECT","mailto:admin@example.com").strip()
     if not (public and private): return {"configured": False, "sent": 0}
     try:
@@ -101,7 +104,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.3"
+APP_VERSION = "1.18.4"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1408,6 +1411,12 @@ async def _signal_exit_watcher():
         except Exception as exc:
             logger.warning("Exit watcher error: %s", str(exc)[:160])
         await asyncio.sleep(delay)
+
+
+@app.on_event("startup")
+async def _init_push_storage():
+    # Each Render/Uvicorn worker initializes its own local SQLite file before background tasks run.
+    await asyncio.to_thread(_push_db)
 
 
 @app.on_event("startup")
