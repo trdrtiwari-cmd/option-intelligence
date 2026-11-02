@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.17.9";
+const FRONTEND_VERSION="1.18.1";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -1172,7 +1172,7 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.17.9: opt-in Web Push and Capacitor native FCM registration.
+// v1.18.1: opt-in Web Push and Capacitor native FCM registration.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
   const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
