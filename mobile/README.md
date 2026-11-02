@@ -38,7 +38,7 @@ iPhone (needs a Mac with Xcode and an Apple developer account for anything beyon
 3. In Render set `FIREBASE_SERVICE_ACCOUNT_JSON` to the full Firebase service-account JSON (one-line JSON value). Keep it secret; never commit it.
 4. For browser/PWA push, generate a VAPID key pair and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` in Render. Then sign in on Chrome, tap **Enable push alerts**, and allow notifications.
 5. Sign in to the deployed website, then open `https://YOUR-SITE/api/auth/me` in the same browser session. Copy `user.id` (a number) into Render as `PUSH_OWNER_USER_ID`. This routes server-side background notifications to the registered devices for that account and scopes its notification history.
-6. **Keep registrations/history persistent:** on Render attach a persistent disk to the service (for example mount path `/var/data`) and add `PUSH_DB=/var/data/push_notifications.sqlite3`. A local SQLite file on an ephemeral filesystem can be erased on deploy/restart. Persistent disks are not available on Render Free.
+6. **Registrations/history persistence:** device registrations and notification history are stored in the accounts database, so as long as `DATABASE_URL` points to PostgreSQL they survive Render restarts and redeploys. No persistent disk or `PUSH_DB` is needed.
 7. In Render set `ALERT_BACKGROUND=1`, `ALERT_SYMBOLS=NIFTY,BANKNIFTY`, `ALERT_INTERVAL=5`, `ALERT_MODE=scalp`, `ALERT_SCORE_MIN=70`, and `ALERT_EVENTS=CONFIRMED`. Use an always-on service; Render Free sleeps and cannot reliably poll markets while asleep.
 8. After deploy, sign in on the phone, tap **Enable push alerts**, then use the app's alert test (`/api/alerts/test`) and confirm the device receives it. Check `/api/push/config` for `delivery_configured`, `background_poller`, and `owner_user_id_configured`.
 
@@ -47,7 +47,7 @@ iPhone (needs a Mac with Xcode and an Apple developer account for anything beyon
 2. Configure Upstox credentials/token and verify `/health` plus live data first.
 3. Add Firebase Android app package `app.optionintelligence.terminal`; configure GitHub secret `GOOGLE_SERVICES_JSON_BASE64` for APK builds and Render secret `FIREBASE_SERVICE_ACCOUNT_JSON` for sending.
 4. For browser PWA alerts, separately configure VAPID public/private keys and `VAPID_SUBJECT`.
-5. Set `PUSH_OWNER_USER_ID`, persistent `PUSH_DB`, and the `ALERT_*` variables.
+5. Optionally set `PUSH_OWNER_USER_ID` (empty = notify every registered account) and the `ALERT_*` variables.
 6. Build/reinstall the Android APK if using native push, sign in, enable push, and test. Web Push users enable it from Chrome on the deployed HTTPS site.
 7. Keep the app's final decision fail-safe: stale/missing market data must remain WAIT. Notifications are alerts, not guaranteed delivery or auto-trading.
 
