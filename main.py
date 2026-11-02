@@ -24,24 +24,17 @@ import notifier
 BASE_DIR = Path(__file__).resolve().parent
 
 # Push delivery is optional. Secrets stay server-side; unsupported/unconfigured channels fail closed.
-PUSH_DB = Path(os.getenv("PUSH_DB", str(BASE_DIR / "push_notifications.sqlite3")))
-PUSH_LOCK = threading.Lock()
-def _push_db():
-    """Create push tables idempotently in this worker before any read/write."""
-    PUSH_DB.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(PUSH_DB, timeout=10) as db:
-        db.row_factory = sqlite3.Row
-        db.execute("CREATE TABLE IF NOT EXISTS push_devices (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL, endpoint TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, created_at TEXT NOT NULL)")
-        db.execute("CREATE TABLE IF NOT EXISTS notification_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, event TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_push_history_user ON notification_history(user_id,id DESC)")
-        db.commit()
+# Device registrations and notification history are stored in the accounts database (PostgreSQL when DATABASE_URL is
+# set), so they survive Render restarts/redeploys. All DB calls are blocking, so they run in a worker thread.
+def _push_owner_id():
+    try: return int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
+    except ValueError: return 0
 
 def _push_user(request):
     u = request.scope.get("oi_user") or {}
     return int(u.get("id") if isinstance(u, dict) else getattr(u, "id", 0) or 0)
 
 async def _send_native_fcm(title, body, data=None):
-    _push_db()  # FCM may run in a worker that has not handled a registration request.
     raw = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw: return {"configured": False, "sent": 0}
     try:
@@ -49,39 +42,35 @@ async def _send_native_fcm(title, body, data=None):
         from firebase_admin import credentials, messaging
         try: app_firebase = firebase_admin.get_app()
         except ValueError: app_firebase = firebase_admin.initialize_app(credentials.Certificate(json.loads(raw)))
-        with PUSH_LOCK, sqlite3.connect(PUSH_DB, timeout=10) as db:
-            uid=int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
-            if not uid: return {"configured": True, "sent": 0, "error": "PUSH_OWNER_USER_ID is not configured"}
-            rows = db.execute("SELECT id,endpoint FROM push_devices WHERE kind='native' AND user_id=?", (uid,)).fetchall()
-        sent=0
-        for device_id, token in rows:
+        rows = await asyncio.to_thread(acc.push_devices, "native", _push_owner_id())
+        sent = 0
+        for row in rows:
             try:
-                messaging.send(messaging.Message(notification=messaging.Notification(title=title, body=body), data={k:str(v) for k,v in (data or {}).items()}, token=token), app=app_firebase); sent+=1
+                msg = messaging.Message(notification=messaging.Notification(title=title, body=body),
+                                        data={k: str(v) for k, v in (data or {}).items()}, token=row["endpoint"])
+                await asyncio.to_thread(messaging.send, msg, app=app_firebase); sent += 1
             except Exception as exc:
-                if 'not-registered' in str(exc).lower() or 'invalid-registration-token' in str(exc).lower():
-                    with sqlite3.connect(PUSH_DB) as db: db.execute('DELETE FROM push_devices WHERE id=?',(device_id,)); db.commit()
+                if isinstance(exc, getattr(messaging, "UnregisteredError", ())) or 'not-registered' in str(exc).lower() or 'invalid-registration-token' in str(exc).lower() or 'requested entity was not found' in str(exc).lower():
+                    await asyncio.to_thread(acc.push_delete_device, row["id"])
+                else: logger.warning("FCM send failed: %s", str(exc)[:140])
         return {"configured": True, "sent": sent}
     except Exception as exc:
         logger.warning("FCM delivery unavailable: %s", str(exc)[:180]); return {"configured": True, "sent": 0, "error": str(exc)[:160]}
 
 async def _send_web_push(title, body, data=None):
-    _push_db()  # Ensure the per-worker SQLite schema exists before querying subscriptions.
     public=os.getenv("VAPID_PUBLIC_KEY","").strip(); private=os.getenv("VAPID_PRIVATE_KEY","").strip(); subject=os.getenv("VAPID_SUBJECT","mailto:admin@example.com").strip()
     if not (public and private): return {"configured": False, "sent": 0}
     try:
-        from pywebpush import webpush, WebPushException
-        with PUSH_LOCK, sqlite3.connect(PUSH_DB, timeout=10) as db:
-            uid=int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
-            if not uid: return {"configured": True, "sent": 0, "error": "PUSH_OWNER_USER_ID is not configured"}
-            rows=db.execute("SELECT id,user_id,payload FROM push_devices WHERE kind='web' AND user_id=?",(uid,)).fetchall()
-        sent=0
-        for device_id, uid, payload in rows:
+        from pywebpush import webpush
+        rows = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
+        sent = 0
+        for row in rows:
             try:
-                await asyncio.to_thread(webpush, subscription_info=json.loads(payload), data=json.dumps({"title":title,"body":body,"url":"/","data":data or {}}), vapid_private_key=private, vapid_claims={"sub":subject}, timeout=8)
-                sent+=1
+                await asyncio.to_thread(webpush, subscription_info=json.loads(row["payload"]), data=json.dumps({"title":title,"body":body,"url":"/","data":data or {}}), vapid_private_key=private, vapid_claims={"sub":subject}, timeout=8)
+                sent += 1
             except Exception as exc:
                 if getattr(exc,'response',None) is not None and exc.response.status_code in (404,410):
-                    with sqlite3.connect(PUSH_DB) as db: db.execute('DELETE FROM push_devices WHERE id=?',(device_id,)); db.commit()
+                    await asyncio.to_thread(acc.push_delete_device, row["id"])
                 else: logger.warning("Web push failed: %s",str(exc)[:140])
         return {"configured":True,"sent":sent}
     except Exception as exc:
@@ -1415,8 +1404,9 @@ async def _signal_exit_watcher():
 
 @app.on_event("startup")
 async def _init_push_storage():
-    # Each Render/Uvicorn worker initializes its own local SQLite file before background tasks run.
-    await asyncio.to_thread(_push_db)
+    # Creating the schema is part of the first accounts-database connection; do it before background tasks run.
+    try: await asyncio.to_thread(acc.push_devices, "web", 1)
+    except Exception as exc: logger.warning("Push storage init failed (check DATABASE_URL): %s", str(exc)[:160])
 
 
 @app.on_event("startup")
@@ -1435,12 +1425,12 @@ async def _send_signal_alert(event, sym, interval, mode, a, fused):
                                                   {"entry": entry, "stop_loss": stop, "target": target}, datetime.now(IST).strftime("%H:%M:%S IST"))
         res = await notifier.send_alert(title, body, prio)
         if event == "CONFIRMED":
-            _push_db()
-            # Signal notifications are attached to the account that generated the alert; background poller uses owner account.
-            uid = int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
-            if uid:
-                with sqlite3.connect(PUSH_DB, timeout=10) as db:
-                    db.execute("INSERT INTO notification_history(user_id,event,symbol,side,title,body,created_at) VALUES(?,?,?,?,?,?,?)",(uid,event,sym,side,title,body,utc_now_iso())); db.commit()
+            # History goes to the owner account (PUSH_OWNER_USER_ID), or to every account with a registered device if unset.
+            try:
+                for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
+                    await asyncio.to_thread(acc.push_add_history, uid, event, sym, side, title, body, utc_now_iso())
+            except Exception as exc:
+                logger.warning("Notification history not saved: %s", str(exc)[:140])
             push_res = await _dispatch_confirmed_push(title, body, sym, side, event)
         else:
             push_res = []
@@ -1448,6 +1438,12 @@ async def _send_signal_alert(event, sym, interval, mode, a, fused):
     except Exception as exc:
         logger.warning("Signal alert failed: %s", str(exc)[:160])
 
+
+async def _run_push_db(fn, *args):
+    try: return await asyncio.to_thread(fn, *args)
+    except Exception as exc:
+        logger.warning("Push storage error: %s", str(exc)[:160])
+        raise HTTPException(503, "Account database is unavailable. Check DATABASE_URL.")
 
 class WebPushSubscription(BaseModel):
     subscription: dict
@@ -1476,9 +1472,7 @@ async def push_web_subscribe(payload: WebPushSubscription, request: Request):
     uid=_push_user(request); sub=payload.subscription
     if not uid: raise HTTPException(401,"Login required")
     if not isinstance(sub,dict) or not sub.get("endpoint") or not isinstance(sub.get("keys"),dict): raise HTTPException(400,"Invalid Web Push subscription")
-    _push_db()
-    with sqlite3.connect(PUSH_DB,timeout=10) as db:
-        db.execute("INSERT INTO push_devices(user_id,kind,endpoint,payload,created_at) VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,payload=excluded.payload",(uid,"web",sub["endpoint"],json.dumps(sub),utc_now_iso())); db.commit()
+    await _run_push_db(acc.push_upsert_device, uid, "web", sub["endpoint"], json.dumps(sub), utc_now_iso())
     return {"ok":True}
 
 @app.post("/api/push/native/register")
@@ -1486,19 +1480,14 @@ async def push_native_register(payload: NativePushToken, request: Request):
     uid=_push_user(request); token=payload.token.strip()
     if not uid: raise HTTPException(401,"Login required")
     if len(token)<30 or len(token)>4096: raise HTTPException(400,"Invalid push token")
-    _push_db()
-    with sqlite3.connect(PUSH_DB,timeout=10) as db:
-        db.execute("INSERT INTO push_devices(user_id,kind,endpoint,payload,created_at) VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,payload=excluded.payload",(uid,"native",token,token,utc_now_iso())); db.commit()
+    await _run_push_db(acc.push_upsert_device, uid, "native", token, token, utc_now_iso())
     return {"ok":True}
 
 @app.get("/api/notifications")
 async def notification_history(request: Request, limit: int=100):
     uid=_push_user(request)
     if not uid: raise HTTPException(401,"Login required")
-    _push_db()
-    with sqlite3.connect(PUSH_DB,timeout=10) as db:
-        db.row_factory=sqlite3.Row
-        rows=[dict(r) for r in db.execute("SELECT id,event,symbol,side,title,body,created_at FROM notification_history WHERE user_id=? ORDER BY id DESC LIMIT ?",(uid,max(1,min(limit,200)))).fetchall()]
+    rows = await _run_push_db(acc.push_history, uid, limit)
     return {"rows":rows,"count":len(rows)}
 
 @app.get("/notifications")
@@ -1512,13 +1501,13 @@ async def alerts_config():
             "events": sorted(notifier.events()), "reconfirm_default_seconds": sf.RECONFIRM_SECONDS,
             "max_adverse_atr": sf.RECONFIRM_MAX_ADVERSE_ATR, "background_poller": ALERT_BACKGROUND_ON(),
             "owner_user_id_configured": bool(os.getenv("PUSH_OWNER_USER_ID", "").strip()),
-            "note": "The server must stay awake. Render Free sleeps and cannot provide dependable background monitoring; use an always-on service and persistent disk for device registrations/history."}
+            "note": "The server must stay awake. Render Free sleeps and cannot provide dependable background monitoring; use an always-on service. Device registrations/history are stored in the accounts database (set DATABASE_URL to PostgreSQL)."}
 
 
 @app.post("/api/alerts/test")
 async def alerts_test(request: Request):
     user = _need_user(request)
-    owner_id = int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
+    owner_id = _push_owner_id()
     if owner_id and int(user.get("id", 0)) != owner_id:
         raise HTTPException(403, "Only the configured push owner can send a test notification")
     title = "Option Intelligence - test alert"

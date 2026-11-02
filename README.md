@@ -1,5 +1,12 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.18.5 — push database fix
+- **Root cause:** push device registrations and notification history were kept in a local SQLite file (`push_notifications.sqlite3`), which Render Free erases on every restart/deploy, so phones silently stopped receiving alerts until they re-registered.
+- Both tables now live in the accounts database (PostgreSQL when `DATABASE_URL` is set). `PUSH_DB` is no longer used and no persistent disk is needed.
+- `PUSH_OWNER_USER_ID` is now optional: when empty, alerts go to every account that registered a device.
+- Database and FCM/Web Push calls run in worker threads (they previously blocked the event loop); FCM tokens that report "unregistered" are pruned correctly; a database outage returns a clear 503 instead of a crash.
+- Devices registered before this version must open the app and enable notifications once more.
+
 ## v1.18.0 — finalized background and push alert routing
 - Confirmed-signal push can run with Firebase FCM or Web Push alone; Telegram/ntfy/email are optional additional channels.
 - Background polling is enabled whenever any server-side notification transport is configured.
@@ -413,15 +420,3 @@ Checked and deliberately **not** changed: "Not sideways" gate (the 18 / 16 setup
 ### v1.18.0 deployment hotfix
 - Fixed `BASE_DIR` initialization order so `PUSH_DB` can be configured without a startup `NameError`.
 - Verified module import, Python compilation, frontend/service-worker JavaScript syntax, and all 89 existing tests.
-
-
-## v1.18.5 — Native Android push setup correction
-
-- Separates Capacitor Android/iOS push setup from browser Web Push setup.
-- Android native push no longer depends on VAPID keys being configured.
-- Browser/PWA setup reports a VAPID-specific message when Web Push is not configured.
-- Native runtime with a missing PushNotifications plugin now reports that the APK must be rebuilt, instead of incorrectly reporting that server push is unconfigured.
-- Native registration waits for the FCM token and verifies the server response before reporting success.
-- Frontend/server/static asset versions synchronized to 1.18.5.
-
-Deployment: replace project source files in GitHub and let Render deploy. Keep Render secrets and persistent database files unchanged. If the Android app reports that the native PushNotifications plugin is missing, rebuild and reinstall the APK using the existing GitHub Actions Android workflow and the Firebase Android `google-services.json` secret.

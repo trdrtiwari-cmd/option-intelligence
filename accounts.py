@@ -72,6 +72,24 @@ SCHEMA = [
         updated_at {_F} NOT NULL,
         PRIMARY KEY (user_id, key))""",
     "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
+    # Push registrations and alert history live with the accounts so they survive Render redeploys (PostgreSQL).
+    f"""CREATE TABLE IF NOT EXISTS push_devices (
+        id {_PK},
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        endpoint TEXT NOT NULL UNIQUE,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL)""",
+    f"""CREATE TABLE IF NOT EXISTS notification_history (
+        id {_PK},
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        event TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        side TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS idx_push_history_user ON notification_history(user_id, id DESC)",
 ]
 if IS_PG:
     import psycopg
@@ -559,3 +577,44 @@ class SessionAuthMiddleware:
         data = json.dumps(body).encode()
         await send({"type": "http.response.start", "status": status, "headers": [(b"content-type", b"application/json"), (b"cache-control", b"no-store")]})
         await send({"type": "http.response.body", "body": data})
+
+
+# ---------------------------------------------------------------- push devices / notification history
+def push_upsert_device(user_id, kind, endpoint, payload, created_at):
+    with db() as c:
+        c.run("INSERT INTO push_devices(user_id,kind,endpoint,payload,created_at) VALUES(?,?,?,?,?) "
+              "ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id, payload=excluded.payload",
+              (user_id, kind, endpoint, payload, created_at))
+
+
+def push_devices(kind, user_id=0):
+    """Registered devices of one kind. user_id 0 = every account (single-owner deployments that set no PUSH_OWNER_USER_ID)."""
+    with db() as c:
+        if user_id:
+            return c.all("SELECT id,user_id,endpoint,payload FROM push_devices WHERE kind=? AND user_id=?", (kind, user_id))
+        return c.all("SELECT id,user_id,endpoint,payload FROM push_devices WHERE kind=?", (kind,))
+
+
+def push_delete_device(device_id):
+    with db() as c:
+        c.run("DELETE FROM push_devices WHERE id=?", (device_id,))
+
+
+def push_recipient_ids(user_id=0):
+    """Accounts that should get history rows: the owner, or every account with a registered device."""
+    if user_id:
+        return [user_id]
+    with db() as c:
+        return [r["user_id"] for r in c.all("SELECT DISTINCT user_id FROM push_devices")]
+
+
+def push_add_history(user_id, event, symbol, side, title, body, created_at):
+    with db() as c:
+        c.run("INSERT INTO notification_history(user_id,event,symbol,side,title,body,created_at) VALUES(?,?,?,?,?,?,?)",
+              (user_id, event, symbol, side, title, body, created_at))
+
+
+def push_history(user_id, limit=100):
+    with db() as c:
+        return c.all("SELECT id,event,symbol,side,title,body,created_at FROM notification_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                     (user_id, max(1, min(int(limit), 200))))
