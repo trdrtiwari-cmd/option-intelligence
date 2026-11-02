@@ -1,6 +1,6 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
-## v1.17.8 — finalized background and push alert routing
+## v1.17.9 — finalized background and push alert routing
 - Confirmed-signal push can run with Firebase FCM or Web Push alone; Telegram/ntfy/email are optional additional channels.
 - Background polling is enabled whenever any server-side notification transport is configured.
 - `/api/alerts/test` dispatches a test to configured server channels and registered push devices.
@@ -408,3 +408,8 @@ Checked and deliberately **not** changed: "Not sideways" gate (the 18 / 16 setup
 - Set `ALERT_BACKGROUND=1`, `ALERT_SYMBOLS=NIFTY,BANKNIFTY`, `ALERT_INTERVAL=5`, `ALERT_MODE=scalp`, `ALERT_SCORE_MIN=70`, `ALERT_EVENTS=CONFIRMED`.
 - **Important hosting limitation:** Render's free web service may sleep when idle. No website, PWA, or WebView can reliably execute its JavaScript while the phone OS suspends it, and the server cannot poll while Render is asleep. Reliable closed-app alerts therefore require an always-on backend/worker plus Telegram or ntfy push. Android battery optimization should also be disabled for the ntfy/Telegram app if delivery is delayed.
 - This is alerting/analysis only; it does not place orders. Confirm the live data and risk levels before trading.
+
+
+### v1.17.9 deployment hotfix
+- Fixed `BASE_DIR` initialization order so `PUSH_DB` can be configured without a startup `NameError`.
+- Verified module import, Python compilation, frontend/service-worker JavaScript syntax, and all 89 existing tests.

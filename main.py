@@ -20,6 +20,9 @@ import signal_fusion as sf
 import signal_exits as sx
 import notifier
 
+# Resolve the project directory before any path-backed configuration is initialized.
+BASE_DIR = Path(__file__).resolve().parent
+
 # Push delivery is optional. Secrets stay server-side; unsupported/unconfigured channels fail closed.
 PUSH_DB = Path(os.getenv("PUSH_DB", str(BASE_DIR / "push_notifications.sqlite3")))
 PUSH_LOCK = threading.Lock()
@@ -84,7 +87,6 @@ async def _send_web_push(title, body, data=None):
 async def _dispatch_confirmed_push(title, body, sym, side, event):
     return await asyncio.gather(_send_native_fcm(title,body,{"symbol":sym,"side":side,"event":event}), _send_web_push(title,body,{"symbol":sym,"side":side,"event":event}), return_exceptions=True)
 
-BASE_DIR = Path(__file__).resolve().parent
 APP_TITLE = "Option Intelligence"
 UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY", "").strip()
 UPSTOX_API_SECRET = os.getenv("UPSTOX_API_SECRET", "").strip()
@@ -99,7 +101,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.17.8"
+APP_VERSION = "1.17.9"
 
 
 class NoCacheStaticFiles(StaticFiles):
