@@ -43,7 +43,58 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      - name: 
       - name: Configure Firebase for native push
+        shell: bash
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -e
+
+          VALUE="${GOOGLE_SERVICES_JSON_BASE64:-}"
+
+          if [ -z "$VALUE" ]; then
+            echo "ERROR: Firebase secret is empty."
+            exit 1
+          fi
+
+          mkdir -p android/app
+
+          # Accept either raw JSON or Base64-encoded JSON.
+          if [[ "$VALUE" =~ ^[[:space:]]*\{ ]]; then
+            printf '%s' "$VALUE" > android/app/google-services.json
+            echo "Raw Firebase JSON detected."
+          else
+            printf '%s' "$VALUE" | tr -d '[:space:]' | base64 --decode > android/app/google-services.json
+            echo "Base64 Firebase JSON decoded."
+          fi
+
+          # Validate JSON and Android package.
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = Path("android/app/google-services.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+
+          clients = data.get("client", [])
+          if not clients:
+              raise SystemExit("ERROR: No Firebase Android client found.")
+
+          package = clients[0]["client_info"]["android_client_info"]["package_name"]
+          print("Firebase package:", package)
+
+          if package != "app.optionintelligence.terminal":
+              raise SystemExit("ERROR: Android package name mismatch.")
+
+          print("Firebase JSON validation successful.")
+          PY
+
+          sed -i '/dependencies {/a\        classpath "com.google.gms:google-services:4.4.2"' android/build.gradle
+          echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
+
+          echo "Firebase configuration completed."
+
         shell: bash
         env:
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
