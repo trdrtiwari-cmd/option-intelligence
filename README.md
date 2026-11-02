@@ -1,5 +1,23 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.18.7 - saved daily & monthly strategy results
+
+* Every confirmed BUY CE/PE is logged automatically at the signal-time index price with an ATR stop-loss and target, then auto-exited (target, stop or 15:20 square-off). Each row now also stores the ATR and the stop/target multiples used.
+* Signals page > **Strategy results**: net P/L by day or by month (win rate, profit factor, expectancy, max drawdown, ₹ estimate). Excel export has Daily and Monthly sheets.
+* **Flexible ATR**: owner sets stop and target as multiples of ATR on the Signals page; applies to new signals only.
+* The log is mirrored into the accounts database and restored after a restart (set DATABASE_URL to PostgreSQL on Render).
+* A day-summary push is sent after 15:35 IST on trading days.
+
+## v1.18.6 - phone fit + automatic background alerts
+
+* **Phone layout**: nothing is wider than the screen any more (320-430 px). Long values wrap, grids shrink to one/two columns, and wide tables scroll inside their own box with the first column pinned.
+* **Web Push needs no setup**: the server generates its own Web Push (VAPID) key pair on first start and keeps it in the accounts database. `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` are now optional overrides. The poller therefore starts by itself.
+* **How alerts work with the app closed**: a background poller analyses NIFTY/BANKNIFTY every 10 s during market hours. When a BUY CE/PE passes the reconfirmation hold, it sends a push to every registered phone (and Telegram/ntfy/email if configured) and stores it in Notification history.
+* **One-time step per phone**: open the app, tap **Enable push alerts**, allow notifications. After that the app re-registers silently on every visit. On iPhone: Safari > Share > Add to Home Screen, open from the icon, then tap Enable.
+* **Upstox token**: expires daily; when it does, you now get a push telling you to reconnect (once a day).
+* **Staying awake on Render Free**: the app pings its own URL every 10 min (`KEEPALIVE=0` to disable), but a service that has already gone to sleep must be woken from outside. Add a free monitor (UptimeRobot / cron-job.org) hitting `https://YOUR-APP.onrender.com/health` every 5 min. A paid instance needs none of this.
+* Set `DATABASE_URL` (PostgreSQL) so phone registrations and the generated key survive redeploys; otherwise phones must tap Enable again after each redeploy.
+
 ## v1.18.5 — push database fix
 - **Root cause:** push device registrations and notification history were kept in a local SQLite file (`push_notifications.sqlite3`), which Render Free erases on every restart/deploy, so phones silently stopped receiving alerts until they re-registered.
 - Both tables now live in the accounts database (PostgreSQL when `DATABASE_URL` is set). `PUSH_DB` is no longer used and no persistent disk is needed.

@@ -58,8 +58,10 @@ async def _send_native_fcm(title, body, data=None):
         logger.warning("FCM delivery unavailable: %s", str(exc)[:180]); return {"configured": True, "sent": 0, "error": str(exc)[:160]}
 
 async def _send_web_push(title, body, data=None):
-    public=os.getenv("VAPID_PUBLIC_KEY","").strip(); private=os.getenv("VAPID_PRIVATE_KEY","").strip(); subject=os.getenv("VAPID_SUBJECT","mailto:admin@example.com").strip()
-    if not (public and private): return {"configured": False, "sent": 0}
+    subject=os.getenv("VAPID_SUBJECT","mailto:admin@example.com").strip()
+    try: public, private = await asyncio.to_thread(acc.vapid_keys)
+    except Exception as exc:
+        logger.warning("Web push keys unavailable: %s", str(exc)[:140]); return {"configured": False, "sent": 0}
     try:
         from pywebpush import webpush
         rows = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
@@ -93,7 +95,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.5"
+APP_VERSION = "1.18.7"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1279,7 +1281,8 @@ async def _dashboard_final_for(sym, interval):
 
 SIGNAL_LOG_DB = Path(os.getenv("SIGNAL_LOG_DB", str(BASE_DIR / "signal_log.sqlite3")))
 SIGNAL_LOG_LOCK = threading.Lock()
-SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "target_name", "trade_status", "exit_price", "exit_time", "exit_reason", "gross_pnl_points", "net_pnl_points", "peak_points", "worst_points", "levels_backfilled", "reason"]
+_SIGNAL_LOG_DIRTY = threading.Event()      # set whenever the log changes; the watcher mirrors it to the accounts database
+SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "target_name", "trade_status", "exit_price", "exit_time", "exit_reason", "gross_pnl_points", "net_pnl_points", "peak_points", "worst_points", "levels_backfilled", "atr_at_entry", "sl_atr_mult", "target_atr_mult", "reason"]
 
 def init_signal_log():
     SIGNAL_LOG_DB.parent.mkdir(parents=True, exist_ok=True)
@@ -1304,14 +1307,26 @@ def record_signal_row(symbol, interval, mode, a):
         # trade_levels() returns entry_index / sl_index / targets[]; the old code read keys that do not exist,
         # so every row was logged with blank stop and target and could never auto-exit.
         entry_px, stop_px, target_px, target_name = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
+        atr_v = _float_or_none(a.get("atr"))
+        sl_mult = tgt_mult = None
+        scfg = sx.config()
+        if atr_v and scfg["sl_atr"] and scfg["target_atr"]:        # flexible ATR multiples chosen on the Signals page
+            cl = sx.custom_levels(side, a.get("last_close"), atr_v, scfg["sl_atr"], scfg["target_atr"], dd.THRESHOLDS.get("atr_min_sl_pts", 0))
+            if cl:
+                entry_px, stop_px, target_px = cl[0], cl[1], cl[2]
+                target_name = f"{scfg['target_atr']:g}xATR"
+                sl_mult, tgt_mult = round(cl[3] / atr_v, 2), scfg["target_atr"]
+        elif atr_v and entry_px and stop_px and target_px:           # default plan: record the multiples actually used
+            sl_mult, tgt_mult = round(abs(entry_px - stop_px) / atr_v, 2), round(abs(target_px - entry_px) / atr_v, 2)
         pat = a.get("candle_confirmation") or {}
         row = (now_ist.isoformat(timespec="seconds"), now_ist.date().isoformat(), symbol, int(interval), mode, candle_time,
                str(a.get("decision") or "WAIT"), str(action), str(a.get("side") or ""), float(a.get("score") or 0),
                str(a.get("regime_label") or a.get("regime") or ""), str(pat.get("pattern") or ""), int(bool(pat.get("confirmed"))),
                _float_or_none(a.get("last_close")), entry_px, stop_px,
-               target_px, str(final.get("reason") or a.get("message") or a.get("note") or "")[:500], target_name)
+               target_px, str(final.get("reason") or a.get("message") or a.get("note") or "")[:500], target_name, atr_v, sl_mult, tgt_mult)
         with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
-            db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason,target_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason,target_name,atr_at_entry,sl_atr_mult,target_atr_mult) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            _SIGNAL_LOG_DIRTY.set()
             db.commit()
     except Exception as exc:
         logger.warning("Signal log write failed: %s", str(exc)[:160])
@@ -1360,6 +1375,8 @@ def settle_signal_exits(sym, price, atr=None):
             backfill = sx.backfill_points(
                 lambda x: dd.trade_levels({"side": "CE"}, {}, atr=x, price=100.0), float(atr), cfg["target"])
         closed = sx.settle_open_signals(SIGNAL_LOG_DB, sym, price, datetime.now(IST), atr_backfill=backfill, lock=SIGNAL_LOG_LOCK)
+        if closed:
+            _SIGNAL_LOG_DIRTY.set()
         for c in closed:
             logger.info("Signal log auto-exit %s #%s: %s net %s pts", sym, c["id"], c["status"],
                         None if c.get("net") is None else round(c["net"], 2))
@@ -1367,6 +1384,91 @@ def settle_signal_exits(sym, price, atr=None):
     except Exception as exc:
         logger.warning("Signal auto-exit failed: %s", str(exc)[:160])
         return []
+
+
+# ---- durable copy of the signal log (v1.18.7) -------------------------------------------------------------
+# The SQLite file is erased whenever a Render free instance restarts, which would wipe the day/month history. So every change
+# is mirrored, one JSON blob per month, into the accounts database (PostgreSQL when DATABASE_URL is set) and restored at start.
+_SL_MIRROR_HASH = {}
+SIGNAL_LOG_COLS = None
+
+
+def _signal_rows_all():
+    with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(r) for r in db.execute("SELECT * FROM signal_log ORDER BY id").fetchall()]
+
+
+def mirror_signal_log():
+    import hashlib
+    months = {}
+    for r in _signal_rows_all():
+        r.pop("id", None)
+        months.setdefault(str(r.get("session_date") or "")[:7], []).append(r)
+    for month, rows in months.items():
+        blob = json.dumps(rows, separators=(",", ":"), default=str)
+        h = hashlib.sha1(blob.encode()).hexdigest()
+        if _SL_MIRROR_HASH.get(month) != h:
+            acc.meta_set("signal_log:" + month, blob)
+            _SL_MIRROR_HASH[month] = h
+
+
+def restore_signal_log():
+    """Re-insert rows missing from the local file (after a restart wiped it). Existing rows are never overwritten."""
+    restored = 0
+    for item in acc.meta_list("signal_log:"):
+        try:
+            rows = json.loads(item["value"])
+        except ValueError:
+            continue
+        with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+            have = {r[1] for r in db.execute("PRAGMA table_info(signal_log)").fetchall()}
+            for r in rows:
+                cols = [c for c in r if c in have]
+                cur = db.execute(f"INSERT OR IGNORE INTO signal_log ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", [r[c] for c in cols])
+                restored += cur.rowcount or 0
+            db.commit()
+        import hashlib
+        _SL_MIRROR_HASH[item["key"].split(":", 1)[1]] = hashlib.sha1(item["value"].encode()).hexdigest()
+    return restored
+
+
+@app.on_event("startup")
+async def _restore_signal_log_and_config():
+    try:
+        cfg = await asyncio.to_thread(acc.meta_get, "signal_log_config")
+        if cfg:
+            sx.set_overrides(json.loads(cfg))
+        n = await asyncio.to_thread(restore_signal_log)
+        _SIGNAL_LOG_DIRTY.set()          # first mirror of anything already in the local file
+        if n:
+            logger.info("Signal log: restored %s row(s) from the accounts database", n)
+    except Exception as exc:
+        logger.warning("Signal log restore failed (check DATABASE_URL): %s", str(exc)[:160])
+
+
+_EOD_SENT = None
+
+
+async def _end_of_day_summary():
+    """Once per trading day, shortly after the close, push the day's strategy result to the phone."""
+    global _EOD_SENT
+    now = datetime.now(IST)
+    if now.weekday() >= 5 or now.time() < dtime(15, 35) or _EOD_SENT == now.date():
+        return
+    _EOD_SENT = now.date()
+    day = now.date().isoformat()
+    data = await get_signal_log(day, day, "", 10000)
+    s = sx.summarize(data["rows"], "day")["total"]
+    if not s["signals"]:
+        return
+    title = f"Option Intelligence - day summary {day}"
+    body = (f"{s['signals']} buy signals ({s['ce']} CE / {s['pe']} PE): {s['target_exits']} target, {s['stop_exits']} stop, {s['time_exits']} time exit, {s['open']} still open.\n"
+            f"Net {s['net_points']:+.1f} index pts after costs (gross {s['gross_points']:+.1f}), win rate {s['win_rate'] if s['win_rate'] is not None else '-'}%.\nOpen the Signals page for the day and month breakdown.")
+    await notifier.send_alert(title, body, "default", force=True)
+    for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
+        await asyncio.to_thread(acc.push_add_history, uid, "SUMMARY", "ALL", "-", title, body, utc_now_iso())
+    await _dispatch_confirmed_push(title, body, "SUMMARY", "WAIT", "SUMMARY")
 
 
 _EXIT_WATCHER_TASK = None
@@ -1382,6 +1484,12 @@ async def _signal_exit_watcher():
             open_by_symbol = await asyncio.to_thread(sx.open_trade_count, SIGNAL_LOG_DB, SIGNAL_LOG_LOCK)
             is_open = market_status()["open"]
             delay = 3.0 if is_open else 60.0
+            if _SIGNAL_LOG_DIRTY.is_set():
+                _SIGNAL_LOG_DIRTY.clear()
+                try: await asyncio.to_thread(mirror_signal_log)
+                except Exception as exc: logger.warning("Signal log mirror failed: %s", str(exc)[:140]); _SIGNAL_LOG_DIRTY.set()
+            try: await _end_of_day_summary()
+            except Exception as exc: logger.debug("EOD summary: %s", str(exc)[:140])
             if open_by_symbol and runtime_token:
                 for sym in list(open_by_symbol):
                     if sym not in INDEX_KEYS:
@@ -1453,15 +1561,26 @@ class NativePushToken(BaseModel):
 
 def PUSH_DELIVERY_ENABLED():
     """True when at least one server-side notification transport is configured."""
-    web = bool(os.getenv("VAPID_PUBLIC_KEY", "").strip() and os.getenv("VAPID_PRIVATE_KEY", "").strip())
     native = bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip())
-    return notifier.any_configured() or web or native
+    return True if _web_push_available() else (notifier.any_configured() or native)   # Web Push keys are auto-generated (v1.18.7)
+
+
+def _web_push_available():
+    try:
+        import pywebpush  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 @app.get("/api/push/config")
 async def push_config():
-    return {"web_push": bool(os.getenv("VAPID_PUBLIC_KEY", "").strip() and os.getenv("VAPID_PRIVATE_KEY", "").strip()),
-            "vapid_public_key": os.getenv("VAPID_PUBLIC_KEY", ""),
+    pub = ""
+    if _web_push_available():
+        try: pub = (await asyncio.to_thread(acc.vapid_keys))[0]
+        except Exception as exc: logger.warning("VAPID keys unavailable: %s", str(exc)[:140])
+    return {"web_push": bool(pub),
+            "vapid_public_key": pub,
             "native_push": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()),
             "background_poller": ALERT_BACKGROUND_ON(),
             "owner_user_id_configured": bool(os.getenv("PUSH_OWNER_USER_ID", "").strip()),
@@ -1496,12 +1615,12 @@ async def notifications_page():
 
 @app.get("/api/alerts/config")
 async def alerts_config():
-    return {"channels": {**notifier.channels(), "web_push": bool(os.getenv("VAPID_PUBLIC_KEY") and os.getenv("VAPID_PRIVATE_KEY")),
+    return {"channels": {**notifier.channels(), "web_push": _web_push_available(),
                          "native_push": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON"))},
             "events": sorted(notifier.events()), "reconfirm_default_seconds": sf.RECONFIRM_SECONDS,
             "max_adverse_atr": sf.RECONFIRM_MAX_ADVERSE_ATR, "background_poller": ALERT_BACKGROUND_ON(),
             "owner_user_id_configured": bool(os.getenv("PUSH_OWNER_USER_ID", "").strip()),
-            "note": "The server must stay awake. Render Free sleeps and cannot provide dependable background monitoring; use an always-on service. Device registrations/history are stored in the accounts database (set DATABASE_URL to PostgreSQL)."}
+            "note": "The server must stay awake. The app pings itself every 10 min, but a Render Free service that has already gone to sleep can only be woken by an external pinger (UptimeRobot / cron-job.org -> /health every 5 min) or a paid instance. Device registrations/history are stored in the accounts database (set DATABASE_URL to PostgreSQL)."}
 
 
 @app.post("/api/alerts/test")
@@ -1515,7 +1634,7 @@ async def alerts_test(request: Request):
     results = await notifier.send_alert(title, body, force=True)
     push_results = await _dispatch_confirmed_push(title, body, "TEST", "WAIT", "TEST")
     configured = PUSH_DELIVERY_ENABLED()
-    return {"configured": {**notifier.channels(), "web_push": bool(os.getenv("VAPID_PUBLIC_KEY") and os.getenv("VAPID_PRIVATE_KEY")),
+    return {"configured": {**notifier.channels(), "web_push": _web_push_available(),
                             "native_push": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON"))},
             "results": results, "push_results": push_results,
             "message": "No server notification channel is configured. Configure Telegram/ntfy/email, VAPID Web Push, or Firebase FCM." if not configured else "Test dispatched; check the channel results and your device."}
@@ -1550,9 +1669,56 @@ async def _alert_poller():
                         await analysis(symbol=sym, interval=interval, mode=mode, score_min=score_min, reconfirm=-1)
         except asyncio.CancelledError:
             raise
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                await _token_expired_alert()
+            logger.debug("Alert poller: %s", str(exc.detail)[:160])
         except Exception as exc:
             logger.debug("Alert poller: %s", str(exc)[:160])
         await asyncio.sleep(delay)
+
+
+_TOKEN_ALERT_DAY = None
+
+
+async def _token_expired_alert():
+    """Upstox tokens expire daily. Without a fresh one no signals can be computed, so tell the owner once per day."""
+    global _TOKEN_ALERT_DAY
+    today = datetime.now(IST).date()
+    if _TOKEN_ALERT_DAY == today:
+        return
+    _TOKEN_ALERT_DAY = today
+    title, body = "Option Intelligence - reconnect Upstox", "The Upstox token has expired, so signals and alerts are paused. Open the app > More > Connect Upstox to refresh it."
+    await notifier.send_alert(title, body, "high", force=True)
+    await _dispatch_confirmed_push(title, body, "SYSTEM", "WAIT", "TOKEN")
+
+
+_KEEPALIVE_TASK = None
+
+
+async def _keepalive():
+    """Render's free web service sleeps after ~15 min without inbound traffic. Requesting our own public URL counts as
+    traffic, so the background poller keeps running while the service is awake. It cannot wake a service that is already
+    asleep - point a free external pinger (UptimeRobot / cron-job.org, every 5 min) at /health for that."""
+    url = (os.getenv("KEEPALIVE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if not url or os.getenv("KEEPALIVE", "1").strip() == "0":
+        return
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as c:
+                await c.get(url + "/health")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Keep-alive ping failed: %s", str(exc)[:120])
+        await asyncio.sleep(600)
+
+
+@app.on_event("startup")
+async def _start_keepalive():
+    global _KEEPALIVE_TASK
+    if _KEEPALIVE_TASK is None or _KEEPALIVE_TASK.done():
+        _KEEPALIVE_TASK = asyncio.create_task(_keepalive())
 
 
 @app.on_event("startup")
@@ -1582,7 +1748,51 @@ async def settle_signals_now(symbol: str = ""):
 @app.get("/api/signals/config")
 async def signal_log_config():
     c = sx.config()
-    return {"target": c["target"], "cost_points": c["cost"], "squareoff": c["squareoff"].strftime("%H:%M")}
+    t = dd.THRESHOLDS
+    return {"target": c["target"], "cost_points": c["cost"], "squareoff": c["squareoff"].strftime("%H:%M"),
+            "sl_atr": c["sl_atr"], "target_atr": c["target_atr"],
+            "default_sl_atr": t.get("atr_sl"), "default_target_atr": t.get("atr_t2"), "min_sl_points": t.get("atr_min_sl_pts"),
+            "custom": bool(c["sl_atr"] and c["target_atr"])}
+
+
+class SignalLogConfig(BaseModel):
+    sl_atr: Optional[float] = None          # stop-loss = sl_atr x ATR at the signal (None = back to the default plan)
+    target_atr: Optional[float] = None      # target    = target_atr x ATR at the signal
+    cost_points: Optional[float] = None
+
+
+@app.post("/api/signals/config")
+async def signal_log_config_set(payload: SignalLogConfig, request: Request):
+    _require_admin(request)
+    new = {}
+    if payload.sl_atr is not None or payload.target_atr is not None:
+        if payload.sl_atr is None or payload.target_atr is None:
+            raise HTTPException(400, "Give both the stop and the target multiple (or neither, to use the default plan)")
+        if not 0.2 <= payload.sl_atr <= 5 or not 0.3 <= payload.target_atr <= 10:
+            raise HTTPException(400, "Stop must be 0.2-5 ATR and target 0.3-10 ATR")
+        new.update(sl_atr=payload.sl_atr, target_atr=payload.target_atr)
+    if payload.cost_points is not None:
+        if not 0 <= payload.cost_points <= 200:
+            raise HTTPException(400, "Cost allowance must be 0-200 index points")
+        new["cost"] = payload.cost_points
+    sx.set_overrides(new)
+    try:
+        await asyncio.to_thread(acc.meta_set, "signal_log_config", json.dumps(new))
+    except Exception as exc:
+        logger.warning("Signal config not saved: %s", str(exc)[:140])
+    return await signal_log_config()
+
+
+@app.get("/api/signals/summary")
+async def signal_summary(group: str = "day", start: str = "", end: str = "", symbol: str = ""):
+    """Strategy net profit / loss per day or per month, from the automatically logged and auto-exited trades."""
+    if group not in ("day", "month"):
+        raise HTTPException(400, "group must be day or month")
+    data = await get_signal_log(start, end, symbol, 10000)
+    out = sx.summarize(data["rows"], group)
+    out["cost_points_per_trade"] = sx.config()["cost"]
+    out["note"] = "Index points, after the per-trade cost allowance. Open trades are excluded until they exit; EXPIRED trades (server asleep) carry no P/L."
+    return out
 
 @app.get("/signals")
 async def signal_log_page():
@@ -1626,24 +1836,19 @@ async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = "
     for col in ws.columns:
         letter = col[0].column_letter
         ws.column_dimensions[letter].width = min(42, max(12, max(len(str(c.value or "")) for c in col[:100]) + 2))
-    summary = wb.create_sheet("Daily Summary")
-    summary.append(["Session Date", "Signals", "BUY CE", "BUY PE", "Open", "Target exits", "Stop exits", "Time exits", "Win rate %", "Gross P/L (pts)", "Net P/L (pts)"])
-    days = {}
-    for row in data["rows"]:
-        g = days.setdefault(row.get("session_date") or "Unknown", {"n": 0, "ce": 0, "pe": 0, "open": 0, "T": 0, "S": 0, "Q": 0, "w": 0, "closed": 0, "gross": 0.0, "net": 0.0})
-        g["n"] += 1
-        side = str(row.get("side") or "").upper()
-        g["ce"] += side == "CE"; g["pe"] += side == "PE"
-        st = (row.get("trade_status") or "OPEN").upper()
-        if st == "OPEN": g["open"] += 1
-        elif st in ("TARGET", "STOP", "SQUAREOFF"):
-            g["closed"] += 1; g[{"TARGET": "T", "STOP": "S", "SQUAREOFF": "Q"}[st]] += 1
-            g["gross"] += row.get("gross_pnl_points") or 0; g["net"] += row.get("net_pnl_points") or 0
-            g["w"] += (row.get("net_pnl_points") or 0) > 0
-    for day, g in sorted(days.items()):
-        summary.append([day, g["n"], g["ce"], g["pe"], g["open"], g["T"], g["S"], g["Q"],
-                        round(g["w"] / g["closed"] * 100, 1) if g["closed"] else None, round(g["gross"], 2), round(g["net"], 2)])
-    summary.freeze_panes="A2"; summary.auto_filter.ref=summary.dimensions
+    heads = ["Period", "Signals", "BUY CE", "BUY PE", "Open", "Closed", "Target exits", "Stop exits", "Time exits", "Win rate %", "Gross P/L (pts)",
+             "Costs (pts)", "Net P/L (pts)", "Avg win", "Avg loss", "Profit factor", "Expectancy / trade", "Best", "Worst", "Max drawdown"]
+    keys = ["period", "signals", "ce", "pe", "open", "closed", "target_exits", "stop_exits", "time_exits", "win_rate", "gross_points",
+            "cost_points", "net_points", "avg_win", "avg_loss", "profit_factor", "expectancy", "best", "worst", "max_drawdown"]
+    for title, grp in (("Daily Summary", "day"), ("Monthly Summary", "month")):
+        sheet = wb.create_sheet(title); sheet.append(heads)
+        res = sx.summarize(data["rows"], grp)
+        for p in sorted(res["periods"], key=lambda x: x["period"]): sheet.append([p.get(k) for k in keys])
+        sheet.append(["TOTAL"] + [res["total"].get(k) for k in keys[1:]])
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D"); cell.alignment = Alignment(wrap_text=True)
+        for cell in sheet[sheet.max_row]: cell.font = Font(bold=True)
+        sheet.freeze_panes = "A2"
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
     return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
 

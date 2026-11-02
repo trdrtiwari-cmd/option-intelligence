@@ -23,15 +23,49 @@ from datetime import datetime, time as dtime
 TARGET_NAMES = ("T1", "T2", "T3")
 EXTRA_COLUMNS = [("trade_status", "TEXT DEFAULT 'OPEN'"), ("exit_price", "REAL"), ("gross_pnl_points", "REAL"),
                  ("net_pnl_points", "REAL"), ("exit_time", "TEXT"), ("exit_reason", "TEXT"), ("target_name", "TEXT"),
-                 ("peak_points", "REAL"), ("worst_points", "REAL"), ("levels_backfilled", "INTEGER DEFAULT 0")]
+                 ("peak_points", "REAL"), ("worst_points", "REAL"), ("levels_backfilled", "INTEGER DEFAULT 0"),
+                 ("atr_at_entry", "REAL"), ("sl_atr_mult", "REAL"), ("target_atr_mult", "REAL")]
+
+
+# Runtime overrides (v1.18.7). Set from the Signals page / stored in the database, so ATR multiples can be changed without a
+# redeploy. Only NEW signals use them; trades already logged keep the stop and target they were recorded with.
+OVERRIDES = {}
+
+
+def set_overrides(d):
+    OVERRIDES.clear()
+    for k in ("sl_atr", "target_atr", "cost", "target"):
+        v = (d or {}).get(k)
+        if v not in (None, ""):
+            OVERRIDES[k] = v
+
+
+def _ov_float(key, lo, hi):
+    try:
+        v = float(OVERRIDES.get(key))
+        return v if lo <= v <= hi else None
+    except (TypeError, ValueError):
+        return None
+
+
+def custom_levels(side, price, atr, sl_mult, target_mult, min_sl_points=0.0):
+    """Stop and target from the ATR at the moment of the signal: stop = max(sl_mult x ATR, min points), target = target_mult x ATR.
+    Returns (entry, stop, target, sl_points, target_points) or None."""
+    price, atr = _num(price), _num(atr)
+    if not price or not atr or atr <= 0 or side not in ("CE", "PE"):
+        return None
+    d = 1 if side == "CE" else -1
+    sl_pts = max(sl_mult * atr, min_sl_points)
+    tp_pts = target_mult * atr
+    return (round(price, 2), round(price - d * sl_pts, 2), round(price + d * tp_pts, 2), round(sl_pts, 2), round(tp_pts, 2))
 
 
 def config():
-    target = os.getenv("SIGNAL_LOG_TARGET", "T2").strip().upper()
+    target = str(OVERRIDES.get("target") or os.getenv("SIGNAL_LOG_TARGET", "T2")).strip().upper()
     if target not in TARGET_NAMES:
         target = "T2"
     try:
-        cost = float(os.getenv("SIGNAL_LOG_COST_POINTS", "4"))
+        cost = float(OVERRIDES["cost"]) if _ov_float("cost", 0, 200) is not None else float(os.getenv("SIGNAL_LOG_COST_POINTS", "4"))
     except ValueError:
         cost = 4.0
     raw = os.getenv("SIGNAL_LOG_SQUAREOFF", "15:20").strip()
@@ -40,7 +74,8 @@ def config():
         square = dtime(int(hh), int(mm))
     except Exception:
         square = dtime(15, 20)
-    return {"target": target, "cost": cost, "squareoff": square}
+    return {"target": target, "cost": cost, "squareoff": square,
+            "sl_atr": _ov_float("sl_atr", 0.2, 5.0), "target_atr": _ov_float("target_atr", 0.3, 10.0)}
 
 
 def ensure_columns(db):
@@ -171,3 +206,45 @@ def open_trade_count(db_path, lock=None):
         return dict(run())
     except sqlite3.Error:
         return {}
+
+
+CLOSED = ("TARGET", "STOP", "SQUAREOFF")
+
+
+def _stats(rows):
+    closed = [r for r in rows if r.get("trade_status") in CLOSED and _num(r.get("net_pnl_points")) is not None]
+    nets = [float(r["net_pnl_points"]) for r in closed]
+    wins, losses = [x for x in nets if x > 0], [x for x in nets if x <= 0]
+    cum = peak = dd_max = 0.0
+    for x in nets:
+        cum += x
+        peak = max(peak, cum)
+        dd_max = max(dd_max, peak - cum)
+    gross = sum(float(r.get("gross_pnl_points") or 0) for r in closed)
+    net = sum(nets)
+    by_sym = {}
+    for r in closed:
+        by_sym[r.get("symbol")] = round(by_sym.get(r.get("symbol"), 0.0) + float(r["net_pnl_points"]), 2)
+    cnt = lambda st: sum(1 for r in closed if r.get("trade_status") == st)
+    side = lambda s_: sum(1 for r in rows if str(r.get("side") or "").upper() == s_)
+    return {"signals": len(rows), "ce": side("CE"), "pe": side("PE"), "open": sum(1 for r in rows if (r.get("trade_status") or "OPEN") == "OPEN"),
+            "expired": sum(1 for r in rows if r.get("trade_status") == "EXPIRED"), "closed": len(closed),
+            "target_exits": cnt("TARGET"), "stop_exits": cnt("STOP"), "time_exits": cnt("SQUAREOFF"),
+            "wins": len(wins), "losses": len(losses), "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
+            "gross_points": round(gross, 2), "cost_points": round(gross - net, 2), "net_points": round(net, 2),
+            "avg_win": round(sum(wins) / len(wins), 2) if wins else None, "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
+            "profit_factor": round(sum(wins) / abs(sum(losses)), 2) if wins and sum(losses) < 0 else None,
+            "expectancy": round(net / len(closed), 2) if closed else None, "best": round(max(nets), 2) if nets else None,
+            "worst": round(min(nets), 2) if nets else None, "max_drawdown": round(dd_max, 2), "by_symbol": by_sym}
+
+
+def summarize(rows, group="day"):
+    """Strategy results per day or per month (index points, net of the cost allowance) plus an all-period total.
+    Trades are taken in exit order so the drawdown is the real running one."""
+    size = 7 if group == "month" else 10
+    ordered = sorted(rows, key=lambda r: (str(r.get("exit_time") or r.get("generated_at") or "")))
+    buckets = {}
+    for r in ordered:
+        buckets.setdefault(str(r.get("session_date") or "")[:size], []).append(r)
+    periods = [dict(period=k, **_stats(v)) for k, v in sorted(buckets.items(), reverse=True)]
+    return {"group": group, "periods": periods, "total": _stats(ordered)}

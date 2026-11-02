@@ -90,6 +90,8 @@ SCHEMA = [
         body TEXT NOT NULL,
         created_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_push_history_user ON notification_history(user_id, id DESC)",
+    # Small server-wide key/value store (v1.18.6): holds the auto-generated Web Push (VAPID) key pair.
+    "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ]
 if IS_PG:
     import psycopg
@@ -618,3 +620,47 @@ def push_history(user_id, limit=100):
     with db() as c:
         return c.all("SELECT id,event,symbol,side,title,body,created_at FROM notification_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
                      (user_id, max(1, min(int(limit), 200))))
+
+
+# ---------------------------------------------------------------- server-wide meta (v1.18.6)
+def meta_get(key):
+    with db() as c:
+        row = c.all("SELECT value FROM app_meta WHERE key=?", (key,))
+        return row[0]["value"] if row else None
+
+
+def meta_set(key, value):
+    with db() as c:
+        c.run("INSERT INTO app_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def meta_list(prefix):
+    with db() as c:
+        return c.all("SELECT key,value FROM app_meta WHERE key LIKE ? ORDER BY key", (prefix + "%",))
+
+
+def meta_set_if_absent(key, value):
+    """Store value only if the key is new; returns the value that is stored (so two workers agree on one key pair)."""
+    with db() as c:
+        c.run("INSERT INTO app_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING", (key, value))
+    return meta_get(key)
+
+
+def vapid_keys():
+    """(public, private) Web Push keys, base64url. Generated once and kept in the accounts database, so Web Push works
+    with no manual key setup and survives restarts (PostgreSQL). Env vars VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY win if set."""
+    pub, priv = os.getenv("VAPID_PUBLIC_KEY", "").strip(), os.getenv("VAPID_PRIVATE_KEY", "").strip()
+    if pub and priv:
+        return pub, priv
+    stored = meta_get("vapid_keys")
+    if not stored:
+        import base64
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import serialization
+        key = ec.generate_private_key(ec.SECP256R1())
+        b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+        pub_b = key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        priv_b = key.private_numbers().private_value.to_bytes(32, "big")
+        stored = meta_set_if_absent("vapid_keys", json.dumps({"public": b64(pub_b), "private": b64(priv_b)}))
+    d = json.loads(stored)
+    return d["public"], d["private"]
