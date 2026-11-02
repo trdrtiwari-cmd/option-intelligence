@@ -20,6 +20,70 @@ import signal_fusion as sf
 import signal_exits as sx
 import notifier
 
+# Push delivery is optional. Secrets stay server-side; unsupported/unconfigured channels fail closed.
+PUSH_DB = Path(os.getenv("PUSH_DB", str(BASE_DIR / "push_notifications.sqlite3")))
+PUSH_LOCK = threading.Lock()
+def _push_db():
+    PUSH_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(PUSH_DB, timeout=10) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("CREATE TABLE IF NOT EXISTS push_devices (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL, endpoint TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, created_at TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS notification_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, event TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_push_history_user ON notification_history(user_id,id DESC)")
+        db.commit()
+
+def _push_user(request):
+    u = request.scope.get("oi_user") or {}
+    return int(u.get("id") if isinstance(u, dict) else getattr(u, "id", 0) or 0)
+
+async def _send_native_fcm(title, body, data=None):
+    raw = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+    if not raw: return {"configured": False, "sent": 0}
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, messaging
+        try: app_firebase = firebase_admin.get_app()
+        except ValueError: app_firebase = firebase_admin.initialize_app(credentials.Certificate(json.loads(raw)))
+        with PUSH_LOCK, sqlite3.connect(PUSH_DB, timeout=10) as db:
+            uid=int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
+            if not uid: return {"configured": True, "sent": 0, "error": "PUSH_OWNER_USER_ID is not configured"}
+            rows = db.execute("SELECT id,endpoint FROM push_devices WHERE kind='native' AND user_id=?", (uid,)).fetchall()
+        sent=0
+        for device_id, token in rows:
+            try:
+                messaging.send(messaging.Message(notification=messaging.Notification(title=title, body=body), data={k:str(v) for k,v in (data or {}).items()}, token=token), app=app_firebase); sent+=1
+            except Exception as exc:
+                if 'not-registered' in str(exc).lower() or 'invalid-registration-token' in str(exc).lower():
+                    with sqlite3.connect(PUSH_DB) as db: db.execute('DELETE FROM push_devices WHERE id=?',(device_id,)); db.commit()
+        return {"configured": True, "sent": sent}
+    except Exception as exc:
+        logger.warning("FCM delivery unavailable: %s", str(exc)[:180]); return {"configured": True, "sent": 0, "error": str(exc)[:160]}
+
+async def _send_web_push(title, body, data=None):
+    public=os.getenv("VAPID_PUBLIC_KEY","").strip(); private=os.getenv("VAPID_PRIVATE_KEY","").strip(); subject=os.getenv("VAPID_SUBJECT","mailto:admin@example.com").strip()
+    if not (public and private): return {"configured": False, "sent": 0}
+    try:
+        from pywebpush import webpush, WebPushException
+        with PUSH_LOCK, sqlite3.connect(PUSH_DB, timeout=10) as db:
+            uid=int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
+            if not uid: return {"configured": True, "sent": 0, "error": "PUSH_OWNER_USER_ID is not configured"}
+            rows=db.execute("SELECT id,user_id,payload FROM push_devices WHERE kind='web' AND user_id=?",(uid,)).fetchall()
+        sent=0
+        for device_id, uid, payload in rows:
+            try:
+                await asyncio.to_thread(webpush, subscription_info=json.loads(payload), data=json.dumps({"title":title,"body":body,"url":"/","data":data or {}}), vapid_private_key=private, vapid_claims={"sub":subject}, timeout=8)
+                sent+=1
+            except Exception as exc:
+                if getattr(exc,'response',None) is not None and exc.response.status_code in (404,410):
+                    with sqlite3.connect(PUSH_DB) as db: db.execute('DELETE FROM push_devices WHERE id=?',(device_id,)); db.commit()
+                else: logger.warning("Web push failed: %s",str(exc)[:140])
+        return {"configured":True,"sent":sent}
+    except Exception as exc:
+        logger.warning("Web push unavailable: %s",str(exc)[:160]); return {"configured":True,"sent":0,"error":str(exc)[:160]}
+
+async def _dispatch_confirmed_push(title, body, sym, side, event):
+    return await asyncio.gather(_send_native_fcm(title,body,{"symbol":sym,"side":side,"event":event}), _send_web_push(title,body,{"symbol":sym,"side":side,"event":event}), return_exceptions=True)
+
 BASE_DIR = Path(__file__).resolve().parent
 APP_TITLE = "Option Intelligence"
 UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY", "").strip()
@@ -35,7 +99,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.17.5"
+APP_VERSION = "1.17.8"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1359,27 +1423,106 @@ async def _send_signal_alert(event, sym, interval, mode, a, fused):
         title, body, prio = notifier.format_event(event, sym, interval, mode, side, a, fused.get("reconfirm") or {},
                                                   {"entry": entry, "stop_loss": stop, "target": target}, datetime.now(IST).strftime("%H:%M:%S IST"))
         res = await notifier.send_alert(title, body, prio)
-        logger.info("Signal alert %s %s %s -> %s", event, sym, side, res)
+        if event == "CONFIRMED":
+            _push_db()
+            # Signal notifications are attached to the account that generated the alert; background poller uses owner account.
+            uid = int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
+            if uid:
+                with sqlite3.connect(PUSH_DB, timeout=10) as db:
+                    db.execute("INSERT INTO notification_history(user_id,event,symbol,side,title,body,created_at) VALUES(?,?,?,?,?,?,?)",(uid,event,sym,side,title,body,utc_now_iso())); db.commit()
+            push_res = await _dispatch_confirmed_push(title, body, sym, side, event)
+        else:
+            push_res = []
+        logger.info("Signal alert %s %s %s -> channels=%s push=%s", event, sym, side, res, push_res)
     except Exception as exc:
         logger.warning("Signal alert failed: %s", str(exc)[:160])
 
 
+class WebPushSubscription(BaseModel):
+    subscription: dict
+
+class NativePushToken(BaseModel):
+    token: str
+
+def PUSH_DELIVERY_ENABLED():
+    """True when at least one server-side notification transport is configured."""
+    web = bool(os.getenv("VAPID_PUBLIC_KEY", "").strip() and os.getenv("VAPID_PRIVATE_KEY", "").strip())
+    native = bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip())
+    return notifier.any_configured() or web or native
+
+
+@app.get("/api/push/config")
+async def push_config():
+    return {"web_push": bool(os.getenv("VAPID_PUBLIC_KEY", "").strip() and os.getenv("VAPID_PRIVATE_KEY", "").strip()),
+            "vapid_public_key": os.getenv("VAPID_PUBLIC_KEY", ""),
+            "native_push": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()),
+            "background_poller": ALERT_BACKGROUND_ON(),
+            "owner_user_id_configured": bool(os.getenv("PUSH_OWNER_USER_ID", "").strip()),
+            "delivery_configured": PUSH_DELIVERY_ENABLED()}
+
+@app.post("/api/push/web/subscribe")
+async def push_web_subscribe(payload: WebPushSubscription, request: Request):
+    uid=_push_user(request); sub=payload.subscription
+    if not uid: raise HTTPException(401,"Login required")
+    if not isinstance(sub,dict) or not sub.get("endpoint") or not isinstance(sub.get("keys"),dict): raise HTTPException(400,"Invalid Web Push subscription")
+    _push_db()
+    with sqlite3.connect(PUSH_DB,timeout=10) as db:
+        db.execute("INSERT INTO push_devices(user_id,kind,endpoint,payload,created_at) VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,payload=excluded.payload",(uid,"web",sub["endpoint"],json.dumps(sub),utc_now_iso())); db.commit()
+    return {"ok":True}
+
+@app.post("/api/push/native/register")
+async def push_native_register(payload: NativePushToken, request: Request):
+    uid=_push_user(request); token=payload.token.strip()
+    if not uid: raise HTTPException(401,"Login required")
+    if len(token)<30 or len(token)>4096: raise HTTPException(400,"Invalid push token")
+    _push_db()
+    with sqlite3.connect(PUSH_DB,timeout=10) as db:
+        db.execute("INSERT INTO push_devices(user_id,kind,endpoint,payload,created_at) VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,payload=excluded.payload",(uid,"native",token,token,utc_now_iso())); db.commit()
+    return {"ok":True}
+
+@app.get("/api/notifications")
+async def notification_history(request: Request, limit: int=100):
+    uid=_push_user(request)
+    if not uid: raise HTTPException(401,"Login required")
+    _push_db()
+    with sqlite3.connect(PUSH_DB,timeout=10) as db:
+        db.row_factory=sqlite3.Row
+        rows=[dict(r) for r in db.execute("SELECT id,event,symbol,side,title,body,created_at FROM notification_history WHERE user_id=? ORDER BY id DESC LIMIT ?",(uid,max(1,min(limit,200)))).fetchall()]
+    return {"rows":rows,"count":len(rows)}
+
+@app.get("/notifications")
+async def notifications_page():
+    return FileResponse(BASE_DIR / "static" / "notifications.html", headers={"Cache-Control":"no-cache"})
+
 @app.get("/api/alerts/config")
 async def alerts_config():
-    return {"channels": notifier.channels(), "events": sorted(notifier.events()), "reconfirm_default_seconds": sf.RECONFIRM_SECONDS,
+    return {"channels": {**notifier.channels(), "web_push": bool(os.getenv("VAPID_PUBLIC_KEY") and os.getenv("VAPID_PRIVATE_KEY")),
+                         "native_push": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON"))},
+            "events": sorted(notifier.events()), "reconfirm_default_seconds": sf.RECONFIRM_SECONDS,
             "max_adverse_atr": sf.RECONFIRM_MAX_ADVERSE_ATR, "background_poller": ALERT_BACKGROUND_ON(),
-            "note": "Render free web services block SMTP; Telegram, ntfy and the Resend email API use HTTPS and work there."}
+            "owner_user_id_configured": bool(os.getenv("PUSH_OWNER_USER_ID", "").strip()),
+            "note": "The server must stay awake. Render Free sleeps and cannot provide dependable background monitoring; use an always-on service and persistent disk for device registrations/history."}
 
 
 @app.post("/api/alerts/test")
-async def alerts_test():
-    results = await notifier.send_alert("Option Intelligence - test alert", f"Test message sent {datetime.now(IST).strftime('%H:%M:%S IST')}. If you can read this on your phone/email, signal alerts will reach you.", force=True)
-    return {"configured": notifier.channels(), "results": results,
-            "message": "No server channel is configured (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, or NTFY_TOPIC, or RESEND_API_KEY + ALERT_EMAIL_TO). The browser beep still works." if not results else "Sent."}
+async def alerts_test(request: Request):
+    user = _need_user(request)
+    owner_id = int(os.getenv("PUSH_OWNER_USER_ID", "0") or 0)
+    if owner_id and int(user.get("id", 0)) != owner_id:
+        raise HTTPException(403, "Only the configured push owner can send a test notification")
+    title = "Option Intelligence - test alert"
+    body = f"Test message sent {datetime.now(IST).strftime('%H:%M:%S IST')}. If you can read this on your phone, push notifications are working."
+    results = await notifier.send_alert(title, body, force=True)
+    push_results = await _dispatch_confirmed_push(title, body, "TEST", "WAIT", "TEST")
+    configured = PUSH_DELIVERY_ENABLED()
+    return {"configured": {**notifier.channels(), "web_push": bool(os.getenv("VAPID_PUBLIC_KEY") and os.getenv("VAPID_PRIVATE_KEY")),
+                            "native_push": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON"))},
+            "results": results, "push_results": push_results,
+            "message": "No server notification channel is configured. Configure Telegram/ntfy/email, VAPID Web Push, or Firebase FCM." if not configured else "Test dispatched; check the channel results and your device."}
 
 
 def ALERT_BACKGROUND_ON():
-    return notifier.any_configured() and os.getenv("ALERT_BACKGROUND", "1").strip() != "0"
+    return PUSH_DELIVERY_ENABLED() and os.getenv("ALERT_BACKGROUND", "1").strip() != "0"
 
 
 _ALERT_POLLER_TASK = None
@@ -1388,7 +1531,7 @@ _ALERT_POLLER_TASK = None
 async def _alert_poller():
     """Keeps the reconfirmation clock running and sends alerts even when no browser tab is open. It only analyses a
     symbol when no page has done so in the last 10 s, so an open terminal is not doubled up. Needs the server awake."""
-    syms = [x.strip().upper() for x in os.getenv("ALERT_SYMBOLS", "NIFTY").split(",") if x.strip().upper() in INDEX_KEYS] or ["NIFTY"]
+    syms = [x.strip().upper() for x in os.getenv("ALERT_SYMBOLS", "NIFTY,BANKNIFTY").split(",") if x.strip().upper() in INDEX_KEYS] or ["NIFTY", "BANKNIFTY"]
     try:
         interval = int(os.getenv("ALERT_INTERVAL", "5"))
     except ValueError:
@@ -1556,7 +1699,7 @@ async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standa
                         daily_losses=stopouts_today(sym) if MAX_DAILY_LOSSES else None, max_daily_losses=MAX_DAILY_LOSSES)
         a["reconfirm"] = fused.get("reconfirm")
         ev = (fused.get("reconfirm") or {}).get("event")
-        if ev and market["open"] and ev in notifier.events() and notifier.any_configured():
+        if ev and market["open"] and ev in notifier.events() and PUSH_DELIVERY_ENABLED():
             asyncio.create_task(_send_signal_alert(ev, sym, interval, mode, a, fused))
         a["gates"] = (a.get("gates") or []) + fused["gates"]
         a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],

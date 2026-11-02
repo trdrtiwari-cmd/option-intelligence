@@ -1,5 +1,14 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.17.8 — finalized background and push alert routing
+- Confirmed-signal push can run with Firebase FCM or Web Push alone; Telegram/ntfy/email are optional additional channels.
+- Background polling is enabled whenever any server-side notification transport is configured.
+- `/api/alerts/test` dispatches a test to configured server channels and registered push devices.
+- `/api/auth/me` returns `user.id`; set that numeric value as `PUSH_OWNER_USER_ID` for background push routing and notification history.
+- Device registrations and notification history are stored in SQLite. Use a persistent disk on the hosting provider and set `PUSH_DB` to its mounted path; otherwise registrations/history can disappear on redeploy/restart.
+
+See `mobile/README.md` and `.env.example` for setup. Background delivery still requires the backend to remain awake; Render Free sleeps and is not suitable for dependable unattended monitoring.
+
 ## v1.17.5 — a pending local change (e.g. an open paper trade) no longer blocks pulling changes from other devices; More -> Sync now shows the signed-in account, last check and any sync problem.
 
 ## v1.17.4 — the "Waiting for data" label is replaced by the update time in the option-premium chart view.
@@ -388,3 +397,14 @@ These files were produced by v1.15, so they measure the current engine. Method: 
 | 13:30 cutoff and 09:45 start | After the RSI fix, a 14:30 cutoff adds +40 for scalp but loses 38 for standard; a 09:45 start beats 09:15/09:30 (+486 vs +436 scalp) | Unchanged |
 
 Checked and deliberately **not** changed: "Not sideways" gate (the 18 / 16 setups it alone blocked averaged -1.8 / -2.1 pts, so the gate is right; the earlier "relax it" hint was noise), "CE needs structure" and "CE not inside a fresh breakout" (blocked 21 and 32 setups averaging -7.9 and -1.7), scalp chase limit (a 1.5 ATR cap looked good alone but cost -108 pts once the RSI fix was in), score gate (the 10 setups blocked only by score < 70 averaged +11, n = 10, SE 7.6; the page's Minimum score 65 option tests this), ATR-size buckets and the 12:00-13:00 window (non-monotone or opposite signs in the two halves).
+
+
+## v1.17.6 — background monitoring and confirmed-signal alerts
+
+- Background alert polling now watches **NIFTY and BANKNIFTY** by default.
+- Phone alerts default to **CONFIRMED only** (not preliminary STARTED setups). Override with `ALERT_EVENTS` if desired.
+- The server-side poller continues to run with the browser/mobile app closed, but only while the hosted backend process is awake and has a valid Upstox access token.
+- For phone notifications, configure **Telegram** (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) or **ntfy** (`NTFY_TOPIC`) in Render Environment. Then redeploy and use Terminal → **Test alert** to verify delivery.
+- Set `ALERT_BACKGROUND=1`, `ALERT_SYMBOLS=NIFTY,BANKNIFTY`, `ALERT_INTERVAL=5`, `ALERT_MODE=scalp`, `ALERT_SCORE_MIN=70`, `ALERT_EVENTS=CONFIRMED`.
+- **Important hosting limitation:** Render's free web service may sleep when idle. No website, PWA, or WebView can reliably execute its JavaScript while the phone OS suspends it, and the server cannot poll while Render is asleep. Reliable closed-app alerts therefore require an always-on backend/worker plus Telegram or ntfy push. Android battery optimization should also be disabled for the ntfy/Telegram app if delivery is delayed.
+- This is alerting/analysis only; it does not place orders. Confirm the live data and risk levels before trading.
