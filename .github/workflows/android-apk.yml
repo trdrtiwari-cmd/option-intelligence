@@ -24,6 +24,14 @@ jobs:
       - run: node set-url.mjs
         env: { APP_URL: "${{ inputs.app_url }}" }
       - run: npx cap add android
+      - name: Configure Firebase for native push (optional)
+        if: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 != '' }}
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > android/app/google-services.json
+          sed -i '/dependencies {/a\        classpath "com.google.gms:google-services:4.4.2"' android/build.gradle
+          echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
       - run: npx capacitor-assets generate --android --iconBackgroundColor '#0b1220' --splashBackgroundColor '#0b1220'
       - run: npx cap sync android
       - run: ./gradlew assembleDebug
