@@ -1,22 +1,43 @@
-"""Regression checks for push database initialization and FCM delivery."""
+"""Push storage lives in the accounts database (survives Render redeploys). Run: python tests/test_push_storage.py"""
+import importlib, os, sys, tempfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
-def test_push_db_initialized_before_delivery_queries():
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    for fn in ("_send_native_fcm", "_send_web_push"):
-        start = source.index("async def " + fn)
-        assert "_push_db()" in source[start:start+180]
-    assert "async def _init_push_storage():" in source
-    assert "CREATE TABLE IF NOT EXISTS push_devices" in source
-    assert "CREATE TABLE IF NOT EXISTS notification_history" in source
 
-def test_push_endpoint_and_version():
+def _fresh_accounts():
+    os.environ.pop("DATABASE_URL", None)
+    os.environ["SQLITE_PATH"] = os.path.join(tempfile.mkdtemp(), "t.db")
+    sys.path.insert(0, str(ROOT))
+    import accounts
+    return importlib.reload(accounts)
+
+
+def test_push_roundtrip_in_accounts_db():
+    acc = _fresh_accounts()
+    uid = acc.create_user("pushuser", "correct horse battery 42")["id"]
+    acc.push_upsert_device(uid, "web", "https://e/1", "{}", "t")
+    acc.push_upsert_device(uid, "web", "https://e/1", '{"a":1}', "t")  # upsert, not duplicate
+    acc.push_upsert_device(uid, "native", "tok" * 20, "tok" * 20, "t")
+    web = acc.push_devices("web", uid)
+    assert len(web) == 1 and web[0]["payload"] == '{"a":1}'
+    assert len(acc.push_devices("native", 0)) == 1          # owner unset -> all accounts
+    assert acc.push_recipient_ids(0) == [uid] and acc.push_recipient_ids(uid) == [uid]
+    acc.push_delete_device(web[0]["id"])
+    assert acc.push_devices("web", uid) == []
+    acc.push_add_history(uid, "CONFIRMED", "NIFTY", "CALL", "t", "b", "now")
+    acc.push_add_history(uid, "CONFIRMED", "NIFTY", "PUT", "t2", "b", "now")
+    hist = acc.push_history(uid, 10)
+    assert [h["side"] for h in hist] == ["PUT", "CALL"]
+
+
+def test_main_uses_accounts_db_not_local_sqlite():
     source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "push_notifications.sqlite3" not in source and "PUSH_DB" not in source
+    assert "acc.push_devices" in source and "acc.push_upsert_device" in source
     assert '@app.post("/api/push/native/register")' in source
-    assert 'APP_VERSION = "1.18.5"' in source
+
 
 if __name__ == "__main__":
-    test_push_db_initialized_before_delivery_queries()
-    test_push_endpoint_and_version()
+    test_push_roundtrip_in_accounts_db()
+    test_main_uses_accounts_db_not_local_sqlite()
     print("all push storage tests passed")
