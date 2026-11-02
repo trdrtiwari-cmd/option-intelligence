@@ -14,7 +14,7 @@ def test_push_db_initialized_before_delivery_queries():
 def test_push_endpoint_and_version():
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert '@app.post("/api/push/native/register")' in source
-    assert 'APP_VERSION = "1.18.4"' in source
+    assert 'APP_VERSION = "1.18.5"' in source
 
 if __name__ == "__main__":
     test_push_db_initialized_before_delivery_queries()
