@@ -411,8 +411,10 @@ async function refreshChartSource(){
  catch(e){if(id!==chartRequestId)return;currentCandles=[];renderCandles([]);$("chartNote").textContent="Option premium chart unavailable: "+e.message;toast("Option chart failed: "+e.message)}
 }
 
-async function api(url){
-  const res=await fetch(url);let data;try{data=await res.json()}catch{data={detail:await res.text()}}
+async function api(url, options={}){
+  // Preserve caller-supplied method, headers and body. Push registration uses POST;
+  // dropping options here silently converted it to GET and caused HTTP 405.
+  const res=await fetch(url, options);let data;try{data=await res.json()}catch{data={detail:await res.text()}}
   if(!res.ok)throw new Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail||data));
   return data;
 }
@@ -1180,7 +1182,38 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
       const cfg=await api("/api/push/config"); let enabled=[];
       // Native Capacitor Android/iOS push (FCM on Android; Firebase project setup required).
       const native=window.Capacitor?.isNativePlatform?.() && window.Capacitor?.Plugins?.PushNotifications;
-      if(native){ const perm=await native.requestPermissions(); if(perm.receive!=="granted")throw new Error("Push permission not granted"); await native.addListener("registration",async t=>{await api("/api/push/native/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token:t.value})});}); await native.register(); enabled.push("native push"); }
+      if(native){
+        const perm=await native.requestPermissions();
+        if(perm.receive!=="granted")throw new Error("Push permission not granted");
+        // Wait for the FCM token and for the server to confirm it was saved.
+        // Do not report success merely because the native register() call started.
+        await new Promise((resolve,reject)=>{
+          let settled=false, registrationHandle=null, errorHandle=null;
+          const finish=(fn,value)=>{
+            if(settled)return; settled=true; clearTimeout(timer);
+            try{registrationHandle?.remove()}catch{}
+            try{errorHandle?.remove()}catch{}
+            fn(value);
+          };
+          const timer=setTimeout(()=>finish(reject,new Error("Timed out waiting for Firebase device token. Check Google Services configuration and internet access.")),25000);
+          native.addListener("registration",async t=>{
+            try{
+              if(!t?.value)throw new Error("Firebase returned an empty device token");
+              await api("/api/push/native/register",{
+                method:"POST",
+                headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({token:t.value})
+              });
+              finish(resolve,true);
+            }catch(e){finish(reject,e)}
+          }).then(h=>{registrationHandle=h}).catch(e=>finish(reject,e));
+          native.addListener("registrationError",e=>{
+            finish(reject,new Error(e?.error||"Firebase device registration failed"));
+          }).then(h=>{errorHandle=h}).catch(e=>finish(reject,e));
+          native.register().catch(e=>finish(reject,e));
+        });
+        enabled.push("native push");
+      }
       // Browser/PWA Web Push. Requires VAPID keys configured on the server.
       if("serviceWorker" in navigator && "PushManager" in window && cfg.web_push && cfg.vapid_public_key){
         const perm=await Notification.requestPermission(); if(perm!=="granted")throw new Error("Browser notification permission not granted");
