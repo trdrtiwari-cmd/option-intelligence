@@ -101,7 +101,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.1"
+APP_VERSION = "1.18.2"
 
 
 class NoCacheStaticFiles(StaticFiles):
