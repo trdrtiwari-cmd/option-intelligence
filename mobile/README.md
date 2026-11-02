@@ -32,7 +32,7 @@ iPhone (needs a Mac with Xcode and an Apple developer account for anything beyon
 - Alerts on the phone: the app itself beeps while open. For alerts while the app is closed use the Telegram / ntfy / email channels already built in (see `.env.example`).
 
 
-## Native push notifications (v1.17.9)
+## Native push notifications (v1.18.0)
 1. Create a Firebase project, add an Android app with package ID `app.optionintelligence.terminal`, download `google-services.json`. For GitHub Actions builds, base64-encode that file and add it as repository secret `GOOGLE_SERVICES_JSON_BASE64`; for local builds place it at `mobile/android/app/google-services.json` after `npm run android:add`.
 2. Ensure the Android Gradle project applies the Google Services plugin (Capacitor's push plugin setup instructions for your generated Android project). Then run `npm install` and `npm run android:sync`, rebuild the APK, install it, sign in, and tap **Enable push alerts**.
 3. In Render set `FIREBASE_SERVICE_ACCOUNT_JSON` to the full Firebase service-account JSON (one-line JSON value). Keep it secret; never commit it.
