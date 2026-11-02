@@ -37,7 +37,25 @@ def test_main_uses_accounts_db_not_local_sqlite():
     assert '@app.post("/api/push/native/register")' in source
 
 
+def test_vapid_keys_autogenerate_and_persist():
+    import base64
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    os.environ.pop("VAPID_PUBLIC_KEY", None); os.environ.pop("VAPID_PRIVATE_KEY", None)
+    acc = _fresh_accounts()
+    pub, priv = acc.vapid_keys()
+    assert acc.vapid_keys() == (pub, priv)                      # stable across calls (stored in the database)
+    d = lambda s: base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+    assert len(d(priv)) == 32 and len(d(pub)) == 65 and d(pub)[0] == 4
+    key = ec.derive_private_key(int.from_bytes(d(priv), "big"), ec.SECP256R1())
+    assert key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint) == d(pub)
+    os.environ["VAPID_PUBLIC_KEY"], os.environ["VAPID_PRIVATE_KEY"] = "P", "Q"
+    assert acc.vapid_keys() == ("P", "Q")                       # env override wins
+    os.environ.pop("VAPID_PUBLIC_KEY"); os.environ.pop("VAPID_PRIVATE_KEY")
+
+
 if __name__ == "__main__":
     test_push_roundtrip_in_accounts_db()
     test_main_uses_accounts_db_not_local_sqlite()
+    test_vapid_keys_autogenerate_and_persist()
     print("all push storage tests passed")

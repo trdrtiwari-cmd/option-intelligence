@@ -91,6 +91,36 @@ def test_no_price_leaves_trade_open():
     assert sx.settle_open_signals(p, "NIFTY", None, DAY) == [] and row(p)["trade_status"] == "OPEN"
 
 
+def test_custom_atr_levels_and_summary():
+    sx.set_overrides({"sl_atr": 1.0, "target_atr": 2.0})
+    try:
+        c = sx.config(); assert c["sl_atr"] == 1.0 and c["target_atr"] == 2.0
+        e, stop, tgt, slp, tpp = sx.custom_levels("CE", 22800.0, 20.0, 1.0, 2.0, 10)
+        assert (e, stop, tgt, slp, tpp) == (22800.0, 22780.0, 22840.0, 20.0, 40.0)
+        e, stop, tgt, *_ = sx.custom_levels("PE", 22800.0, 20.0, 0.25, 2.0, 10)
+        assert stop == 22810.0 and tgt == 22760.0                       # minimum stop distance respected, PE mirrored
+        assert sx.custom_levels("CE", 22800.0, None, 1, 2) is None
+    finally:
+        sx.set_overrides({})
+    assert sx.config()["sl_atr"] is None
+
+
+def test_summarize_day_and_month():
+    R = lambda d, st, g, side="CE", t="10:00": {"session_date": d, "trade_status": st, "gross_pnl_points": g, "net_pnl_points": None if g is None else g - 4,
+                                              "side": side, "symbol": "NIFTY", "exit_time": f"{d}T{t}:00+05:30"}
+    rows = [R("2026-10-29", "TARGET", 30), R("2026-10-29", "STOP", -20, "PE", "11:00"), R("2026-10-30", "SQUAREOFF", 5),
+            R("2026-11-02", "TARGET", 40), R("2026-11-02", "OPEN", None), R("2026-11-02", "EXPIRED", None)]
+    d = sx.summarize(rows, "day")
+    by = {p["period"]: p for p in d["periods"]}
+    assert by["2026-10-29"]["net_points"] == 26 + (-24) and by["2026-10-29"]["win_rate"] == 50.0
+    assert by["2026-11-02"]["open"] == 1 and by["2026-11-02"]["expired"] == 1 and by["2026-11-02"]["closed"] == 1
+    m = sx.summarize(rows, "month")
+    mm = {p["period"]: p for p in m["periods"]}
+    assert mm["2026-10"]["net_points"] == 26 - 24 + 1 and mm["2026-11"]["net_points"] == 36
+    t = m["total"]; assert t["closed"] == 4 and t["net_points"] == 39 and t["max_drawdown"] == 24 and t["profit_factor"] == round(63 / 24, 2)
+    assert sx.summarize([], "day")["total"]["closed"] == 0
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):
