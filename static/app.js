@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.17.5";
+const FRONTEND_VERSION="1.17.9";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -1169,3 +1169,27 @@ function restoreSavedContract(){try{
 }catch(e){console.warn("contract restore failed",e)}}
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
+
+// v1.17.9: opt-in Web Push and Capacitor native FCM registration.
+(async function initPushControls(){
+  const btn=$("enablePush"); if(!btn)return;
+  const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
+  btn.addEventListener("click",async()=>{
+    const old=btn.textContent; btn.disabled=true; btn.textContent="Enabling…";
+    try {
+      const cfg=await api("/api/push/config"); let enabled=[];
+      // Native Capacitor Android/iOS push (FCM on Android; Firebase project setup required).
+      const native=window.Capacitor?.isNativePlatform?.() && window.Capacitor?.Plugins?.PushNotifications;
+      if(native){ const perm=await native.requestPermissions(); if(perm.receive!=="granted")throw new Error("Push permission not granted"); await native.addListener("registration",async t=>{await api("/api/push/native/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token:t.value})});}); await native.register(); enabled.push("native push"); }
+      // Browser/PWA Web Push. Requires VAPID keys configured on the server.
+      if("serviceWorker" in navigator && "PushManager" in window && cfg.web_push && cfg.vapid_public_key){
+        const perm=await Notification.requestPermission(); if(perm!=="granted")throw new Error("Browser notification permission not granted");
+        const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
+        if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
+        await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})}); enabled.push("Web Push");
+      }
+      if(!enabled.length)throw new Error("Push is not configured on the server yet. Configure VAPID keys for Web Push and Firebase service account for Android.");
+      toast("Enabled: "+enabled.join(" + "));
+    } catch(e){toast("Push setup: "+e.message);} finally {btn.disabled=false;btn.textContent=old;}
+  });
+})();

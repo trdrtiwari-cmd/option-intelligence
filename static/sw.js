@@ -37,3 +37,15 @@ self.addEventListener("fetch", e => {
     }
   }
 });
+
+// Background Web Push: works while the installed PWA/browser tab is closed (HTTPS required).
+self.addEventListener("push", event => {
+  let data = {}; try { data = event.data ? event.data.json() : {}; } catch (_) {}
+  const title = data.title || "Option Intelligence";
+  const options = { body: data.body || "A confirmed signal is available.", icon: "/static/icons/icon-192.png", badge: "/static/icons/icon-192.png", tag: "oi-" + ((data.data||{}).symbol || "signal") + "-" + ((data.data||{}).side || "confirmed"), renotify: true, data: { url: data.url || "/", ...(data.data||{}) } };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+self.addEventListener("notificationclick", event => {
+  event.notification.close(); const target = new URL(event.notification.data?.url || "/", self.location.origin).href;
+  event.waitUntil(clients.matchAll({type:"window", includeUncontrolled:true}).then(list => { for (const c of list) { if (c.url.startsWith(self.location.origin) && "focus" in c) { c.navigate(target); return c.focus(); } } return clients.openWindow ? clients.openWindow(target) : undefined; }));
+});
