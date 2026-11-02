@@ -80,6 +80,37 @@ body{-webkit-tap-highlight-color:transparent}
   .m-offline{display:block;position:fixed;left:10px;right:10px;top:calc(var(--sat) + 6px);z-index:990;background:#2b2517;border:1px solid #66552c;color:#f5d995;border-radius:10px;padding:8px 12px;font-size:12px;text-align:center}
   .m-offline[hidden]{display:none}
 
+
+  /* v1.18.6 - nothing may be wider than the screen. Grid/flex children default to min-width:auto, so one long value
+     (a price, a contract name, a gate message) used to stretch a whole column past the edge of the phone. */
+  html{overflow-x:hidden}
+  body{max-width:100%}
+  main,main>*,.panel,.section-head>*,.stat,.stats>*,.paper-grid>*,.confirm-grid>*,.dc-grid>*,.dc-final-grid>*,.dg-groups>*,.dc-two>*,.derivatives-grid>*,.deriv-card,.signal-box,.toolbar>*{min-width:0;max-width:100%}
+  .confirm-grid,.dc-grid,.dc-final-grid,.dg-groups,.paper-grid,.dc-two{grid-template-columns:minmax(0,1fr)!important}
+  .dc-big,.dg-big{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  #extraInd{grid-template-columns:minmax(0,1fr)}
+  .dc-score,.dc-atr-grid>*{min-width:0}
+  .dc-atr-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .sub,.notice,.gate-list li,.metric-list>*,.signal-value,.signal-box,.deriv-card,.stat,.item,h1,h2,h3,p,label,small{overflow-wrap:anywhere;word-break:normal}
+  .gate-list{flex-wrap:wrap}
+  .signal-value{font-size:clamp(20px,7vw,30px)}
+  #lastPrice{font-size:clamp(20px,7vw,26px);white-space:normal;overflow-wrap:anywhere}
+  .section-head,.chart-section-head,.chart-actions,.paper-actions,.capital-controls{flex-wrap:wrap;gap:8px}
+  .capital-controls label{flex:1 1 140px;min-width:0}
+  .chart-line-legend,.chart-tools{flex-wrap:wrap}
+  .chart canvas,.chart svg,.chart>div{max-width:100%}
+  .dg-toolbar input{width:100%}
+  pre,code{white-space:pre-wrap;overflow-wrap:anywhere}
+
+  /* Tables: compact so most columns fit; whatever still doesn't fit scrolls INSIDE its own box (never the page),
+     with the first column pinned so you always know which row you are reading. */
+  .table-wrap{overflow-x:auto;max-width:100%;border-radius:10px;position:relative;scrollbar-width:thin}
+  .table-wrap table{font-size:12px;width:100%}
+  .table-wrap th,.table-wrap td{padding:7px 6px;white-space:normal;overflow-wrap:anywhere;vertical-align:top}
+  .table-wrap th{font-size:10.5px;letter-spacing:.2px}
+  .table-wrap td:first-child,.table-wrap th:first-child{position:sticky;left:0;z-index:1;background:var(--panel)}
+  .sr-table td:last-child,.sr-table th:last-child{min-width:0}
+
   /* account + login */
   .account-main{padding-bottom:20px}
   .auth-wrap{padding:calc(24px + var(--sat)) 14px 24px}

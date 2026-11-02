@@ -54,10 +54,11 @@ function render() {
     return `<tr><td>${esc(r.session_date)}</td><td>${esc(timeOnly(r.generated_at))}</td><td>${esc(r.symbol)}</td><td>${esc(r.interval)}m</td><td>${esc(r.mode)}</td>` +
       `<td>${r.side === 'CE' ? 'BUY CE' : 'BUY PE'}</td><td>${esc(r.score)}</td><td>${esc(r.regime)}</td><td>${esc(r.pattern)}</td>` +
       `<td>${fmt(r.entry ?? r.last_close)}</td><td>${fmt(r.stop_loss)}${bf}</td><td>${fmt(r.target)}${r.target_name ? ` <span class="sub">${esc(r.target_name)}</span>` : ''}</td>` +
+      `<td>${num(r.atr_at_entry) === null ? '' : fmt(r.atr_at_entry, 1) + ' <span class="sub">/ ' + fmt(r.sl_atr_mult, 2) + '× / ' + fmt(r.target_atr_mult, 2) + '×</span>'}</td>` +
       `<td style="${stColor}">${esc(st)}</td><td>${fmt(r.exit_price)}</td><td>${esc(timeOnly(r.exit_time))}</td><td>${esc(r.exit_reason)}</td>` +
       `<td style="${tone(gross)}">${num(gross) === null ? '' : signed(gross)}${note}</td><td style="${tone(netv)}">${num(netv) === null ? '' : signed(netv)}${note}</td>` +
       `<td style="${tone(rupees(netv))}">${rupees(netv) === null ? '' : '₹' + signed(rupees(netv), 0)}</td><td>${esc(r.reason)}</td></tr>`;
-  }).join('') : '<tr><td colspan="20" class="empty">No records for these filters yet. Open the terminal and refresh analysis during market hours.</td></tr>';
+  }).join('') : '<tr><td colspan="21" class="empty">No records for these filters yet. Open the terminal and refresh analysis during market hours.</td></tr>';
 }
 
 async function loadPrices() {
@@ -75,15 +76,57 @@ async function load() {
     if (!r.ok) throw Error(await r.text());
     rows = (await r.json()).rows || [];
     $('count').textContent = `${rows.length} records`;
-    render();
+    render(); loadSummary();
     loadPrices().then(render);
   } catch (e) {
-    $('rows').innerHTML = `<tr><td colspan="20" class="empty">Could not load log: ${esc(e.message)}</td></tr>`;
+    $('rows').innerHTML = `<tr><td colspan="21" class="empty">Could not load log: ${esc(e.message)}</td></tr>`;
   }
 }
 
 async function loadConfig() {
   try { const r = await fetch('/api/signals/config', {credentials: 'same-origin'}); if (r.ok) cfg = await r.json(); } catch {}
+  $('slAtr').value = cfg.sl_atr ?? ''; $('tgtAtr').value = cfg.target_atr ?? ''; $('costPts').value = cfg.cost_points ?? '';
+  $('atrLine').textContent = cfg.custom
+    ? `Custom plan active: stop ${cfg.sl_atr}× ATR, target ${cfg.target_atr}× ATR.`
+    : `Default plan active: stop ${cfg.default_sl_atr}× ATR (minimum ${cfg.min_sl_points} pts), target ${cfg.target} (${cfg.default_target_atr}× ATR for T2).`;
+}
+
+// ---- results by day / month
+let group = 'day', summary = null;
+async function loadSummary() {
+  try {
+    const p = filters(); p.set('group', group); p.delete('limit');
+    const r = await fetch('/api/signals/summary?' + p, {credentials: 'same-origin'});
+    if (!r.ok) throw Error(await r.text());
+    summary = await r.json(); renderSummary();
+  } catch (e) { $('sumRows').innerHTML = `<tr><td colspan="12" class="empty">Could not load results: ${esc(e.message)}</td></tr>`; }
+}
+function renderSummary() {
+  if (!summary) return;
+  const t = summary.total, rp = v => { const x = rupees(v); return x === null ? '' : '₹' + signed(x, 0); };
+  $('sumPeriodHead').textContent = group === 'month' ? 'Month' : 'Day';
+  $('grpDay').className = group === 'day' ? '' : 'secondary'; $('grpMonth').className = group === 'month' ? '' : 'secondary';
+  const card = (l, v, s = '') => `<div class="stat panel"><div class="label">${l}</div><div class="value" style="${s}">${v}</div></div>`;
+  $('sumStats').innerHTML = card('Net P/L (index pts)', t.closed ? signed(t.net_points) : '—', tone(t.closed ? t.net_points : null)) +
+    card('Win rate', t.win_rate === null ? '—' : t.win_rate + '%') + card('Profit factor', t.profit_factor ?? '—') +
+    card('Expectancy / trade', t.expectancy === null ? '—' : signed(t.expectancy), tone(t.expectancy)) + card('Max drawdown (pts)', t.closed ? fmt(t.max_drawdown) : '—') +
+    card('Best / worst trade', t.closed ? signed(t.best) + ' / ' + signed(t.worst) : '—');
+  $('sumRows').innerHTML = summary.periods.length ? summary.periods.map(p =>
+    `<tr><td>${esc(p.period)}</td><td>${p.signals}</td><td>${p.closed}${p.open ? ` <span class="sub">(+${p.open} open)</span>` : ''}</td><td>${p.win_rate === null ? '' : p.win_rate + '%'}</td>` +
+    `<td>${p.target_exits} / ${p.stop_exits} / ${p.time_exits}</td><td style="${tone(p.gross_points)}">${p.closed ? signed(p.gross_points) : ''}</td><td>${p.closed ? fmt(p.cost_points) : ''}</td>` +
+    `<td style="${tone(p.net_points)}"><b>${p.closed ? signed(p.net_points) : '—'}</b></td><td style="${tone(rupees(p.net_points))}">${p.closed ? rp(p.net_points) : ''}</td>` +
+    `<td>${p.profit_factor ?? ''}</td><td>${p.avg_win === null ? '' : signed(p.avg_win)} / ${p.avg_loss === null ? '' : signed(p.avg_loss)}</td><td>${p.closed ? fmt(p.max_drawdown) : ''}</td></tr>`).join('')
+    : '<tr><td colspan="12" class="empty">No trades in this range yet.</td></tr>';
+}
+async function saveAtr(reset) {
+  const msg = $('atrMsg'); msg.textContent = 'Saving…';
+  const body = reset ? {} : {sl_atr: $('slAtr').value === '' ? null : Number($('slAtr').value), target_atr: $('tgtAtr').value === '' ? null : Number($('tgtAtr').value),
+                             cost_points: $('costPts').value === '' ? null : Number($('costPts').value)};
+  try {
+    const r = await fetch('/api/signals/config', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch {} throw Error(d || r.status); }
+    cfg = await r.json(); msg.textContent = 'Saved - applies to new signals.'; await loadConfig(); load();
+  } catch (e) { msg.textContent = 'Not saved: ' + (e.message || e); }
 }
 
 async function settleNow() {
@@ -100,8 +143,12 @@ async function settleNow() {
 function exportFile(type) { location.href = '/api/signals/export.' + type + '?' + filters(); }
 
 try { $('qty').value = localStorage.getItem('oi-sig-qty') || ''; $('delta').value = localStorage.getItem('oi-sig-delta') || '0.5'; } catch {}
-['qty', 'delta'].forEach(id => $(id).addEventListener('input', () => { try { localStorage.setItem('oi-sig-' + id, $(id).value); } catch {} render(); }));
+['qty', 'delta'].forEach(id => $(id).addEventListener('input', () => { try { localStorage.setItem('oi-sig-' + id, $(id).value); } catch {} render(); renderSummary(); }));
 $('refreshLog').onclick = load;
+$('grpDay').onclick = () => { group = 'day'; loadSummary(); };
+$('grpMonth').onclick = () => { group = 'month'; loadSummary(); };
+$('saveAtr').onclick = () => saveAtr(false);
+$('resetAtr').onclick = () => saveAtr(true);
 $('settleNow').onclick = settleNow;
 $('exportXlsx').onclick = () => exportFile('xlsx');
 $('exportCsv').onclick = () => exportFile('csv');

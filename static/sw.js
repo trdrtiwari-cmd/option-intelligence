@@ -49,3 +49,17 @@ self.addEventListener("notificationclick", event => {
   event.notification.close(); const target = new URL(event.notification.data?.url || "/", self.location.origin).href;
   event.waitUntil(clients.matchAll({type:"window", includeUncontrolled:true}).then(list => { for (const c of list) { if (c.url.startsWith(self.location.origin) && "focus" in c) { c.navigate(target); return c.focus(); } } return clients.openWindow ? clients.openWindow(target) : undefined; }));
 });
+
+// v1.18.6: if the browser rotates the push subscription, re-register it so background alerts keep arriving.
+self.addEventListener("pushsubscriptionchange", event => {
+  event.waitUntil((async () => {
+    try {
+      const cfg = await (await fetch("/api/push/config")).json();
+      if (!cfg.vapid_public_key) return;
+      const pad = "=".repeat((4 - cfg.vapid_public_key.length % 4) % 4);
+      const key = Uint8Array.from(atob((cfg.vapid_public_key + pad).replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+      const sub = await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      await fetch("/api/push/web/subscribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subscription: sub.toJSON() }) });
+    } catch (_) {}
+  })());
+});

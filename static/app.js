@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.18.5";
+const FRONTEND_VERSION="1.18.7";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -1172,10 +1172,27 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.18.5: push storage initialization compatibility; synchronized frontend version.
+// v1.18.7: push storage initialization compatibility; synchronized frontend version.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
   const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
+  // v1.18.7: when this browser already allowed notifications, re-register silently on every visit. Subscriptions can be
+  // dropped by the browser or the server (new database, key change); this keeps background alerts working without taps.
+  async function silentWebSubscribe(){
+    try{
+      if(!("serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window)||Notification.permission!=="granted")return false;
+      const cfg=await api("/api/push/config"); if(!(cfg.web_push&&cfg.vapid_public_key))return false;
+      const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
+      if(sub){ // key changed on the server -> old subscription can never receive; replace it
+        const cur=sub.options&&sub.options.applicationServerKey?btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""):"";
+        if(cur&&cur!==cfg.vapid_public_key){await sub.unsubscribe();sub=null}
+      }
+      if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
+      await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})});
+      btn.textContent="Push alerts: ON"; return true;
+    }catch(e){console.warn("silent push subscribe failed",e);return false}
+  }
+  setTimeout(silentWebSubscribe,2500);
   btn.addEventListener("click",async()=>{
     const old=btn.textContent; btn.disabled=true; btn.textContent="Enabling…";
     try {
@@ -1229,8 +1246,8 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
         if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
         await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})}); enabled.push("Web Push");
       }
-      if(!enabled.length)throw new Error("Push is not configured on the server yet. Configure VAPID keys for Web Push and Firebase service account for Android.");
-      toast("Enabled: "+enabled.join(" + "));
-    } catch(e){toast("Push setup: "+e.message);} finally {btn.disabled=false;btn.textContent=old;}
+      if(!enabled.length)throw new Error("Push is not available in this browser. On iPhone, add the app to the Home Screen first (Share > Add to Home Screen) and open it from there; on Android use Chrome.");
+      toast("Enabled: "+enabled.join(" + ")+". Alerts now arrive even when the app is closed.");btn.dataset.on="1";
+    } catch(e){toast("Push setup: "+e.message);} finally {btn.disabled=false;btn.textContent=btn.dataset.on?"Push alerts: ON":old;}
   });
 })();
