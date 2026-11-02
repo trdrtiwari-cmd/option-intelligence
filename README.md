@@ -1,6 +1,6 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
-## v1.17.9 — finalized background and push alert routing
+## v1.18.0 — finalized background and push alert routing
 - Confirmed-signal push can run with Firebase FCM or Web Push alone; Telegram/ntfy/email are optional additional channels.
 - Background polling is enabled whenever any server-side notification transport is configured.
 - `/api/alerts/test` dispatches a test to configured server channels and registered push devices.
@@ -410,6 +410,6 @@ Checked and deliberately **not** changed: "Not sideways" gate (the 18 / 16 setup
 - This is alerting/analysis only; it does not place orders. Confirm the live data and risk levels before trading.
 
 
-### v1.17.9 deployment hotfix
+### v1.18.0 deployment hotfix
 - Fixed `BASE_DIR` initialization order so `PUSH_DB` can be configured without a startup `NameError`.
 - Verified module import, Python compilation, frontend/service-worker JavaScript syntax, and all 89 existing tests.
