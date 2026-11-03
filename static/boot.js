@@ -42,7 +42,7 @@
   function showBadge() {
     if (!badge) {
       badge = document.createElement("div"); badge.setAttribute("role", "status");
-      badge.style.cssText = "position:fixed;top:6px;right:8px;z-index:995;background:#2b2517;border:1px solid #66552c;color:#f5d995;border-radius:999px;padding:4px 10px;font:600 11px/1.3 system-ui,sans-serif;pointer-events:none;max-width:90vw";
+      badge.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--nav-h,0px) + env(safe-area-inset-bottom,0px) + 10px);z-index:995;white-space:nowrap;background:#2b2517;border:1px solid #66552c;color:#f5d995;border-radius:999px;padding:4px 10px;font:600 11px/1.3 system-ui,sans-serif;pointer-events:none;max-width:90vw";
       (document.body || document.documentElement).appendChild(badge);
     }
     const mins = Math.round((Date.now() - oldest) / 60000);
@@ -50,6 +50,17 @@
   }
   function hideBadge() { if (badge) { badge.remove(); badge = null; } }
   function settled() { pending = Math.max(0, pending - 1); if (!pending) setTimeout(hideBadge, 400); }
+
+  // A caller that waits on the shared in-flight request must still honour ITS OWN abort signal and a deadline, otherwise a hung
+  // request would leave the page on "Loading…" forever (the original caller's timer is already cleared by then).
+  function withDeadline(p, signal, ms) {
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(new DOMException("Aborted", "AbortError"));
+      const t = setTimeout(abort, ms);
+      if (signal) { if (signal.aborted) return abort(); signal.addEventListener("abort", () => { clearTimeout(t); abort(); }, { once: true }); }
+      p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+    });
+  }
 
   function fake(rec, k) {
     let body = rec.b;
@@ -63,8 +74,12 @@
     const method = ((init && init.method) || (typeof input !== "string" && input.method) || "GET").toUpperCase();
     const k = method === "GET" ? keyOf(input) : null;
     if (!k || !WATCH.some(rx => rx.test(k))) return origFetch(input, init);
-    if (inflight[k]) { const p = inflight[k]; delete inflight[k]; return p.then(r => r.clone()); }   // 2nd call: wait for the live answer already on its way
-    const real = origFetch(input, init);
+    if (inflight[k]) { const p = inflight[k]; delete inflight[k]; return withDeadline(p.then(r => r.clone()), init && init.signal, 20000); }   // 2nd call: wait for the live answer already on its way
+    // the request that stands in for this call must never be able to hang forever (its caller's own timer ends as soon as the saved copy is returned)
+    const ctl = new AbortController(), kill = setTimeout(() => ctl.abort(), 25000);
+    if (init && init.signal) init.signal.addEventListener("abort", () => ctl.abort(), { once: true });
+    const real = origFetch(input, { ...(init || {}), signal: ctl.signal });
+    real.then(() => clearTimeout(kill), () => clearTimeout(kill));
     real.then(res => {
       if (res.status === 401) clearAll();
       else if (res.ok) res.clone().text().then(t => store(k, t)).catch(() => { });
@@ -75,7 +90,7 @@
     setTimeout(() => { if (inflight[k] === real) delete inflight[k]; }, 30000);
     oldest = oldest ? Math.min(oldest, rec.t) : rec.t;
     pending++; real.then(settled, settled);
-    if (Date.now() - rec.t > 20000) showBadge();
+    if (Date.now() - rec.t > 20000) { showBadge(); setTimeout(hideBadge, 10000); }
     return Promise.resolve(fake(rec, k));
   };
 })();

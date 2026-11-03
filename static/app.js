@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.18.10";
+const FRONTEND_VERSION="1.18.11";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -193,7 +193,7 @@ async function loadAlertConfig(){
   try{if("Notification"in window&&Notification.permission==="default")await Notification.requestPermission()}catch{}
   b.disabled=true;b.textContent="Sending…";
   try{const r=await fetch("/api/alerts/test",{method:"POST"});const d=await r.json();
-    const bad=(d.results||[]).filter(x=>!x.ok);toast(d.results&&d.results.length?(bad.length?"Test message problem: "+bad.map(x=>`${x.channel}: ${x.error}`).join("; "):"Test message sent to "+d.results.map(x=>x.channel).join(", ")):d.message||"No server channel configured — beep only.")}
+    toast(d.summary||d.message||"No server channel configured — beep only.");try{window.oiLoadPushStatus&&window.oiLoadPushStatus()}catch{}}
   catch(e){toast("Test alert failed: "+e.message)}finally{b.disabled=false;b.textContent="Test alert"}})})();
 loadAlertConfig();
 function renderSignalTime(a){
@@ -225,7 +225,7 @@ function renderDashChecks(a){
     li.appendChild(b);li.appendChild(t);li.appendChild(sm2);ul.appendChild(li)});
 }
 
-// ---------------- v1.18.10: price / score / trend / decision follow the CHART VIEW and the selected CE/PE ----------------
+// ---------------- v1.18.11: price / score / trend / decision follow the CHART VIEW and the selected CE/PE ----------------
 // Index view  -> the cards describe the index (as before).
 // Option view -> the cards describe the selected contract's own premium chart; the index trend and the index signal stay
 //                visible next to it, and the decision combines both (a BUY needs the index signal AND the premium trend to agree).
@@ -461,7 +461,7 @@ async function refreshChartSource(){
 async function api(url, options={}){
   // Preserve caller-supplied method, headers and body. Push registration uses POST;
   // dropping options here silently converted it to GET and caused HTTP 405.
-  // v1.18.10: every request has a deadline. When a phone suspends the tab mid-request the promise can stay pending forever,
+  // v1.18.11: every request has a deadline. When a phone suspends the tab mid-request the promise can stay pending forever,
   // which used to leave refreshBusy stuck on and froze ALL later refreshes ("Updated 7:41" while it was already 7:54).
   const ctl=new AbortController(),limit=options.timeout||20000,timer=setTimeout(()=>ctl.abort(),limit);
   let res;try{res=await fetch(url,{...options,signal:options.signal||ctl.signal})}catch(e){if(e&&e.name==="AbortError")throw new Error("Request timed out - tap Refresh data");throw e}finally{clearTimeout(timer)}
@@ -568,7 +568,7 @@ async function checkStatus(){
     const s=await api("/api/status"),el=$("apiStatus");
     $("buildInfo").textContent=`page v${FRONTEND_VERSION} · server v${s.version||"?"}`;
     if(s.version&&s.version!==FRONTEND_VERSION){
-      // v1.18.10: update by itself (a phone has no Ctrl+F5). Clear the app's saved files once per new server version and reload;
+      // v1.18.11: update by itself (a phone has no Ctrl+F5). Clear the app's saved files once per new server version and reload;
       // if that did not fix it, show a button instead of looping.
       const b=$("staleBanner"),tried=(()=>{try{return sessionStorage.getItem("oi-updated-for")===s.version}catch{return false}})();
       if(!tried){try{sessionStorage.setItem("oi-updated-for",s.version)}catch{};b.textContent="Updating to v"+s.version+"…";b.hidden=false;await hardReloadApp();return}
@@ -1257,27 +1257,58 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.18.10: push storage initialization compatibility; synchronized frontend version.
+// v1.18.11: push storage initialization compatibility; synchronized frontend version.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
   const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
-  // v1.18.10: when this browser already allowed notifications, re-register silently on every visit. Subscriptions can be
-  // dropped by the browser or the server (new database, key change); this keeps background alerts working without taps.
+  // v1.18.11: the button shows the REAL state of this phone at once, from the browser itself (permission + push subscription),
+  // instead of waiting for a server round trip - which is slow when the server is waking up and made it look like push had
+  // switched itself off after every reopen. The server is then checked and the registration repaired in the background.
+  const setLabel=on=>{btn.dataset.on=on?"1":"";btn.textContent=on?"Push alerts: ON":"Enable push alerts"};
+  async function localPushState(){
+    try{
+      if(!("serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window))return false;
+      if(Notification.permission!=="granted")return false;
+      const reg=await Promise.race([navigator.serviceWorker.ready,new Promise(r=>setTimeout(()=>r(null),4000))]);
+      return !!(reg&&await reg.pushManager.getSubscription());
+    }catch{return false}
+  }
+  function showPushStatus(s){
+    const el=$("pushStatus");if(!el)return;
+    if(!s){el.textContent="";return}
+    const m=s.monitor||{},ago=x=>x==null?"—":x<90?x+"s ago":Math.round(x/60)+" min ago";
+    const sy=Object.entries(m.symbols||{}).map(([k,v])=>`${k} ${v.action||"—"}${v.score!=null?" "+v.score:""}`).join(" · ");
+    const dev=s.devices||{};
+    el.innerHTML="";
+    const line=document.createElement("div");
+    line.textContent=`Server monitor: ${m.running?"running":s.market_open?"NOT running":"idle (market closed)"} · last check ${ago(m.last_check_ago_s)} · phones registered: ${(dev.web||0)+(dev.native||0)}`+(sy?` · ${sy}`:"");
+    el.appendChild(line);
+    (s.problems||[]).forEach(p=>{const d=document.createElement("div");d.style.color="var(--yellow)";d.textContent="⚠ "+p;el.appendChild(d)});
+    if(s.last_alert){const d=document.createElement("div");d.textContent=`Last alert: ${s.last_alert.event} ${s.last_alert.symbol} ${s.last_alert.side||""} · ${new Date(s.last_alert.at*1000).toLocaleTimeString()}`;el.appendChild(d)}
+  }
+  async function loadPushStatus(){try{const s=await api("/api/push/status");showPushStatus(s);return s}catch{return null}}
+  window.oiLoadPushStatus=loadPushStatus;
+  // Re-register this browser with the server (idempotent). Replaces a subscription made with an older/different server key.
   async function silentWebSubscribe(){
     try{
-      if(!("serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window)||Notification.permission!=="granted")return false;
+      if(!(await localPushState()))return false;
       const cfg=await api("/api/push/config"); if(!(cfg.web_push&&cfg.vapid_public_key))return false;
       const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
-      if(sub){ // key changed on the server -> old subscription can never receive; replace it
+      if(sub){
         const cur=sub.options&&sub.options.applicationServerKey?btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""):"";
         if(cur&&cur!==cfg.vapid_public_key){await sub.unsubscribe();sub=null}
       }
       if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
       await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})});
-      btn.textContent="Push alerts: ON"; return true;
+      setLabel(true);return true;
     }catch(e){console.warn("silent push subscribe failed",e);return false}
   }
-  setTimeout(silentWebSubscribe,2500);
+  (async()=>{
+    setLabel(await localPushState());                      // instant, no network
+    loadPushStatus();                                      // status and registration repair run side by side
+    silentWebSubscribe().then(ok=>{if(ok)loadPushStatus()});
+    setInterval(()=>{if(document.visibilityState==="visible")loadPushStatus()},30000);
+  })();
   btn.addEventListener("click",async()=>{
     const old=btn.textContent; btn.disabled=true; btn.textContent="Enabling…";
     try {
@@ -1332,7 +1363,7 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
         await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})}); enabled.push("Web Push");
       }
       if(!enabled.length)throw new Error("Push is not available in this browser. On iPhone, add the app to the Home Screen first (Share > Add to Home Screen) and open it from there; on Android use Chrome.");
-      toast("Enabled: "+enabled.join(" + ")+". Alerts now arrive even when the app is closed.");btn.dataset.on="1";
-    } catch(e){toast("Push setup: "+e.message);} finally {btn.disabled=false;btn.textContent=btn.dataset.on?"Push alerts: ON":old;}
+      toast("Enabled: "+enabled.join(" + ")+". Alerts now arrive even when the app is closed.");setLabel(true);loadPushStatus();
+    } catch(e){toast("Push setup: "+e.message);} finally {btn.disabled=false;btn.textContent=btn.dataset.on?"Push alerts: ON":"Enable push alerts";}
   });
 })();

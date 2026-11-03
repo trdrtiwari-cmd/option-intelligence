@@ -57,7 +57,7 @@ self.addEventListener("fetch", e => {
 self.addEventListener("push", event => {
   let data = {}; try { data = event.data ? event.data.json() : {}; } catch (_) {}
   const title = data.title || "Option Intelligence";
-  const options = { body: data.body || "A confirmed signal is available.", icon: "/static/icons/icon-192.png", badge: "/static/icons/icon-192.png", tag: "oi-" + ((data.data||{}).symbol || "signal") + "-" + ((data.data||{}).side || "confirmed"), renotify: true, data: { url: data.url || "/", ...(data.data||{}) } };
+  const ev = (data.data||{}).event, options = { body: data.body || "A confirmed signal is available.", icon: "/static/icons/icon-192.png", badge: "/static/icons/icon-192.png", tag: "oi-" + ((data.data||{}).symbol || "signal") + "-" + ((data.data||{}).side || "confirmed") + "-" + (ev || ""), renotify: true, vibrate: [220, 100, 220], timestamp: Date.now(), requireInteraction: ev === "CONFIRMED", data: { url: data.url || "/", ...(data.data||{}) } };
   event.waitUntil(self.registration.showNotification(title, options));
 });
 self.addEventListener("notificationclick", event => {
