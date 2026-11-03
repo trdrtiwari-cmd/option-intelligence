@@ -6,7 +6,7 @@ SRC = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-
 
 
 def load(open_=True):
-    a = SRC.index("_AN_CACHE = {}"); b = SRC.index('@app.get("/api/analysis")')
+    a = SRC.index("_AN_CACHE = {}"); b = SRC.index('@app.get("/api/option-analysis")')
     ns = {"time": time, "asyncio": asyncio, "market_status": lambda: {"open": open_}}
     exec(SRC[a:b], ns)
     return ns
@@ -50,7 +50,7 @@ def test_errors_not_cached_and_closed_market_serves_old():
 
 
 def test_wiring():
-    for needle in ("GZipMiddleware", "_warmer", "shared_analysis((sym", "_dashboard_summary_compute"):
+    for needle in ("GZipMiddleware", "_warmer", "shared_analysis((sym", "_dashboard_summary_compute", '"/api/option-analysis"', '("opt", sym, key_'):
         assert needle in SRC, needle
 
 
