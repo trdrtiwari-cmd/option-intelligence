@@ -1,8 +1,8 @@
-const FRONTEND_VERSION="1.18.8";
+const FRONTEND_VERSION="1.18.9";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
-let lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
+let lastOptionAnalysis=null, lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
 function toast(msg){const el=$("toast");el.textContent=msg;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),4500)}
 function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("en-IN",{maximumFractionDigits:n,minimumFractionDigits:n})}
@@ -224,8 +224,55 @@ function renderDashChecks(a){
     const t=document.createElement("span");t.textContent=` ${c.name}: ${c.label}`;const sm2=document.createElement("small");sm2.textContent=c.detail||"";
     li.appendChild(b);li.appendChild(t);li.appendChild(sm2);ul.appendChild(li)});
 }
+
+// ---------------- v1.18.9: price / score / trend / decision follow the CHART VIEW and the selected CE/PE ----------------
+// Index view  -> the cards describe the index (as before).
+// Option view -> the cards describe the selected contract's own premium chart; the index trend and the index signal stay
+//                visible next to it, and the decision combines both (a BUY needs the index signal AND the premium trend to agree).
+const trendColor=t=>/UP|BULL/i.test(t||"")?"var(--green)":/DOWN|BEAR/i.test(t||"")?"var(--red)":"var(--yellow)";
+function applyChartViewCards(){
+  const idx=lastAnalysis,idxOk=idx&&idx.status==="ok",idxTrend=idxOk?(idx.regime_label||idx.regime||"—"):"—";
+  const scoreSub=$("score")&&$("score").nextElementSibling,priceSub=$("priceChange");
+  const optView=$("chartView").value==="option"&&paperSelected&&chartSource==="option";
+  if(!optView){
+    $("decision").style.color="";
+    if($("regimeSub")&&idxOk)$("regimeSub").textContent=`Chart view: index · ${idx.regime_note||"Trend / sideways filter"}`;
+    if(scoreSub&&idxOk)scoreSub.textContent="Index score · 0–100 · not win probability";
+    return;
+  }
+  const sel=paperSelected,name=`${sel.type} ${sel.strike}`,o=lastOptionAnalysis&&lastOptionAnalysis._sel===sel?lastOptionAnalysis:null;
+  if(priceSub&&idxOk)priceSub.textContent=`${name} premium · index ${fmt(idx.last_close)}`;
+  if(!o){return}
+  if(o.status!=="ok"){
+    $("score").textContent="—";if(scoreSub)scoreSub.textContent=`${name}: ${o.message||"not enough premium candles for a score"}`;
+    $("regime").textContent=idxTrend;$("regime").style.color=trendColor(idxTrend);
+    if($("regimeSub"))$("regimeSub").textContent=`Index trend: ${idxTrend} · ${name} premium trend unavailable (thin / new contract)`;
+    const t=`WAIT — no ${name} read`,s=`The ${name} premium has too few candles to score, so no buy decision is made for it. Index: ${(lastGateState&&lastGateState.status)||"WAIT"} ${(lastGateState&&lastGateState.side)||""}.`;
+    $("decision").textContent=t;$("decision").style.color="var(--yellow)";$("bigDecision").textContent=t;
+    if($("decisionSub"))$("decisionSub").textContent=s;if($("signalExplanation"))$("signalExplanation").textContent=s;
+    return;
+  }
+  const optTrend=o.regime_label||o.regime||"—",bull=o.bull_score??0,bear=o.bear_score??0;
+  $("score").textContent=`${bull}/100`;
+  if(scoreSub)scoreSub.textContent=`${name} premium · buy-strength · bear ${bear}`+(idxOk?` · index ${idx.score}/100`:"");
+  $("regime").textContent=optTrend;$("regime").style.color=trendColor(optTrend);
+  if($("regimeSub"))$("regimeSub").textContent=`Chart (${name} premium): ${optTrend} · Index: ${idxTrend}`+(idxOk&&idx.regime_note?` — ${idx.regime_note}`:"");
+  // decision: index signal side/status + premium direction
+  const st=lastGateState||{},idxSide=st.side||null,idxStatus=st.status||"WAIT";
+  const optUp=bull>bear&&bull>=55,optDown=bear>bull&&bear>=55;
+  let text="WAIT",sub=`Premium trend ${optTrend}; index ${idxSide?idxSide+" "+idxStatus:"no side"}.`,color="var(--yellow)";
+  if(idxStatus==="CONFIRMED"&&idxSide===sel.type&&optUp){text=`BUY ${name}`;sub="Index signal CONFIRMED and the premium chart trend agree — enter only on a held retest.";color="var(--green)"}
+  else if(idxStatus==="CONFIRMED"&&idxSide===sel.type){text=`WAIT — ${name} not confirming`;sub=`Index says ${idxSide} but the ${name} premium is not trending up yet (bull ${bull} / bear ${bear}).`}
+  else if(idxSide&&idxSide!==sel.type&&idxStatus!=="WAIT"){text=`AVOID ${name}`;sub=`The index signal is ${idxSide} (${idxStatus}), the opposite side.`;color="var(--red)"}
+  else if(idxSide===sel.type&&optUp){text=`WATCH ${name}`;sub="Index leans the same way and the premium is rising; hard gates not all met yet.";color="var(--blue)"}
+  else if(optDown){text=`NO BUY — ${name} falling`;sub=`Premium trend is down (bear ${bear} vs bull ${bull}).`;color="var(--red)"}
+  $("decision").textContent=text;$("decision").style.color=color;$("bigDecision").textContent=text;
+  if($("decisionSub"))$("decisionSub").textContent=sub;
+  if($("signalExplanation"))$("signalExplanation").textContent=sub;
+}
 // ---------------- Signal confirmation (backend checks + S/R room gate) ----------------
-function renderSignal(){
+function renderSignal(){_renderSignalBase();try{applyChartViewCards()}catch(e){console.warn("chart-view cards",e)}}
+function _renderSignalBase(){
   const a=lastAnalysis,gl=$("gateList"),rows=$("checkRows");
   if(!gl||!rows)return;
   gl.innerHTML="";rows.innerHTML="";$("extraInd").innerHTML="";
@@ -414,7 +461,7 @@ async function refreshChartSource(){
 async function api(url, options={}){
   // Preserve caller-supplied method, headers and body. Push registration uses POST;
   // dropping options here silently converted it to GET and caused HTTP 405.
-  // v1.18.8: every request has a deadline. When a phone suspends the tab mid-request the promise can stay pending forever,
+  // v1.18.9: every request has a deadline. When a phone suspends the tab mid-request the promise can stay pending forever,
   // which used to leave refreshBusy stuck on and froze ALL later refreshes ("Updated 7:41" while it was already 7:54).
   const ctl=new AbortController(),limit=options.timeout||20000,timer=setTimeout(()=>ctl.abort(),limit);
   let res;try{res=await fetch(url,{...options,signal:options.signal||ctl.signal})}catch(e){if(e&&e.name==="AbortError")throw new Error("Request timed out - tap Refresh data");throw e}finally{clearTimeout(timer)}
@@ -451,12 +498,15 @@ async function loadOptionVolume(){
 // or borrows the option-premium chart's support/resistance.
 async function refreshSignalContext(){
   const sym=getSymbol(),interval=getInterval();
+  const sel=paperSelected&&$("chartView").value==="option"?paperSelected:null;
+  const optPromise=sel?api(`/api/option-analysis?symbol=${encodeURIComponent(sel.symbol)}&instrument_key=${encodeURIComponent(sel.instrument_key)}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}`).catch(e=>({status:"unavailable",message:e.message})):null;
   const candlePromise=api(`/api/candles?symbol=${sym}&interval=${interval}&days=10`);
   const analysisPromise=api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}&reconfirm=${getReconfirm()}`);
   const c=await candlePromise;
   lastIndexSR=computeSR(prepCandles(c.candles),interval,sym,true);
   let a;try{a=await analysisPromise}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
   lastAnalysis=a;lastAnalysisAt=Date.now();
+  if(optPromise){const o=await optPromise;if(sel===paperSelected)lastOptionAnalysis={...o,_sel:sel}}
   $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
   $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
   $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
@@ -1196,11 +1246,11 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.18.8: push storage initialization compatibility; synchronized frontend version.
+// v1.18.9: push storage initialization compatibility; synchronized frontend version.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
   const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
-  // v1.18.8: when this browser already allowed notifications, re-register silently on every visit. Subscriptions can be
+  // v1.18.9: when this browser already allowed notifications, re-register silently on every visit. Subscriptions can be
   // dropped by the browser or the server (new database, key change); this keeps background alerts working without taps.
   async function silentWebSubscribe(){
     try{
