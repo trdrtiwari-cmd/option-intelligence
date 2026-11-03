@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.18.10 - self-updating page
+
+* The "page is out of date, press Ctrl+F5" banner could not be acted on from a phone. The app now clears its own saved files and reloads automatically once when the server has a newer version, and offers an **Update now** button if that was not enough. (From an older version: More > Reload app does the same.)
+
 ## v1.18.9 - cards follow the chart view
 
 * In **option view** the Last price, Score, Trend and Decision cards now describe the selected CE/PE's own premium chart (`/api/option-analysis`), and the Trend card shows both: `Chart (CE 24500 premium): UPTREND · Index: UPTREND`.
