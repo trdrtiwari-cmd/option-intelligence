@@ -96,7 +96,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.8"
+APP_VERSION = "1.18.9"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -109,7 +109,7 @@ class NoCacheStaticFiles(StaticFiles):
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 app.add_middleware(acc.SessionAuthMiddleware)
-app.add_middleware(GZipMiddleware, minimum_size=700)   # v1.18.8: JSON/JS/CSS compress ~5-8x, a big win on mobile data   # login required everywhere except /health, /login and the TradingView webhook
+app.add_middleware(GZipMiddleware, minimum_size=700)   # v1.18.9: JSON/JS/CSS compress ~5-8x, a big win on mobile data   # login required everywhere except /health, /login and the TradingView webhook
 app.mount("/static", NoCacheStaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 oauth_states = set()
@@ -1388,7 +1388,7 @@ def settle_signal_exits(sym, price, atr=None):
         return []
 
 
-# ---- durable copy of the signal log (v1.18.8) -------------------------------------------------------------
+# ---- durable copy of the signal log (v1.18.9) -------------------------------------------------------------
 # The SQLite file is erased whenever a Render free instance restarts, which would wipe the day/month history. So every change
 # is mirrored, one JSON blob per month, into the accounts database (PostgreSQL when DATABASE_URL is set) and restored at start.
 _SL_MIRROR_HASH = {}
@@ -1564,7 +1564,7 @@ class NativePushToken(BaseModel):
 def PUSH_DELIVERY_ENABLED():
     """True when at least one server-side notification transport is configured."""
     native = bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip())
-    return True if _web_push_available() else (notifier.any_configured() or native)   # Web Push keys are auto-generated (v1.18.8)
+    return True if _web_push_available() else (notifier.any_configured() or native)   # Web Push keys are auto-generated (v1.18.9)
 
 
 def _web_push_available():
@@ -1890,7 +1890,7 @@ async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = "
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
     return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
 
-# ---- shared, pre-warmed analysis (v1.18.8) -------------------------------------------------------------------
+# ---- shared, pre-warmed analysis (v1.18.9) -------------------------------------------------------------------
 # One analysis is computed at most once per ~2 s and shared by every phone / tab / the alert poller. A result up to 15 s old is
 # served instantly while a fresh one is computed in the background, so opening the app never waits for a full recompute.
 _AN_CACHE = {}          # args -> (time, result)
@@ -1950,6 +1950,27 @@ async def shared_analysis(key, fn, user_request=True):
         return deliver(hit[0], hit[1], age)
     res = await asyncio.shield(task)
     return deliver(_AN_CACHE[key][0] if key in _AN_CACHE else now, res, 0.0)
+
+
+@app.get("/api/option-analysis")
+async def option_analysis(symbol: str = "NIFTY", instrument_key: str = "", interval: int = 5, mode: str = "standard", score_min: int = 70):
+    """Trend / score read of the SELECTED option contract's own premium candles (v1.18.9), so the terminal's price, score, trend
+    and decision follow the chart view. Index-only parts (dashboard fusion, S/R room, reconfirmation) stay on /api/analysis."""
+    sym = symbol.upper()
+    key_ = instrument_key.strip()
+    if sym not in INDEX_KEYS or "|" not in key_:
+        raise HTTPException(status_code=400, detail="Valid symbol and option instrument_key required.")
+    if mode not in MODES:
+        raise HTTPException(status_code=400, detail="mode must be one of: " + ", ".join(MODES))
+    if score_min not in (60, 65, 70):
+        raise HTTPException(status_code=400, detail="score_min must be 60, 65, or 70")
+
+    async def compute():
+        result = await candles(symbol=sym, interval=interval, days=5, instrument_key=key_)
+        a = await asyncio.to_thread(analyze, result["candles"], f"{sym} option", interval, None, None, None, None, mode, score_min)
+        a["instrument_key"] = key_
+        return a
+    return await shared_analysis(("opt", sym, key_, interval, mode, score_min), compute)
 
 
 @app.get("/api/analysis")

@@ -1,5 +1,11 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.18.9 - cards follow the chart view
+
+* In **option view** the Last price, Score, Trend and Decision cards now describe the selected CE/PE's own premium chart (`/api/option-analysis`), and the Trend card shows both: `Chart (CE 24500 premium): UPTREND · Index: UPTREND`.
+* Decision combines both: **BUY CE/PE** only when the index signal is CONFIRMED on that side AND the premium trend is up; otherwise WAIT (premium not confirming), AVOID (index signal is the other side), WATCH, or NO BUY (premium falling).
+* In index view the cards describe the index, labelled "Chart view: index". Alerts and the logged signals still use the index confirmation engine.
+
 ## v1.18.8 - instant open + no more frozen refresh
 
 * **Fixed: data stuck at an old time after reopening the app.** If the phone froze the page mid-request, that request never finished and the refresh loop waited for it forever. Every request now has a 20 s deadline, every "busy" flag has a watchdog, and coming back to the app (unlock, switch back, network returns) discards anything stuck and reloads everything at once. Same fix on the Data Check page.
