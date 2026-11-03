@@ -26,7 +26,7 @@ def _env(name, default=""):
 
 def events():
     """Which reconfirmation events send a message. STARTED = setup detected (heads-up), CONFIRMED = reconfirmed entry, FAILED = did not hold."""
-    raw = _env("ALERT_EVENTS", "CONFIRMED")
+    raw = _env("ALERT_EVENTS", "STARTED,CONFIRMED")
     return {e.strip().upper() for e in raw.split(",") if e.strip()}
 
 

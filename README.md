@@ -1,5 +1,19 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.18.11 - alerts that actually arrive + faster data
+
+Why alerts did not arrive / "push turned itself off" (found by analysing the app, not guessed):
+* **Push was sent with TTL 0** (the library default): if the phone was asleep at that instant the push service threw the message away. Now TTL 10 min (`PUSH_TTL_SECONDS`) with high urgency (and high priority for Android FCM).
+* **Rejected registrations were never removed**: when the push service answered 403/400/401 (key changed) the registration stayed forever and every alert silently failed while the button said ON. They are now dropped and the phone re-registers itself the next time the app opens.
+* **The button label depended on a slow server call**, so after reopening it showed "Enable push alerts" until the server answered. It now reads the real state from the phone itself (permission + subscription) instantly.
+* **The server sleeps when nobody opens the app** (Render Free). A monitor that is asleep cannot send anything. The app now saves a heartbeat and, on the next start, tells you "monitor was offline 10:05-10:47, signals in that window were not watched". Keep it awake with a pinger on `/health` every 5 min: UptimeRobot / cron-job.org, or the included GitHub Action `.github/workflows/keepalive.yml` (add the `APP_URL` secret).
+* Default alert events are now `STARTED,CONFIRMED` (setup detected + confirmed). Set `ALERT_EVENTS=CONFIRMED` for confirmed only. History records every alert, including system notices.
+* **See what is wrong**: the terminal shows a monitor line under the alert buttons, and **Notification history** now opens an "Alert monitor" panel (server up, market, Upstox token, monitor running, per-symbol state, phones registered, last alert, and a plain list of problems). "Test alert" now says exactly what happened per channel (e.g. "phone push: NO DEVICE REGISTERED").
+
+Speed / stability:
+* One shared keep-alive connection to Upstox (was a new TLS handshake per call), identical simultaneous calls share one upstream request, 429/gateway errors are retried once or twice, concurrency capped (`UPSTOX_MAX_CONCURRENT`, default 8). `/api/status` no longer waits on Upstox. gzip level 3. The warmer only fills gaps (not duplicating a polling page) and backs off after errors.
+* Saved-data badge moved to the bottom (it covered the title) and the request behind it can no longer hang forever.
+
 ## v1.18.10 - self-updating page
 
 * The "page is out of date, press Ctrl+F5" banner could not be acted on from a phone. The app now clears its own saved files and reloads automatically once when the server has a newer version, and offers an **Update now** button if that was not enough. (From an older version: More > Reload app does the same.)

@@ -47,7 +47,9 @@ async def _send_native_fcm(title, body, data=None):
         sent = 0
         for row in rows:
             try:
+                from datetime import timedelta as _td
                 msg = messaging.Message(notification=messaging.Notification(title=title, body=body),
+                                        android=messaging.AndroidConfig(priority="high", ttl=_td(minutes=10)),
                                         data={k: str(v) for k, v in (data or {}).items()}, token=row["endpoint"])
                 await asyncio.to_thread(messaging.send, msg, app=app_firebase); sent += 1
             except Exception as exc:
@@ -59,25 +61,43 @@ async def _send_native_fcm(title, body, data=None):
         logger.warning("FCM delivery unavailable: %s", str(exc)[:180]); return {"configured": True, "sent": 0, "error": str(exc)[:160]}
 
 async def _send_web_push(title, body, data=None):
-    subject=os.getenv("VAPID_SUBJECT","mailto:admin@example.com").strip()
+    """Web Push to every registered phone/browser. TTL + high urgency matter: with TTL 0 (the library default) the push service
+    drops the message if the phone is asleep/in Doze at that instant, which looks exactly like 'alerts stop when the app is closed'."""
+    subject = os.getenv("VAPID_SUBJECT", "mailto:admin@example.com").strip()
     try: public, private = await asyncio.to_thread(acc.vapid_keys)
     except Exception as exc:
-        logger.warning("Web push keys unavailable: %s", str(exc)[:140]); return {"configured": False, "sent": 0}
+        logger.warning("Web push keys unavailable: %s", str(exc)[:140]); return {"configured": False, "sent": 0, "devices": 0, "error": "keys unavailable"}
     try:
         from pywebpush import webpush
-        rows = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
-        sent = 0
-        for row in rows:
-            try:
-                await asyncio.to_thread(webpush, subscription_info=json.loads(row["payload"]), data=json.dumps({"title":title,"body":body,"url":"/","data":data or {}}), vapid_private_key=private, vapid_claims={"sub":subject}, timeout=8)
-                sent += 1
-            except Exception as exc:
-                if getattr(exc,'response',None) is not None and exc.response.status_code in (404,410):
-                    await asyncio.to_thread(acc.push_delete_device, row["id"])
-                else: logger.warning("Web push failed: %s",str(exc)[:140])
-        return {"configured":True,"sent":sent}
     except Exception as exc:
-        logger.warning("Web push unavailable: %s",str(exc)[:160]); return {"configured":True,"sent":0,"error":str(exc)[:160]}
+        logger.warning("pywebpush not installed: %s", str(exc)[:140]); return {"configured": False, "sent": 0, "devices": 0, "error": "pywebpush not installed"}
+    try:
+        rows = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
+    except Exception as exc:
+        logger.warning("Push devices unreadable: %s", str(exc)[:140]); return {"configured": True, "sent": 0, "devices": 0, "error": "database unavailable"}
+    payload = json.dumps({"title": title, "body": body, "url": "/", "data": data or {}})
+    ttl = int(os.getenv("PUSH_TTL_SECONDS", "600") or 600)
+
+    async def one(row):
+        try:
+            await asyncio.to_thread(webpush, subscription_info=json.loads(row["payload"]), data=payload, vapid_private_key=private,
+                                    vapid_claims={"sub": subject}, timeout=10, ttl=ttl, headers={"Urgency": "high"})
+            return ("ok", None)
+        except Exception as exc:
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code in (400, 401, 403, 404, 410):
+                # 404/410: subscription gone. 400/401/403: the push service rejects our key for this subscription (keys changed, or
+                # an old registration). Either way it can never work again - drop it so the phone re-registers itself on next open.
+                await asyncio.to_thread(acc.push_delete_device, row["id"])
+                return ("dropped", f"HTTP {code}")
+            logger.warning("Web push failed: %s", str(exc)[:160]); return ("failed", f"{type(exc).__name__}: {str(exc)[:100]}")
+    res = await asyncio.gather(*[one(r) for r in rows]) if rows else []
+    out = {"configured": True, "devices": len(rows), "sent": sum(1 for s, _ in res if s == "ok"),
+           "dropped": sum(1 for s, _ in res if s == "dropped"), "failed": sum(1 for s, _ in res if s == "failed"),
+           "errors": [e for s, e in res if e][:3]}
+    if rows and not out["sent"]:
+        logger.warning("Web push reached 0 of %s device(s): %s", len(rows), out["errors"])
+    return out
 
 async def _dispatch_confirmed_push(title, body, sym, side, event):
     return await asyncio.gather(_send_native_fcm(title,body,{"symbol":sym,"side":side,"event":event}), _send_web_push(title,body,{"symbol":sym,"side":side,"event":event}), return_exceptions=True)
@@ -96,7 +116,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.10"
+APP_VERSION = "1.18.11"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -109,7 +129,7 @@ class NoCacheStaticFiles(StaticFiles):
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 app.add_middleware(acc.SessionAuthMiddleware)
-app.add_middleware(GZipMiddleware, minimum_size=700)   # v1.18.10: JSON/JS/CSS compress ~5-8x, a big win on mobile data   # login required everywhere except /health, /login and the TradingView webhook
+app.add_middleware(GZipMiddleware, minimum_size=700, compresslevel=3)   # v1.18.11: JSON/JS/CSS compress ~5-8x, a big win on mobile data   # login required everywhere except /health, /login and the TradingView webhook
 app.mount("/static", NoCacheStaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 oauth_states = set()
@@ -169,11 +189,51 @@ def token_or_401():
     return runtime_token
 
 
+_UPSTOX_CLIENT = None
+_UPSTOX_SEM = asyncio.Semaphore(int(os.getenv("UPSTOX_MAX_CONCURRENT", "8") or 8))
+_UPSTOX_INFLIGHT = {}
+
+
+def _upstox_client():
+    """One keep-alive connection pool for every Upstox call. A new client per request meant a fresh TLS handshake (hundreds of
+    ms from a cloud region to India) on each of the 8+ calls behind a single refresh - the main reason data arrived slowly."""
+    global _UPSTOX_CLIENT
+    if _UPSTOX_CLIENT is None or _UPSTOX_CLIENT.is_closed:
+        _UPSTOX_CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=6.0),
+                                           limits=httpx.Limits(max_connections=16, max_keepalive_connections=10, keepalive_expiry=60.0))
+    return _UPSTOX_CLIENT
+
+
 async def upstox_get(url, params=None):
+    """GET from Upstox. Identical requests made at the same moment (page + analysis + dashboard + alert poller) share ONE upstream
+    call, calls are limited to a few at a time, and a rate-limit (429) / gateway error / timeout is retried briefly."""
+    import copy
     token = token_or_401()
+    key = (url, tuple(sorted((params or {}).items())), token)
+    task = _UPSTOX_INFLIGHT.get(key)
+    if task is None:
+        task = _UPSTOX_INFLIGHT[key] = asyncio.create_task(_upstox_get_once(url, params, token))
+        task.add_done_callback(lambda t, k=key: (_UPSTOX_INFLIGHT.pop(k, None), t.exception() if not t.cancelled() else None))
+    return copy.deepcopy(await asyncio.shield(task))
+
+
+async def _upstox_get_once(url, params, token):
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(url, params=params, headers=headers)
+    response = None
+    for attempt in range(3):
+        try:
+            async with _UPSTOX_SEM:
+                response = await _upstox_client().get(url, params=params, headers=headers)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            if attempt < 2:
+                await asyncio.sleep(0.3 * (attempt + 1))
+                continue
+            raise HTTPException(status_code=504, detail={"upstox_error": f"Upstox did not answer ({type(exc).__name__})",
+                                                         "hint": "Network or Upstox is slow; the next refresh will retry."})
+        if response.status_code in (429, 502, 503, 504) and attempt < 2:
+            await asyncio.sleep(0.5 * (attempt + 1) + (hash(url) % 300) / 1000)
+            continue
+        break
     if response.status_code >= 400:
         try:
             detail = response.json()
@@ -202,12 +262,12 @@ async def check_token_state():
     state = "UNKNOWN"
     try:
         headers = {"Accept": "application/json", "Authorization": f"Bearer {runtime_token}"}
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            r = await client.get(f"{API_BASE}/v2/user/profile", headers=headers)
-            if r.status_code in (401, 403):
-                # Read-only / analytics tokens cannot read the profile but work for market data,
-                # so only call the token expired if a real market-data request is rejected too.
-                r = await client.get(f"{API_BASE}/v2/market-quote/ltp", params={"instrument_key": INDEX_KEYS["NIFTY"]}, headers=headers)
+        client = _upstox_client()
+        r = await client.get(f"{API_BASE}/v2/user/profile", headers=headers, timeout=6.0)
+        if r.status_code in (401, 403):
+            # Read-only / analytics tokens cannot read the profile but work for market data,
+            # so only call the token expired if a real market-data request is rejected too.
+            r = await client.get(f"{API_BASE}/v2/market-quote/ltp", params={"instrument_key": INDEX_KEYS["NIFTY"]}, headers=headers, timeout=6.0)
         state = "VALID" if r.status_code == 200 else "EXPIRED" if r.status_code == 401 else "UNKNOWN"
     except Exception:
         state = "UNKNOWN"
@@ -882,7 +942,11 @@ async def diagnostics_result(request: Request, job_id: str = ""):
 
 @app.get("/api/status")
 async def status():
-    state = await check_token_state()
+    # Never make the page wait for Upstox: use the last known token state if the check is slow (it keeps running and updates the cache).
+    try:
+        state = await asyncio.wait_for(asyncio.shield(asyncio.ensure_future(check_token_state())), timeout=2.0)
+    except asyncio.TimeoutError:
+        state = TOKEN_CHECK.get("state") or "UNKNOWN"
     return {
         "app": APP_TITLE, "version": APP_VERSION, "provider": "Upstox",
         "token_configured": bool(runtime_token), "token_state": state,
@@ -1388,7 +1452,7 @@ def settle_signal_exits(sym, price, atr=None):
         return []
 
 
-# ---- durable copy of the signal log (v1.18.10) -------------------------------------------------------------
+# ---- durable copy of the signal log (v1.18.11) -------------------------------------------------------------
 # The SQLite file is erased whenever a Render free instance restarts, which would wipe the day/month history. So every change
 # is mirrored, one JSON blob per month, into the accounts database (PostgreSQL when DATABASE_URL is set) and restored at start.
 _SL_MIRROR_HASH = {}
@@ -1526,24 +1590,29 @@ async def _start_signal_exit_watcher():
         _EXIT_WATCHER_TASK = asyncio.create_task(_signal_exit_watcher())
 
 
+_BG_TASKS = set()
+
+
+def _spawn(coro):
+    """create_task keeps only a weak reference; hold a strong one so an alert is never garbage-collected mid-send."""
+    t = asyncio.create_task(coro); _BG_TASKS.add(t); t.add_done_callback(_BG_TASKS.discard); return t
+
+
 async def _send_signal_alert(event, sym, interval, mode, a, fused):
-    """Fire-and-forget: Telegram / ntfy / email message for a reconfirmation event. Never raises."""
+    """Fire-and-forget: Telegram / ntfy / email message + phone push for a reconfirmation event. Never raises."""
     try:
         side = (fused.get("final") or {}).get("side") or a.get("side") or ""
         entry, stop, target, _ = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
         title, body, prio = notifier.format_event(event, sym, interval, mode, side, a, fused.get("reconfirm") or {},
                                                   {"entry": entry, "stop_loss": stop, "target": target}, datetime.now(IST).strftime("%H:%M:%S IST"))
         res = await notifier.send_alert(title, body, prio)
-        if event == "CONFIRMED":
-            # History goes to the owner account (PUSH_OWNER_USER_ID), or to every account with a registered device if unset.
-            try:
-                for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
-                    await asyncio.to_thread(acc.push_add_history, uid, event, sym, side, title, body, utc_now_iso())
-            except Exception as exc:
-                logger.warning("Notification history not saved: %s", str(exc)[:140])
-            push_res = await _dispatch_confirmed_push(title, body, sym, side, event)
-        else:
-            push_res = []
+        try:
+            for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
+                await asyncio.to_thread(acc.push_add_history, uid, event, sym, side, title, body, utc_now_iso())
+        except Exception as exc:
+            logger.warning("Notification history not saved: %s", str(exc)[:140])
+        push_res = await _dispatch_confirmed_push(title, body, sym, side, event)
+        _MON["last_alert"] = {"event": event, "symbol": sym, "side": side, "at": time.time(), "title": title, "channels": res, "push": push_res}
         logger.info("Signal alert %s %s %s -> channels=%s push=%s", event, sym, side, res, push_res)
     except Exception as exc:
         logger.warning("Signal alert failed: %s", str(exc)[:160])
@@ -1564,7 +1633,7 @@ class NativePushToken(BaseModel):
 def PUSH_DELIVERY_ENABLED():
     """True when at least one server-side notification transport is configured."""
     native = bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip())
-    return True if _web_push_available() else (notifier.any_configured() or native)   # Web Push keys are auto-generated (v1.18.10)
+    return True if _web_push_available() else (notifier.any_configured() or native)   # Web Push keys are auto-generated (v1.18.11)
 
 
 def _web_push_available():
@@ -1615,6 +1684,47 @@ async def notification_history(request: Request, limit: int=100):
 async def notifications_page():
     return FileResponse(BASE_DIR / "static" / "notifications.html", headers={"Cache-Control":"no-cache"})
 
+@app.get("/api/push/status")
+async def push_status(request: Request):
+    """Everything needed to see WHY a phone is (not) getting alerts: server awake? monitor running? token? device registered?"""
+    uid = _push_user(request)
+    if not uid:
+        raise HTTPException(401, "Login required")
+    syms, interval, mode, score_min, delay = _poller_cfg()
+    now = time.time()
+    try:
+        mine = await asyncio.to_thread(acc.push_devices, "web", uid)
+        mine_native = await asyncio.to_thread(acc.push_devices, "native", uid)
+        owner_web = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
+        db_ok = True
+    except Exception as exc:
+        mine = mine_native = owner_web = []
+        db_ok = False
+    host = lambda r: (lambda e: "Google (Chrome/Android)" if "fcm" in e or "googleapis" in e else "Mozilla" if "mozilla" in e else "Apple" if "apple" in e else "Microsoft" if "windows" in e else "other")(r.get("endpoint", ""))
+    st = acc.storage_info()
+    mkt = market_status()["open"]
+    problems = []
+    if not db_ok: problems.append("The account database is unreachable - registrations and history cannot be saved. Check DATABASE_URL.")
+    if not st.get("persistent"): problems.append(st.get("warning") or "Storage is not persistent: phones must re-register after every restart. Set DATABASE_URL.")
+    if not _web_push_available(): problems.append("The pywebpush package is not installed on the server, so browser push cannot be sent. Redeploy so requirements.txt installs.")
+    if not (mine or mine_native): problems.append("This phone/browser is not registered for push. Open the app on it and tap 'Enable push alerts', then allow notifications.")
+    if _push_owner_id() and _push_owner_id() != uid: problems.append(f"PUSH_OWNER_USER_ID is {_push_owner_id()} but you are signed in as user {uid}: alerts go only to user {_push_owner_id()}'s devices. Change or clear that setting.")
+    if _push_owner_id() and not owner_web: problems.append("No web device is registered for the configured owner account.")
+    if not ALERT_BACKGROUND_ON(): problems.append("The background monitor is switched off (ALERT_BACKGROUND=0 or no delivery channel).")
+    if not runtime_token: problems.append("No Upstox token: signals cannot be computed. Connect Upstox.")
+    elif TOKEN_CHECK.get("state") == "EXPIRED": problems.append("The Upstox token has expired - reconnect Upstox (More > Connect Upstox). Until then nothing is watched.")
+    if mkt and _MON["last_tick"] and now - _MON["last_tick"] > 60: problems.append("The monitor loop has not run for over a minute.")
+    if mkt and _MON["last_error"]: problems.append("Last monitor error: " + _MON["last_error"])
+    if now - _MON["started_at"] < 900: problems.append(f"The server started only {round((now - _MON['started_at']) / 60)} min ago (it had been asleep or was redeployed). It sleeps whenever nobody opens the app - add a free pinger on /health every 5 minutes.")
+    return {"time": utc_now_iso(), "market_open": mkt, "server_uptime_s": round(now - _MON["started_at"]), "monitor": {
+                "running": bool(_MON["last_tick"]) and now - _MON["last_tick"] < 90, "last_check_ago_s": round(now - _MON["last_tick"]) if _MON["last_tick"] else None,
+                "last_ok_ago_s": round(now - _MON["last_ok"]) if _MON["last_ok"] else None, "last_error": _MON["last_error"], "symbols": _MON["symbols"],
+                "watching": {"symbols": syms, "interval": interval, "mode": mode, "score_min": score_min, "poll_s": delay}, "events": sorted(notifier.events())},
+            "last_alert": _MON["last_alert"], "gap": _MON["gap"],
+            "devices": {"web": len(mine), "native": len(mine_native), "kinds": [host(r) for r in mine], "owner_configured": bool(_push_owner_id())},
+            "token_state": TOKEN_CHECK.get("state"), "storage": st, "ttl_s": int(os.getenv("PUSH_TTL_SECONDS", "600") or 600), "problems": problems}
+
+
 @app.get("/api/alerts/config")
 async def alerts_config():
     return {"channels": {**notifier.channels(), "web_push": _web_push_available(),
@@ -1623,6 +1733,23 @@ async def alerts_config():
             "max_adverse_atr": sf.RECONFIRM_MAX_ADVERSE_ATR, "background_poller": ALERT_BACKGROUND_ON(),
             "owner_user_id_configured": bool(os.getenv("PUSH_OWNER_USER_ID", "").strip()),
             "note": "The server must stay awake. The app pings itself every 10 min, but a Render Free service that has already gone to sleep can only be woken by an external pinger (UptimeRobot / cron-job.org -> /health every 5 min) or a paid instance. Device registrations/history are stored in the accounts database (set DATABASE_URL to PostgreSQL)."}
+
+
+def _push_summary(results, push_results):
+    parts = []
+    for r in (results or []):
+        parts.append(f"{r.get('channel')}: " + ("sent" if r.get("ok") else f"FAILED ({r.get('error')})"))
+    for r in (push_results or []):
+        if isinstance(r, dict) and r.get("configured") is not None:
+            if "devices" in r:
+                if r.get("devices", 0) == 0: parts.append("phone push: NO DEVICE REGISTERED - tap 'Enable push alerts'")
+                elif r.get("sent"): parts.append(f"phone push: delivered to {r['sent']} of {r['devices']} device(s)")
+                else: parts.append(f"phone push: FAILED for {r['devices']} device(s) ({'; '.join(r.get('errors') or ['rejected'])}); {r.get('dropped', 0)} stale registration(s) removed - reopen the app to re-register")
+            elif r.get("configured") and "sent" in r:
+                parts.append(f"Android app push: sent to {r['sent']}")
+        elif isinstance(r, Exception):
+            parts.append("push error: " + str(r)[:80])
+    return "; ".join(parts) or "No channel configured"
 
 
 @app.post("/api/alerts/test")
@@ -1639,7 +1766,8 @@ async def alerts_test(request: Request):
     return {"configured": {**notifier.channels(), "web_push": _web_push_available(),
                             "native_push": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON"))},
             "results": results, "push_results": push_results,
-            "message": "No server notification channel is configured. Configure Telegram/ntfy/email, VAPID Web Push, or Firebase FCM." if not configured else "Test dispatched; check the channel results and your device."}
+            "message": "No server notification channel is configured. Configure Telegram/ntfy/email, VAPID Web Push, or Firebase FCM." if not configured else "Test dispatched; check the channel results and your device.",
+            "summary": _push_summary(results, push_results)}
 
 
 def ALERT_BACKGROUND_ON():
@@ -1649,35 +1777,100 @@ def ALERT_BACKGROUND_ON():
 _ALERT_POLLER_TASK = None
 
 
+_MON = {"started_at": time.time(), "last_tick": 0.0, "last_ok": 0.0, "last_error": None, "symbols": {}, "last_alert": None, "gap": None, "ticks": 0}
+
+
+def _poller_cfg():
+    syms = [x.strip().upper() for x in os.getenv("ALERT_SYMBOLS", "NIFTY,BANKNIFTY").split(",") if x.strip().upper() in INDEX_KEYS] or ["NIFTY", "BANKNIFTY"]
+    try: interval = int(os.getenv("ALERT_INTERVAL", "5"))
+    except ValueError: interval = 5
+    mode = os.getenv("ALERT_MODE", "scalp") if os.getenv("ALERT_MODE", "scalp") in MODES else "scalp"
+    try: score_min = int(os.getenv("ALERT_SCORE_MIN", "70"))
+    except ValueError: score_min = 70
+    try: delay = max(5, int(os.getenv("ALERT_POLL_SECONDS", "10") or 10))
+    except ValueError: delay = 10
+    return syms, interval, mode, score_min, delay
+
+
+def _mon_note(res, at):
+    f = res.get("final") or {}
+    rc = res.get("reconfirm") or {}
+    return {"at": at, "price": res.get("last_close"), "score": res.get("score"), "side": f.get("side") or res.get("side"),
+            "level": f.get("level"), "action": f.get("action") or res.get("decision"), "reconfirm": rc.get("state"), "reason": rc.get("reason")}
+
+
+def _mon_refresh(syms, interval, mode, score_min):
+    for sym in syms:
+        best = None
+        for k, (ts, res) in list(_AN_CACHE.items()):
+            if len(k) == 5 and k[0] == sym and k[1] == interval and k[2] == mode and k[3] == score_min and isinstance(res, dict) and res.get("status") == "ok":
+                if best is None or ts > best[0]:
+                    best = (ts, res)
+        if best:
+            _MON["symbols"][sym] = _mon_note(best[1], best[0])
+
+
+def _market_open_at(dt):
+    return dt.weekday() < 5 and dtime(9, 15) <= dt.time() <= dtime(15, 30)
+
+
 async def _alert_poller():
     """Keeps the reconfirmation clock running and sends alerts even when no browser tab is open. It only analyses a
     symbol when no page has done so in the last 10 s, so an open terminal is not doubled up. Needs the server awake."""
-    syms = [x.strip().upper() for x in os.getenv("ALERT_SYMBOLS", "NIFTY,BANKNIFTY").split(",") if x.strip().upper() in INDEX_KEYS] or ["NIFTY", "BANKNIFTY"]
-    try:
-        interval = int(os.getenv("ALERT_INTERVAL", "5"))
-    except ValueError:
-        interval = 5
-    mode = os.getenv("ALERT_MODE", "scalp") if os.getenv("ALERT_MODE", "scalp") in MODES else "scalp"
-    try:
-        score_min = int(os.getenv("ALERT_SCORE_MIN", "70"))
-    except ValueError:
-        score_min = 70
-    delay = max(5, int(os.getenv("ALERT_POLL_SECONDS", "10") or 10))
+    syms, interval, mode, score_min, delay = _poller_cfg()
+    last_beat = 0.0
     while True:
         try:
+            _MON["last_tick"] = time.time(); _MON["ticks"] += 1
+            if time.time() - last_beat > 60:             # heartbeat in the database: lets the next start tell how long the monitor was asleep
+                last_beat = time.time()
+                try: await asyncio.to_thread(acc.meta_set, "monitor_heartbeat", str(last_beat))
+                except Exception as exc: logger.debug("Heartbeat not saved: %s", str(exc)[:100])
             if market_status()["open"] and runtime_token and ALERT_BACKGROUND_ON():
                 for sym in syms:
                     if time.time() - LAST_ANALYSIS_AT.get(f"{sym}|{interval}|{mode}|{score_min}", 0) > 10:
                         await shared_analysis((sym, interval, mode, score_min, -1), lambda s=sym: _analysis_compute(symbol=s, interval=interval, mode=mode, score_min=score_min, reconfirm=-1), user_request=False)
+                _mon_refresh(syms, interval, mode, score_min)
+                _MON["last_ok"] = time.time(); _MON["last_error"] = None
         except asyncio.CancelledError:
             raise
         except HTTPException as exc:
+            _MON["last_error"] = f"HTTP {exc.status_code}: {str(exc.detail)[:120]}"
             if exc.status_code == 401:
                 await _token_expired_alert()
             logger.debug("Alert poller: %s", str(exc.detail)[:160])
         except Exception as exc:
+            _MON["last_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
             logger.debug("Alert poller: %s", str(exc)[:160])
         await asyncio.sleep(delay)
+
+
+async def _report_monitor_gap():
+    """At start-up: if the server was down during market hours (Render Free sleeps when nobody opens the app), say so - those
+    signals were never watched, which is exactly why a phone gets no alert."""
+    try:
+        prev = await asyncio.to_thread(acc.meta_get, "monitor_heartbeat")
+        if not prev:
+            return
+        prev_dt, now = datetime.fromtimestamp(float(prev), IST), datetime.now(IST)
+        gap = (now - prev_dt).total_seconds()
+        if gap < 420 or not (_market_open_at(prev_dt) or _market_open_at(now)):
+            return
+        _MON["gap"] = {"from": prev_dt.strftime("%d %b %H:%M"), "to": now.strftime("%H:%M"), "minutes": round(gap / 60)}
+        title = "Option Intelligence - monitor was offline"
+        body = (f"The server was asleep or restarted from {prev_dt.strftime('%H:%M')} to {now.strftime('%H:%M')} IST ({round(gap / 60)} min). "
+                "Signals in that window were not watched. Add a free pinger on /health every 5 min so it stays awake (see README).")
+        await notifier.send_alert(title, body, "default", force=True)
+        for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
+            await asyncio.to_thread(acc.push_add_history, uid, "SYSTEM", "ALL", "-", title, body, utc_now_iso())
+        await _dispatch_confirmed_push(title, body, "SYSTEM", "WAIT", "GAP")
+    except Exception as exc:
+        logger.debug("Monitor gap report: %s", str(exc)[:140])
+
+
+@app.on_event("startup")
+async def _start_gap_report():
+    asyncio.create_task(_report_monitor_gap())
 
 
 _TOKEN_ALERT_DAY = None
@@ -1712,7 +1905,9 @@ async def _warmer():
                 for k in keys:
                     hit = _AN_CACHE.get(k)
                     age = now - hit[0] if hit else 1e9
-                    if age >= (AN_FRESH if open_ else 600) and k not in _AN_TASKS and k in _AN_FN:
+                    idle = now - _AN_RECENT.get(k, 0)            # a page that is polling keeps its own key fresh; the warmer covers the gaps
+                    due = (age >= 10 and idle >= 8) if open_ else age >= 600
+                    if due and k not in _AN_TASKS and k in _AN_FN and now >= _AN_FAIL.get(k, 0):
                         try:
                             await shared_analysis(k, _AN_FN[k], user_request=False)
                         except Exception as exc:
@@ -1721,7 +1916,7 @@ async def _warmer():
             raise
         except Exception as exc:
             logger.debug("Warmer error: %s", str(exc)[:120])
-        await asyncio.sleep(3 if open_ else 60)
+        await asyncio.sleep(5 if open_ else 60)
 
 
 @app.on_event("startup")
@@ -1890,14 +2085,15 @@ async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = "
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
     return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
 
-# ---- shared, pre-warmed analysis (v1.18.10) -------------------------------------------------------------------
+# ---- shared, pre-warmed analysis (v1.18.11) -------------------------------------------------------------------
 # One analysis is computed at most once per ~2 s and shared by every phone / tab / the alert poller. A result up to 15 s old is
 # served instantly while a fresh one is computed in the background, so opening the app never waits for a full recompute.
 _AN_CACHE = {}          # args -> (time, result)
 _AN_TASKS = {}          # args -> running task
 _AN_RECENT = {}         # args -> last time a person asked for it (drives the warmer)
 _AN_FN = {}             # args -> coroutine factory that recomputes it
-AN_FRESH, AN_STALE, AN_STALE_CLOSED = 2.0, 15.0, 900.0     # market closed: nothing changes, so a 15-minute-old result is instant and fine
+_AN_FAIL = {}           # args -> time before which the warmer will not retry (back-off after an error)
+AN_FRESH, AN_STALE, AN_STALE_CLOSED = 2.0, 30.0, 900.0     # market closed: nothing changes, so a 15-minute-old result is instant and fine
 
 
 _AN_DELIVERED = {}      # args -> timestamp of the result whose reconfirmation event a page has already received
@@ -1915,7 +2111,12 @@ def _an_copy(res, age, strip_event=False):
 
 async def _an_compute(key, fn):
     try:
-        res = await fn()
+        try:
+            res = await fn()
+        except Exception:
+            _AN_FAIL[key] = time.time() + 30          # e.g. Upstox rate limit / token expired: do not hammer it
+            raise
+        _AN_FAIL.pop(key, None)
         _AN_CACHE[key] = (time.time(), res)
         if len(_AN_CACHE) > 40:
             for old in sorted(_AN_CACHE, key=lambda k: _AN_CACHE[k][0])[:15]:
@@ -1954,7 +2155,7 @@ async def shared_analysis(key, fn, user_request=True):
 
 @app.get("/api/option-analysis")
 async def option_analysis(symbol: str = "NIFTY", instrument_key: str = "", interval: int = 5, mode: str = "standard", score_min: int = 70):
-    """Trend / score read of the SELECTED option contract's own premium candles (v1.18.10), so the terminal's price, score, trend
+    """Trend / score read of the SELECTED option contract's own premium candles (v1.18.11), so the terminal's price, score, trend
     and decision follow the chart view. Index-only parts (dashboard fusion, S/R room, reconfirmation) stay on /api/analysis."""
     sym = symbol.upper()
     key_ = instrument_key.strip()
@@ -2031,7 +2232,7 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
         a["reconfirm"] = fused.get("reconfirm")
         ev = (fused.get("reconfirm") or {}).get("event")
         if ev and market["open"] and ev in notifier.events() and PUSH_DELIVERY_ENABLED():
-            asyncio.create_task(_send_signal_alert(ev, sym, interval, mode, a, fused))
+            _spawn(_send_signal_alert(ev, sym, interval, mode, a, fused))
         a["gates"] = (a.get("gates") or []) + fused["gates"]
         a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],
                   "signal_technical": a.get("signal"), "decision_technical": a.get("decision"),
