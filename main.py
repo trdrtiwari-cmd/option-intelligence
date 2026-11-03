@@ -35,6 +35,35 @@ def _push_user(request):
     u = request.scope.get("oi_user") or {}
     return int(u.get("id") if isinstance(u, dict) else getattr(u, "id", 0) or 0)
 
+# ---- per-account notification type (v1.18.13) --------------------------------------------------------------
+# "all"       = every signal change: setup detected (STARTED), CONFIRMED, FAILED, and any other change of the final signal (CHANGED)
+# "confirmed" = only CONFIRMED buy signals. System notices (token expired, monitor offline, day summary, test) always arrive.
+PUSH_PREF_MODES = ("all", "confirmed")
+_GATED_EVENTS = ("STARTED", "FAILED", "CHANGED")
+_PUSH_PREF_CACHE = {}
+
+def _event_allowed(pref, event):
+    return pref == "all" or event not in _GATED_EVENTS
+
+def _user_pref(uid, fresh=False):
+    """Blocking (database). Cached 30 s so a burst of alerts does not hit the database per device."""
+    hit = _PUSH_PREF_CACHE.get(uid)
+    if hit and not fresh and time.time() - hit[0] < 30:
+        return hit[1]
+    try: val = acc.meta_get(f"push_pref:{uid}")
+    except Exception: return hit[1] if hit else "all"
+    val = val if val in PUSH_PREF_MODES else "all"
+    _PUSH_PREF_CACHE[uid] = (time.time(), val)
+    return val
+
+async def _rows_for_event(rows, event):
+    """Keep only the devices whose owner wants this kind of event."""
+    if event not in _GATED_EVENTS or not rows:
+        return rows
+    uids = {r["user_id"] for r in rows}
+    prefs = await asyncio.to_thread(lambda: {u: _user_pref(u) for u in uids})
+    return [r for r in rows if _event_allowed(prefs.get(r["user_id"], "all"), event)]
+
 async def _send_native_fcm(title, body, data=None):
     raw = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw: return {"configured": False, "sent": 0}
@@ -43,7 +72,7 @@ async def _send_native_fcm(title, body, data=None):
         from firebase_admin import credentials, messaging
         try: app_firebase = firebase_admin.get_app()
         except ValueError: app_firebase = firebase_admin.initialize_app(credentials.Certificate(json.loads(raw)))
-        rows = await asyncio.to_thread(acc.push_devices, "native", _push_owner_id())
+        rows = await _rows_for_event(await asyncio.to_thread(acc.push_devices, "native", _push_owner_id()), (data or {}).get("event"))
         sent = 0
         for row in rows:
             try:
@@ -72,7 +101,7 @@ async def _send_web_push(title, body, data=None):
     except Exception as exc:
         logger.warning("pywebpush not installed: %s", str(exc)[:140]); return {"configured": False, "sent": 0, "devices": 0, "error": "pywebpush not installed"}
     try:
-        rows = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
+        rows = await _rows_for_event(await asyncio.to_thread(acc.push_devices, "web", _push_owner_id()), (data or {}).get("event"))
     except Exception as exc:
         logger.warning("Push devices unreadable: %s", str(exc)[:140]); return {"configured": True, "sent": 0, "devices": 0, "error": "database unavailable"}
     payload = json.dumps({"title": title, "body": body, "url": "/", "data": data or {}})
@@ -116,7 +145,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.12"
+APP_VERSION = "1.18.14"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1602,17 +1631,43 @@ def _spawn(coro):
     t = asyncio.create_task(coro); _BG_TASKS.add(t); t.add_done_callback(_BG_TASKS.discard); return t
 
 
+_LAST_FINAL = {}      # (symbol, interval, mode) -> (level, side) seen on the previous analysis
+_CHANGE_SENT = {}     # (symbol, interval, mode, level, side) -> time of the last CHANGED push (flap guard)
+
+def _signal_change_event(key, final, market_open, now=None):
+    """'CHANGED' when the final signal moves to a different (level, side) that has no event of its own. PENDING/CONFIRMED/FAILED already
+    send STARTED/CONFIRMED/FAILED, WAIT is not worth a push, and the first reading after a restart is never a change."""
+    now = now or time.time()
+    cur = (final.get("level"), final.get("side"))
+    prev = _LAST_FINAL.get(key); _LAST_FINAL[key] = cur
+    if not market_open or prev is None or prev == cur or cur[0] in ("WAIT", "PENDING", "CONFIRMED") or prev[0] == "PENDING":
+        return None
+    k = key + cur
+    if now - _CHANGE_SENT.get(k, 0) < 120:
+        return None
+    _CHANGE_SENT[k] = now
+    return "CHANGED"
+
+
 async def _send_signal_alert(event, sym, interval, mode, a, fused):
     """Fire-and-forget: Telegram / ntfy / email message + phone push for a reconfirmation event. Never raises."""
     try:
         side = (fused.get("final") or {}).get("side") or a.get("side") or ""
-        entry, stop, target, _ = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
-        title, body, prio = notifier.format_event(event, sym, interval, mode, side, a, fused.get("reconfirm") or {},
-                                                  {"entry": entry, "stop_loss": stop, "target": target}, datetime.now(IST).strftime("%H:%M:%S IST"))
-        res = await notifier.send_alert(title, body, prio)
+        if event == "CHANGED":          # any other change of the final signal: phone push + history only (external channels follow ALERT_EVENTS)
+            f = fused.get("final") or {}
+            title = f"{sym} signal changed: {f.get('action') or '-'}"
+            body = (f"{f.get('headline') or ''}\n{sym} {interval}m | {mode} | index {a.get('last_close'):,.2f} | score {a.get('score')}/100 | "
+                    f"{datetime.now(IST).strftime('%H:%M:%S IST')}\nAnalysis only - not an order.")
+            res = []
+        else:
+            entry, stop, target, _ = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
+            title, body, prio = notifier.format_event(event, sym, interval, mode, side, a, fused.get("reconfirm") or {},
+                                                      {"entry": entry, "stop_loss": stop, "target": target}, datetime.now(IST).strftime("%H:%M:%S IST"))
+            res = await notifier.send_alert(title, body, prio)
         try:
             for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
-                await asyncio.to_thread(acc.push_add_history, uid, event, sym, side, title, body, utc_now_iso())
+                if _event_allowed(await asyncio.to_thread(_user_pref, uid), event):
+                    await asyncio.to_thread(acc.push_add_history, uid, event, sym, side, title, body, utc_now_iso())
         except Exception as exc:
             logger.warning("Notification history not saved: %s", str(exc)[:140])
         push_res = await _dispatch_confirmed_push(title, body, sym, side, event)
@@ -1676,6 +1731,24 @@ async def push_native_register(payload: NativePushToken, request: Request):
     if len(token)<30 or len(token)>4096: raise HTTPException(400,"Invalid push token")
     await _run_push_db(acc.push_upsert_device, uid, "native", token, token, utc_now_iso())
     return {"ok":True}
+
+class PushPref(BaseModel):
+    mode: str
+
+@app.get("/api/push/prefs")
+async def push_prefs_get(request: Request):
+    uid = _push_user(request)
+    if not uid: raise HTTPException(401, "Login required")
+    return {"mode": await asyncio.to_thread(_user_pref, uid, True), "modes": {"all": "All signal changes", "confirmed": "Confirmed buy signals only"}}
+
+@app.post("/api/push/prefs")
+async def push_prefs_set(payload: PushPref, request: Request):
+    uid = _push_user(request)
+    if not uid: raise HTTPException(401, "Login required")
+    if payload.mode not in PUSH_PREF_MODES: raise HTTPException(400, "mode must be one of: " + ", ".join(PUSH_PREF_MODES))
+    await _run_push_db(acc.meta_set, f"push_pref:{uid}", payload.mode)
+    _PUSH_PREF_CACHE[uid] = (time.time(), payload.mode)
+    return {"ok": True, "mode": payload.mode}
 
 @app.get("/api/notifications")
 async def notification_history(request: Request, limit: int=100):
@@ -2265,6 +2338,8 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
         ev = (fused.get("reconfirm") or {}).get("event")
         if ev and market["open"] and ev in notifier.events() and PUSH_DELIVERY_ENABLED():
             _spawn(_send_signal_alert(ev, sym, interval, mode, a, fused))
+        elif not ev and sym in INDEX_KEYS and PUSH_DELIVERY_ENABLED() and _signal_change_event((sym, interval, mode), fused["final"], market["open"]):
+            _spawn(_send_signal_alert("CHANGED", sym, interval, mode, a, fused))
         a["gates"] = (a.get("gates") or []) + fused["gates"]
         a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],
                   "signal_technical": a.get("signal"), "decision_technical": a.get("decision"),

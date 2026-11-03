@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.18.12";
+const FRONTEND_VERSION="1.18.14";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -1347,7 +1347,7 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
     const cfg=await api("/api/push/config"); if(!(cfg.web_push&&cfg.vapid_public_key))return false;
     if(Notification.permission==="default"){
       if(!ask)return false;
-      lsSet(LS_ASKED,String(Date.now()));
+      lsSet(LS_ASKED,String((Number(lsGet(LS_ASKED))||0)+1));
       const p=await Notification.requestPermission(); if(p!=="granted")throw new Error("Browser notification permission not granted");
     }
     if(Notification.permission!=="granted"){
@@ -1379,11 +1379,32 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
 
   setLabel(lsGet(LS_ON)==="1"&&(nativePlugin()||(webSupported()&&Notification.permission==="granted")));   // instant, no network
   loadPushStatus();
-  ensure(false).then(async got=>{if(!got.length)setLabel(await localPushState())});                         // silent repair on every open
-  // Browsers only allow the permission prompt after a tap, so the first tap anywhere asks (at most once a day, never when blocked).
-  const needPrompt=nativePlugin()||(webSupported()&&Notification.permission==="default");
-  if(needPrompt&&Date.now()-Number(lsGet(LS_ASKED)||0)>86400000){
-    document.addEventListener("pointerup",()=>{ensure(true).catch(e=>toast("Push setup: "+e.message))},{once:true});
+  ensure(false).then(async got=>{
+    if(!got.length&&nativePlugin()){try{got=await ensure(true)}catch(e){toast("Push setup: "+e.message)}}      // Android app: ask at launch, no tap needed
+    if(!got.length)setLabel(await localPushState());
+    banner();
+  });                                                                                                         // silent repair on every open
+  // Browsers only allow the permission prompt after a tap. So: the first tap on every page load asks (up to 3 times in total - Chrome
+  // blocks a site after 3 dismissals anyway), and a bar at the top stays visible with a one-tap "Turn on" until push is on.
+  function banner(){
+    let el=document.getElementById("pushBar");
+    const on=btn.dataset.on==="1";
+    const perm=webSupported()?Notification.permission:"unsupported";
+    const ios=/iphone|ipad|ipod/i.test(navigator.userAgent);
+    let msg="",act="";
+    if(!on&&!nativePlugin()){
+      if(perm==="denied")msg="Push alerts are blocked. Open your browser's site settings for this app, set Notifications to Allow, then reopen it.";
+      else if(perm==="unsupported"&&ios)msg="To get push alerts on iPhone: tap Share, Add to Home Screen, then open the app from the home screen.";
+      else if(perm==="default"||perm==="granted"){msg="Push alerts are off on this phone.";act="Turn on"}
+    }
+    if(!msg){if(el)el.remove();return}
+    if(!el){el=document.createElement("div");el.id="pushBar";el.style.cssText="position:sticky;top:0;z-index:50;display:flex;gap:10px;align-items:center;justify-content:space-between;padding:8px 12px;background:#7a4b00;color:#fff;font-size:14px";document.body.prepend(el)}
+    el.innerHTML="";const t=document.createElement("span");t.textContent=msg;el.appendChild(t);
+    if(act){const b=document.createElement("button");b.type="button";b.textContent=act;b.style.cssText="flex:none;padding:6px 12px;border-radius:8px;border:0;font-weight:600";b.onclick=()=>btn.click();el.appendChild(b)}
+  }
+  new MutationObserver(banner).observe(btn,{attributes:true,attributeFilter:["data-on"]});
+  if((nativePlugin()||(webSupported()&&Notification.permission==="default"))&&(Number(lsGet(LS_ASKED))||0)<3){
+    document.addEventListener("pointerup",()=>{ensure(true).catch(e=>toast("Push setup: "+e.message)).finally(banner)},{once:true});
   }
   document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&Date.now()-lastEnsure>60000)ensure(false)});
   setInterval(()=>{if(document.visibilityState==="visible")loadPushStatus()},30000);
@@ -1397,4 +1418,21 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
     }catch(e){toast("Push setup: "+e.message)}
     finally{btn.disabled=false;setLabel(lsGet(LS_ON)==="1"&&btn.dataset.on==="1")}
   });
+})();
+
+// v1.18.13: choose which signals send a push - every signal change, or only confirmed buy signals (saved on the account, used by the server).
+(function(){
+  const sel=$("pushType"); if(!sel)return;
+  const apply=m=>{if(m&&sel.value!==m)sel.value=m};
+  fetch("/api/push/prefs",{credentials:"same-origin"}).then(r=>r.ok?r.json():null).then(d=>d&&apply(d.mode)).catch(()=>{});
+  sel.addEventListener("change",async()=>{
+    const want=sel.value;
+    try{
+      const r=await fetch("/api/push/prefs",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:want})});
+      if(!r.ok)throw new Error("HTTP "+r.status);
+      toast(want==="confirmed"?"Push only for CONFIRMED buy signals.":"Push for every signal change.");
+      window.dispatchEvent(new CustomEvent("oi-notify-pref",{detail:want}));
+    }catch(e){toast("Could not save notification type: "+e.message);fetch("/api/push/prefs",{credentials:"same-origin"}).then(r=>r.json()).then(d=>apply(d.mode)).catch(()=>{})}
+  });
+  window.addEventListener("oi-notify-pref",e=>apply(e.detail));
 })();

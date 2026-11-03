@@ -1,5 +1,15 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.18.14 - push alerts as close to "always on" as browsers allow
+
+* The Android app asks for notification permission at launch (no tap needed). In the browser/PWA the first tap on each page load asks (up to 3 times), and an orange bar at the top offers a one-tap **Turn on** until push is on; it also explains how to unblock notifications or add the app to the iPhone Home Screen.
+
+## v1.18.13 - choose which signals send a notification
+
+* New **Notifications** setting on the phone (More menu) and next to *Enable push alerts* on the terminal: **All signal changes** or **Confirmed buy signals only**. It is saved on your account and the server applies it per account, so it works with the app closed.
+* *All signal changes* = setup detected, CONFIRMED, failed reconfirmation, and any other change of the final signal (e.g. WATCH CE to CONFLICT). *Confirmed only* = just CONFIRMED buy CE/PE. Day summary, token-expired, monitor-offline and test alerts always arrive. Default is *All* (same alerts as before, plus changes).
+* Telegram / ntfy / email still follow `ALERT_EVENTS`.
+
 ## v1.18.12 - push stays on, owner check fixed, signal log follows the terminal
 
 * **Push alerts no longer need enabling again and again.** The phone now shows its last known state instantly, silently re-registers with the server on every open / return to the app / every 10 min whenever notification permission is granted, and asks for permission once on the first tap (at most once a day; never when blocked). A slow service worker is no longer read as "push off".

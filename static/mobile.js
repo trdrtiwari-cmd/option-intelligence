@@ -81,6 +81,7 @@
     sheet.innerHTML = '<h3>More</h3>' +
       '<a class="m-row" href="/account"><span>Account &amp; saved settings<small>Password, saved data, reset preferences</small></span></a>' +
       '<a class="m-row" id="mUpstox" href="/api/login" hidden><span>Connect Upstox<small>Owner only - refresh the daily token</small></span></a>' +
+      '<label class="m-row"><span>Notifications<small id="mNotifyInfo">Which signals send a push</small></span><select class="m-select" id="mNotify"><option value="all">All signal changes</option><option value="confirmed">Confirmed buy only</option></select></label>' +
       '<label class="m-row"><span>Keep screen awake<small>Stops the phone sleeping while the app is open</small></span><input type="checkbox" class="m-switch" id="mAwake"></label>' +
       '<button type="button" class="m-row" id="mInstall"><span>Install app<small></small></span></button>' +
       '<button type="button" class="m-row" id="mSync"><span>Sync now<small id="mSyncInfo">Checking…</small></span></button>' +
@@ -115,6 +116,19 @@
       try { const keys = await caches.keys(); await Promise.all(keys.map(k => caches.delete(k))); } catch { }
       try { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(r => r.update())); } catch { }
       location.reload();
+    };
+    const nsel = sheet.querySelector("#mNotify"), ninfo = sheet.querySelector("#mNotifyInfo");
+    const nload = () => fetch("/api/push/prefs", {credentials: "same-origin"}).then(r => r.ok ? r.json() : null).then(d => { if (d && d.mode) nsel.value = d.mode; }).catch(() => { });
+    nload();
+    window.addEventListener("oi-notify-pref", e => { nsel.value = e.detail; });
+    nsel.onchange = async () => {
+      const want = nsel.value;
+      try {
+        const r = await fetch("/api/push/prefs", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({mode: want})});
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        ninfo.textContent = want === "confirmed" ? "Only CONFIRMED buy signals send a push" : "Every signal change sends a push";
+        window.dispatchEvent(new CustomEvent("oi-notify-pref", {detail: want}));
+      } catch (e) { ninfo.textContent = "Not saved: " + e.message; nload(); }
     };
     const awake = sheet.querySelector("#mAwake");
     const sync = () => { awake.checked = prefs().get("app.keepAwake", false) === true; applyWake(); };
