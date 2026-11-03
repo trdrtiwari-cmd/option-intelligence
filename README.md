@@ -1,5 +1,12 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.18.8 - instant open + no more frozen refresh
+
+* **Fixed: data stuck at an old time after reopening the app.** If the phone froze the page mid-request, that request never finished and the refresh loop waited for it forever. Every request now has a 20 s deadline, every "busy" flag has a watchdog, and coming back to the app (unlock, switch back, network returns) discards anything stuck and reloads everything at once. Same fix on the Data Check page.
+* **Instant open**: the last live data (candles, analysis, derivatives, Data Check, signals, option chain) is kept on the device and shown immediately on the next open, with a small "Saved data from N min ago - updating" badge until the live answer lands. The page no longer waits for the account sync before starting, and the three main pages open from the installed app's saved copy even while the server is waking up.
+* **Server**: one analysis is shared by every phone/tab/the alert poller (2 s fresh, up to 15 s served instantly while refreshing; 15 min when the market is closed), a background warmer keeps whatever you looked at recently computed, and responses are gzip-compressed. `WARMER=0` turns the warmer off.
+* A web page cannot run while the phone is locked - background alerts come from the server push (v1.18.6). Opening the app now simply catches up instantly.
+
 ## v1.18.7 - saved daily & monthly strategy results
 
 * Every confirmed BUY CE/PE is logged automatically at the signal-time index price with an ATR stop-loss and target, then auto-exited (target, stop or 15:20 square-off). Each row now also stores the ATR and the stop/target multiples used.

@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
 
 from indicators import IST, MODES, analyze, drop_forming, merge_volume, normalize_candles, parse_time
 from instruments import FutureScanner, pick_front_future
@@ -95,7 +96,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.7"
+APP_VERSION = "1.18.8"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -107,7 +108,8 @@ class NoCacheStaticFiles(StaticFiles):
 
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
-app.add_middleware(acc.SessionAuthMiddleware)   # login required everywhere except /health, /login and the TradingView webhook
+app.add_middleware(acc.SessionAuthMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=700)   # v1.18.8: JSON/JS/CSS compress ~5-8x, a big win on mobile data   # login required everywhere except /health, /login and the TradingView webhook
 app.mount("/static", NoCacheStaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 oauth_states = set()
@@ -1386,7 +1388,7 @@ def settle_signal_exits(sym, price, atr=None):
         return []
 
 
-# ---- durable copy of the signal log (v1.18.7) -------------------------------------------------------------
+# ---- durable copy of the signal log (v1.18.8) -------------------------------------------------------------
 # The SQLite file is erased whenever a Render free instance restarts, which would wipe the day/month history. So every change
 # is mirrored, one JSON blob per month, into the accounts database (PostgreSQL when DATABASE_URL is set) and restored at start.
 _SL_MIRROR_HASH = {}
@@ -1562,7 +1564,7 @@ class NativePushToken(BaseModel):
 def PUSH_DELIVERY_ENABLED():
     """True when at least one server-side notification transport is configured."""
     native = bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip())
-    return True if _web_push_available() else (notifier.any_configured() or native)   # Web Push keys are auto-generated (v1.18.7)
+    return True if _web_push_available() else (notifier.any_configured() or native)   # Web Push keys are auto-generated (v1.18.8)
 
 
 def _web_push_available():
@@ -1666,7 +1668,7 @@ async def _alert_poller():
             if market_status()["open"] and runtime_token and ALERT_BACKGROUND_ON():
                 for sym in syms:
                     if time.time() - LAST_ANALYSIS_AT.get(f"{sym}|{interval}|{mode}|{score_min}", 0) > 10:
-                        await analysis(symbol=sym, interval=interval, mode=mode, score_min=score_min, reconfirm=-1)
+                        await shared_analysis((sym, interval, mode, score_min, -1), lambda s=sym: _analysis_compute(symbol=s, interval=interval, mode=mode, score_min=score_min, reconfirm=-1), user_request=False)
         except asyncio.CancelledError:
             raise
         except HTTPException as exc:
@@ -1691,6 +1693,42 @@ async def _token_expired_alert():
     title, body = "Option Intelligence - reconnect Upstox", "The Upstox token has expired, so signals and alerts are paused. Open the app > More > Connect Upstox to refresh it."
     await notifier.send_alert(title, body, "high", force=True)
     await _dispatch_confirmed_push(title, body, "SYSTEM", "WAIT", "TOKEN")
+
+
+_WARMER_TASK = None
+
+
+async def _warmer():
+    """Keeps whatever people looked at recently (terminal analysis, Data Check) computed, so opening the app on a phone is an
+    instant read of a result that is only seconds old. Market open: every 3 s. Closed: every minute, for the last 6 hours."""
+    while True:
+        open_ = False
+        try:
+            open_ = market_status()["open"]
+            if runtime_token:
+                now = time.time()
+                horizon = 1800 if open_ else 6 * 3600
+                keys = [k for k, t in sorted(_AN_RECENT.items(), key=lambda kv: -kv[1]) if now - t < horizon][:4]
+                for k in keys:
+                    hit = _AN_CACHE.get(k)
+                    age = now - hit[0] if hit else 1e9
+                    if age >= (AN_FRESH if open_ else 600) and k not in _AN_TASKS and k in _AN_FN:
+                        try:
+                            await shared_analysis(k, _AN_FN[k], user_request=False)
+                        except Exception as exc:
+                            logger.debug("Warmer %s: %s", k, str(exc)[:120])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Warmer error: %s", str(exc)[:120])
+        await asyncio.sleep(3 if open_ else 60)
+
+
+@app.on_event("startup")
+async def _start_warmer():
+    global _WARMER_TASK
+    if os.getenv("WARMER", "1").strip() != "0" and (_WARMER_TASK is None or _WARMER_TASK.done()):
+        _WARMER_TASK = asyncio.create_task(_warmer())
 
 
 _KEEPALIVE_TASK = None
@@ -1852,8 +1890,75 @@ async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = "
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
     return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
 
+# ---- shared, pre-warmed analysis (v1.18.8) -------------------------------------------------------------------
+# One analysis is computed at most once per ~2 s and shared by every phone / tab / the alert poller. A result up to 15 s old is
+# served instantly while a fresh one is computed in the background, so opening the app never waits for a full recompute.
+_AN_CACHE = {}          # args -> (time, result)
+_AN_TASKS = {}          # args -> running task
+_AN_RECENT = {}         # args -> last time a person asked for it (drives the warmer)
+_AN_FN = {}             # args -> coroutine factory that recomputes it
+AN_FRESH, AN_STALE, AN_STALE_CLOSED = 2.0, 15.0, 900.0     # market closed: nothing changes, so a 15-minute-old result is instant and fine
+
+
+_AN_DELIVERED = {}      # args -> timestamp of the result whose reconfirmation event a page has already received
+
+
+def _an_copy(res, age, strip_event=False):
+    import copy
+    out = copy.deepcopy(res)
+    out["cache_age_s"] = round(age, 1)
+    rc = out.get("reconfirm")
+    if strip_event and isinstance(rc, dict):
+        rc["event"] = None            # an event is shown to a page once; the alert itself was already sent when it was computed
+    return out
+
+
+async def _an_compute(key, fn):
+    try:
+        res = await fn()
+        _AN_CACHE[key] = (time.time(), res)
+        if len(_AN_CACHE) > 40:
+            for old in sorted(_AN_CACHE, key=lambda k: _AN_CACHE[k][0])[:15]:
+                _AN_CACHE.pop(old, None)
+        return res
+    finally:
+        _AN_TASKS.pop(key, None)
+
+
+async def shared_analysis(key, fn, user_request=True):
+    now = time.time()
+    if user_request:
+        _AN_RECENT[key] = now
+        _AN_FN[key] = fn
+    hit = _AN_CACHE.get(key)
+    task = _AN_TASKS.get(key)
+    age = now - hit[0] if hit else None
+
+    def deliver(stamp, res, a):
+        strip = False
+        if user_request:
+            strip = _AN_DELIVERED.get(key) == stamp
+            _AN_DELIVERED[key] = stamp
+        return _an_copy(res, a, strip)
+
+    if hit and age < AN_FRESH:
+        return deliver(hit[0], hit[1], age)
+    if task is None:
+        task = _AN_TASKS[key] = asyncio.create_task(_an_compute(key, fn))
+    if hit and age < (AN_STALE if market_status()["open"] else AN_STALE_CLOSED):
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)    # never "exception was never retrieved"
+        return deliver(hit[0], hit[1], age)
+    res = await asyncio.shield(task)
+    return deliver(_AN_CACHE[key][0] if key in _AN_CACHE else now, res, 0.0)
+
+
 @app.get("/api/analysis")
 async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70, reconfirm: int = -1):
+    key = (symbol.upper(), interval, mode, score_min, reconfirm)
+    return await shared_analysis(key, lambda: _analysis_compute(symbol, interval, mode, score_min, reconfirm))
+
+
+async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70, reconfirm: int = -1):
     """Transparent confirmation engine from index candles + a higher-timeframe trend read, fused with the Data Check
     dashboard signal and stamped with the time the signal was generated (v1.9).
     Not a guarantee and not an order instruction."""
@@ -2105,6 +2210,13 @@ def _stamp_dashboard_times(sym, blocks, final):
 
 @app.get("/api/dashboard/summary")
 async def dashboard_summary(symbol: str = "NIFTY", universe: str = "", expiry: str = "current_week", interval: int = 5, offset: int = 0):
+    sym = symbol.upper()
+    _check_graph_args(sym, interval, offset)       # reject bad input before anything is cached
+    key = ("dash", sym, universe, expiry, interval, offset)
+    return await shared_analysis(key, lambda: _dashboard_summary_compute(symbol, universe, expiry, interval, offset))
+
+
+async def _dashboard_summary_compute(symbol: str = "NIFTY", universe: str = "", expiry: str = "current_week", interval: int = 5, offset: int = 0):
     sym = symbol.upper()
     _check_graph_args(sym, interval, offset)
     universe = universe or ("niftybank" if sym == "BANKNIFTY" else "nifty50")
