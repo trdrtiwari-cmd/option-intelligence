@@ -1,5 +1,12 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.18.12 - push stays on, owner check fixed, signal log follows the terminal
+
+* **Push alerts no longer need enabling again and again.** The phone now shows its last known state instantly, silently re-registers with the server on every open / return to the app / every 10 min whenever notification permission is granted, and asks for permission once on the first tap (at most once a day; never when blocked). A slow service worker is no longer read as "push off".
+* A 400 reply from the push service no longer deletes a phone's registration (only 401/403/404/410 do).
+* **"No web device is registered for the configured owner account"** now counts Android-app (native) devices too, and tells you which user id(s) actually have devices. Either set `PUSH_OWNER_USER_ID` to that id or leave it empty to notify every account.
+* **Signal log:** the background monitor now also analyses the settings (interval / mode / score) your terminal used in the last 6 hours (max 3 extra; `ALERT_FOLLOW_TERMINAL=0` turns it off), so confirmed signals are logged even when the page is closed. `/api/push/status` shows the last logged signal and any write error.
+
 ## v1.18.11 - alerts that actually arrive + faster data
 
 Why alerts did not arrive / "push turned itself off" (found by analysing the app, not guessed):

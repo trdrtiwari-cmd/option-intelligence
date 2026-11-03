@@ -36,10 +36,10 @@ def dev(i, ep): return {"id": i, "user_id": 1, "endpoint": ep, "payload": json.d
 
 
 def test_sends_with_ttl_and_urgency_and_heals_bad_registrations():
-    rows = [dev(1, "ok"), dev(2, "gone"), dev(3, "wrongkey"), dev(4, "flaky")]
-    out, calls, deleted = run_send(rows, {"ok": 200, "gone": 410, "wrongkey": 403, "flaky": TimeoutError("slow")})
-    assert out["devices"] == 4 and out["sent"] == 1 and out["dropped"] == 2 and out["failed"] == 1, out
-    assert sorted(deleted) == [2, 3]                                  # 410 and 403 registrations are removed, the timeout one is kept
+    rows = [dev(1, "ok"), dev(2, "gone"), dev(3, "wrongkey"), dev(4, "flaky"), dev(5, "badreq")]
+    out, calls, deleted = run_send(rows, {"ok": 200, "gone": 410, "wrongkey": 403, "flaky": TimeoutError("slow"), "badreq": 400})
+    assert out["devices"] == 5 and out["sent"] == 1 and out["dropped"] == 2 and out["failed"] == 2, out
+    assert sorted(deleted) == [2, 3]                                  # v1.18.12: a 400 no longer deletes the registration                                  # 410 and 403 registrations are removed, the timeout one is kept
     assert all(c["ttl"] == 600 and c["headers"] == {"Urgency": "high"} for c in calls)      # TTL 0 would drop the push for a sleeping phone
     assert all(c["vapid_claims"]["sub"].startswith("mailto:") for c in calls)
 
@@ -60,7 +60,7 @@ def test_summary_text_names_the_problem():
 
 
 def test_main_wires_monitor_and_status():
-    for needle in ('"/api/push/status"', "_report_monitor_gap", "_spawn(_send_signal_alert", "monitor_heartbeat", "_upstox_client()", "compresslevel=3"):
+    for needle in ('"/api/push/status"', "_report_monitor_gap", "_spawn(_send_signal_alert", "monitor_heartbeat", "_upstox_client()", "compresslevel=3", "_watch_list(", "ALERT_FOLLOW_TERMINAL", '"last_record"', "owner_native"):
         assert needle in SRC, needle
 
 

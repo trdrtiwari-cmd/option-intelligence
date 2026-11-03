@@ -85,9 +85,9 @@ async def _send_web_push(title, body, data=None):
             return ("ok", None)
         except Exception as exc:
             code = getattr(getattr(exc, "response", None), "status_code", None)
-            if code in (400, 401, 403, 404, 410):
-                # 404/410: subscription gone. 400/401/403: the push service rejects our key for this subscription (keys changed, or
-                # an old registration). Either way it can never work again - drop it so the phone re-registers itself on next open.
+            if code in (401, 403, 404, 410):
+                # 404/410: subscription gone. 401/403: the push service rejects our key for this subscription (keys changed, or
+                # an old registration). A 400 is NOT treated as dead (v1.18.12): it can be a bad request, and deleting on it made phones lose their registration. Either way it can never work again - drop it so the phone re-registers itself on next open.
                 await asyncio.to_thread(acc.push_delete_device, row["id"])
                 return ("dropped", f"HTTP {code}")
             logger.warning("Web push failed: %s", str(exc)[:160]); return ("failed", f"{type(exc).__name__}: {str(exc)[:100]}")
@@ -116,7 +116,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.11"
+APP_VERSION = "1.18.12"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1391,11 +1391,15 @@ def record_signal_row(symbol, interval, mode, a):
                _float_or_none(a.get("last_close")), entry_px, stop_px,
                target_px, str(final.get("reason") or a.get("message") or a.get("note") or "")[:500], target_name, atr_v, sl_mult, tgt_mult)
         with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
-            db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason,target_name,atr_at_entry,sl_atr_mult,target_atr_mult) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            cur = db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason,target_name,atr_at_entry,sl_atr_mult,target_atr_mult) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
             _SIGNAL_LOG_DIRTY.set()
             db.commit()
+        _MON["last_record"] = {"at": time.time(), "symbol": symbol, "interval": int(interval), "mode": mode, "side": side, "candle": candle_time, "new_row": bool(cur.rowcount)}
+        _MON["last_record_error"] = None
     except Exception as exc:
         logger.warning("Signal log write failed: %s", str(exc)[:160])
+        try: _MON["last_record_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        except Exception: pass
 
 MAX_DAILY_LOSSES = int(os.getenv("MAX_DAILY_LOSSES", "2") or 0)      # 0 turns the daily loss limit off
 
@@ -1696,9 +1700,12 @@ async def push_status(request: Request):
         mine = await asyncio.to_thread(acc.push_devices, "web", uid)
         mine_native = await asyncio.to_thread(acc.push_devices, "native", uid)
         owner_web = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
+        owner_native = await asyncio.to_thread(acc.push_devices, "native", _push_owner_id())
+        all_ids = sorted({r["user_id"] for r in (await asyncio.to_thread(acc.push_devices, "web", 0)) + (await asyncio.to_thread(acc.push_devices, "native", 0))}) if _push_owner_id() else []
         db_ok = True
     except Exception as exc:
-        mine = mine_native = owner_web = []
+        mine = mine_native = owner_web = owner_native = []
+        all_ids = []
         db_ok = False
     host = lambda r: (lambda e: "Google (Chrome/Android)" if "fcm" in e or "googleapis" in e else "Mozilla" if "mozilla" in e else "Apple" if "apple" in e else "Microsoft" if "windows" in e else "other")(r.get("endpoint", ""))
     st = acc.storage_info()
@@ -1709,7 +1716,11 @@ async def push_status(request: Request):
     if not _web_push_available(): problems.append("The pywebpush package is not installed on the server, so browser push cannot be sent. Redeploy so requirements.txt installs.")
     if not (mine or mine_native): problems.append("This phone/browser is not registered for push. Open the app on it and tap 'Enable push alerts', then allow notifications.")
     if _push_owner_id() and _push_owner_id() != uid: problems.append(f"PUSH_OWNER_USER_ID is {_push_owner_id()} but you are signed in as user {uid}: alerts go only to user {_push_owner_id()}'s devices. Change or clear that setting.")
-    if _push_owner_id() and not owner_web: problems.append("No web device is registered for the configured owner account.")
+    if _push_owner_id() and not (owner_web or owner_native):
+        problems.append(f"No phone/browser is registered for the configured owner account (user {_push_owner_id()})." +
+                        (f" Devices are registered under user id(s) {all_ids}: set PUSH_OWNER_USER_ID to one of them, or clear it to notify every account." if all_ids
+                         else " Open the app on the phone while signed in as that account; it now registers itself."))
+    if _MON.get("last_record_error"): problems.append("Signal log write failed: " + _MON["last_record_error"])
     if not ALERT_BACKGROUND_ON(): problems.append("The background monitor is switched off (ALERT_BACKGROUND=0 or no delivery channel).")
     if not runtime_token: problems.append("No Upstox token: signals cannot be computed. Connect Upstox.")
     elif TOKEN_CHECK.get("state") == "EXPIRED": problems.append("The Upstox token has expired - reconnect Upstox (More > Connect Upstox). Until then nothing is watched.")
@@ -1720,7 +1731,7 @@ async def push_status(request: Request):
                 "running": bool(_MON["last_tick"]) and now - _MON["last_tick"] < 90, "last_check_ago_s": round(now - _MON["last_tick"]) if _MON["last_tick"] else None,
                 "last_ok_ago_s": round(now - _MON["last_ok"]) if _MON["last_ok"] else None, "last_error": _MON["last_error"], "symbols": _MON["symbols"],
                 "watching": {"symbols": syms, "interval": interval, "mode": mode, "score_min": score_min, "poll_s": delay}, "events": sorted(notifier.events())},
-            "last_alert": _MON["last_alert"], "gap": _MON["gap"],
+            "last_alert": _MON["last_alert"], "gap": _MON["gap"], "signal_log": {"last_record": _MON.get("last_record"), "error": _MON.get("last_record_error")},
             "devices": {"web": len(mine), "native": len(mine_native), "kinds": [host(r) for r in mine], "owner_configured": bool(_push_owner_id())},
             "token_state": TOKEN_CHECK.get("state"), "storage": st, "ttl_s": int(os.getenv("PUSH_TTL_SECONDS", "600") or 600), "problems": problems}
 
@@ -1777,6 +1788,7 @@ def ALERT_BACKGROUND_ON():
 _ALERT_POLLER_TASK = None
 
 
+_USER_COMBOS = {}      # (symbol, interval, mode, score_min) -> last time a browser asked for it (v1.18.12)
 _MON = {"started_at": time.time(), "last_tick": 0.0, "last_ok": 0.0, "last_error": None, "symbols": {}, "last_alert": None, "gap": None, "ticks": 0}
 
 
@@ -1790,6 +1802,17 @@ def _poller_cfg():
     try: delay = max(5, int(os.getenv("ALERT_POLL_SECONDS", "10") or 10))
     except ValueError: delay = 10
     return syms, interval, mode, score_min, delay
+
+
+def _watch_list(syms, interval, mode, score_min):
+    """What the background monitor analyses: the ALERT_* settings, plus (v1.18.12) up to 3 other settings a browser used in the last
+    6 hours - otherwise a signal shown on a 15m / standard terminal was only logged while that page happened to be open."""
+    base = [(s, interval, mode, score_min) for s in syms]
+    if os.getenv("ALERT_FOLLOW_TERMINAL", "1").strip() == "0":
+        return base
+    cutoff = time.time() - 6 * 3600
+    extra = [k for k, t in sorted(_USER_COMBOS.items(), key=lambda kv: -kv[1]) if t >= cutoff and k not in base][:3]
+    return base + extra
 
 
 def _mon_note(res, at):
@@ -1827,9 +1850,16 @@ async def _alert_poller():
                 try: await asyncio.to_thread(acc.meta_set, "monitor_heartbeat", str(last_beat))
                 except Exception as exc: logger.debug("Heartbeat not saved: %s", str(exc)[:100])
             if market_status()["open"] and runtime_token and ALERT_BACKGROUND_ON():
-                for sym in syms:
-                    if time.time() - LAST_ANALYSIS_AT.get(f"{sym}|{interval}|{mode}|{score_min}", 0) > 10:
-                        await shared_analysis((sym, interval, mode, score_min, -1), lambda s=sym: _analysis_compute(symbol=s, interval=interval, mode=mode, score_min=score_min, reconfirm=-1), user_request=False)
+                for (sym, itv, md, smin) in _watch_list(syms, interval, mode, score_min):
+                    if time.time() - LAST_ANALYSIS_AT.get(f"{sym}|{itv}|{md}|{smin}", 0) > 10:
+                        try:
+                            await shared_analysis((sym, itv, md, smin, -1), lambda s=sym, i=itv, m=md, sm=smin: _analysis_compute(symbol=s, interval=i, mode=m, score_min=sm, reconfirm=-1), user_request=False)
+                        except HTTPException as exc:
+                            if exc.status_code == 401:
+                                raise
+                            _MON["last_error"] = f"{sym} {itv}m {md}: HTTP {exc.status_code}: {str(exc.detail)[:100]}"
+                        except Exception as exc:
+                            _MON["last_error"] = f"{sym} {itv}m {md}: {type(exc).__name__}: {str(exc)[:100]}"
                 _mon_refresh(syms, interval, mode, score_min)
                 _MON["last_ok"] = time.time(); _MON["last_error"] = None
         except asyncio.CancelledError:
@@ -2176,6 +2206,8 @@ async def option_analysis(symbol: str = "NIFTY", instrument_key: str = "", inter
 
 @app.get("/api/analysis")
 async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70, reconfirm: int = -1):
+    if symbol.upper() in INDEX_KEYS and mode in MODES and score_min in (60, 65, 70):
+        _USER_COMBOS[(symbol.upper(), interval, mode, score_min)] = time.time()
     key = (symbol.upper(), interval, mode, score_min, reconfirm)
     return await shared_analysis(key, lambda: _analysis_compute(symbol, interval, mode, score_min, reconfirm))
 

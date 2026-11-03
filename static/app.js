@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.18.11";
+const FRONTEND_VERSION="1.18.12";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -1257,21 +1257,27 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.18.11: push storage initialization compatibility; synchronized frontend version.
+// v1.18.12: push alerts switch themselves on and stay on. The button used to read "Enable push alerts" after every reopen because
+// (a) the check gave up after 4 s while the phone was still waking its service worker, and (b) a missing registration was only
+// repaired when that check passed. Now: the last known state is shown at once, a granted permission is always re-registered with the
+// server in the background (on open, on returning to the app, every 10 min), and the first tap anywhere asks for permission once.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
   const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
-  // v1.18.11: the button shows the REAL state of this phone at once, from the browser itself (permission + push subscription),
-  // instead of waiting for a server round trip - which is slow when the server is waking up and made it look like push had
-  // switched itself off after every reopen. The server is then checked and the registration repaired in the background.
+  const LS_ON="oi-push-on", LS_ASKED="oi-push-asked";
+  const lsGet=k=>{try{return localStorage.getItem(k)}catch{return null}}, lsSet=(k,v)=>{try{localStorage.setItem(k,v)}catch{}};
+  const webSupported=()=>"serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window;
+  const nativePlugin=()=>window.Capacitor?.isNativePlatform?.()&&window.Capacitor?.Plugins?.PushNotifications;
   const setLabel=on=>{btn.dataset.on=on?"1":"";btn.textContent=on?"Push alerts: ON":"Enable push alerts"};
+  const swReady=ms=>Promise.race([navigator.serviceWorker.ready,new Promise(r=>setTimeout(()=>r(null),ms))]);
   async function localPushState(){
     try{
-      if(!("serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window))return false;
-      if(Notification.permission!=="granted")return false;
-      const reg=await Promise.race([navigator.serviceWorker.ready,new Promise(r=>setTimeout(()=>r(null),4000))]);
-      return !!(reg&&await reg.pushManager.getSubscription());
-    }catch{return false}
+      if(nativePlugin())return lsGet(LS_ON)==="1";
+      if(!webSupported()||Notification.permission!=="granted")return false;
+      const reg=await swReady(10000);
+      if(!reg)return lsGet(LS_ON)==="1";            // slow service worker is not the same as "switched off"
+      return !!(await reg.pushManager.getSubscription());
+    }catch{return lsGet(LS_ON)==="1"}
   }
   function showPushStatus(s){
     const el=$("pushStatus");if(!el)return;
@@ -1288,36 +1294,16 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
   }
   async function loadPushStatus(){try{const s=await api("/api/push/status");showPushStatus(s);return s}catch{return null}}
   window.oiLoadPushStatus=loadPushStatus;
-  // Re-register this browser with the server (idempotent). Replaces a subscription made with an older/different server key.
-  async function silentWebSubscribe(){
-    try{
-      if(!(await localPushState()))return false;
-      const cfg=await api("/api/push/config"); if(!(cfg.web_push&&cfg.vapid_public_key))return false;
-      const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
-      if(sub){
-        const cur=sub.options&&sub.options.applicationServerKey?btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""):"";
-        if(cur&&cur!==cfg.vapid_public_key){await sub.unsubscribe();sub=null}
-      }
-      if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
-      await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})});
-      setLabel(true);return true;
-    }catch(e){console.warn("silent push subscribe failed",e);return false}
-  }
-  (async()=>{
-    setLabel(await localPushState());                      // instant, no network
-    loadPushStatus();                                      // status and registration repair run side by side
-    silentWebSubscribe().then(ok=>{if(ok)loadPushStatus()});
-    setInterval(()=>{if(document.visibilityState==="visible")loadPushStatus()},30000);
-  })();
-  btn.addEventListener("click",async()=>{
-    const old=btn.textContent; btn.disabled=true; btn.textContent="Enabling…";
-    try {
-      const cfg=await api("/api/push/config"); let enabled=[];
-      // Native Capacitor Android/iOS push (FCM on Android; Firebase project setup required).
-      const native=window.Capacitor?.isNativePlatform?.() && window.Capacitor?.Plugins?.PushNotifications;
-      if(native){
-        const perm=await native.requestPermissions();
-        if(perm.receive!=="granted")throw new Error("Push permission not granted");
+
+  // Native Capacitor Android/iOS push (FCM). ask=false never shows a permission prompt.
+  async function registerNative(ask){
+    const native=nativePlugin(); if(!native)return false;
+    let perm=null; try{perm=await native.checkPermissions()}catch{}
+    if(!perm||perm.receive!=="granted"){
+      if(!ask)return false;
+      perm=await native.requestPermissions();
+      if(perm.receive!=="granted")throw new Error("Push permission not granted");
+    }
         // Wait for the FCM token and for the server to confirm it was saved.
         // Do not report success merely because the native register() call started.
         await new Promise((resolve,reject)=>{
@@ -1353,17 +1339,62 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
             }
           })();
         });
-        enabled.push("native push");
-      }
-      // Browser/PWA Web Push. Requires VAPID keys configured on the server.
-      if("serviceWorker" in navigator && "PushManager" in window && cfg.web_push && cfg.vapid_public_key){
-        const perm=await Notification.requestPermission(); if(perm!=="granted")throw new Error("Browser notification permission not granted");
-        const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
-        if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
-        await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})}); enabled.push("Web Push");
-      }
+    return true;
+  }
+  // Browser/PWA Web Push. Idempotent: replaces a subscription made with an older/different server key and re-saves it on the server.
+  async function registerWeb(ask){
+    if(!webSupported())return false;
+    const cfg=await api("/api/push/config"); if(!(cfg.web_push&&cfg.vapid_public_key))return false;
+    if(Notification.permission==="default"){
+      if(!ask)return false;
+      lsSet(LS_ASKED,String(Date.now()));
+      const p=await Notification.requestPermission(); if(p!=="granted")throw new Error("Browser notification permission not granted");
+    }
+    if(Notification.permission!=="granted"){
+      if(ask)throw new Error("Notifications are blocked for this app. Open the browser's site settings for this address, set Notifications to Allow, then reopen the app.");
+      return false;
+    }
+    const reg=await swReady(15000); if(!reg)return false;
+    let sub=await reg.pushManager.getSubscription();
+    if(sub){
+      const cur=sub.options&&sub.options.applicationServerKey?btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""):"";
+      if(cur&&cur!==cfg.vapid_public_key){await sub.unsubscribe();sub=null}
+    }
+    if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
+    await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})});
+    return true;
+  }
+  let busy=false,lastEnsure=0;
+  async function ensure(ask){
+    if(busy)return [];
+    busy=true; lastEnsure=Date.now();
+    const enabled=[];
+    try{
+      try{if(await registerNative(ask))enabled.push("native push")}catch(e){if(ask)throw e;console.warn("native push",e)}
+      try{if(await registerWeb(ask))enabled.push("Web Push")}catch(e){if(ask)throw e;console.warn("web push",e)}
+      if(enabled.length){lsSet(LS_ON,"1");setLabel(true);loadPushStatus()}
+      return enabled;
+    }finally{busy=false}
+  }
+
+  setLabel(lsGet(LS_ON)==="1"&&(nativePlugin()||(webSupported()&&Notification.permission==="granted")));   // instant, no network
+  loadPushStatus();
+  ensure(false).then(async got=>{if(!got.length)setLabel(await localPushState())});                         // silent repair on every open
+  // Browsers only allow the permission prompt after a tap, so the first tap anywhere asks (at most once a day, never when blocked).
+  const needPrompt=nativePlugin()||(webSupported()&&Notification.permission==="default");
+  if(needPrompt&&Date.now()-Number(lsGet(LS_ASKED)||0)>86400000){
+    document.addEventListener("pointerup",()=>{ensure(true).catch(e=>toast("Push setup: "+e.message))},{once:true});
+  }
+  document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&Date.now()-lastEnsure>60000)ensure(false)});
+  setInterval(()=>{if(document.visibilityState==="visible")loadPushStatus()},30000);
+  setInterval(()=>{if(document.visibilityState==="visible")ensure(false)},600000);
+  btn.addEventListener("click",async()=>{
+    btn.disabled=true; btn.textContent="Enabling…";
+    try{
+      const enabled=await ensure(true);
       if(!enabled.length)throw new Error("Push is not available in this browser. On iPhone, add the app to the Home Screen first (Share > Add to Home Screen) and open it from there; on Android use Chrome.");
-      toast("Enabled: "+enabled.join(" + ")+". Alerts now arrive even when the app is closed.");setLabel(true);loadPushStatus();
-    } catch(e){toast("Push setup: "+e.message);} finally {btn.disabled=false;btn.textContent=btn.dataset.on?"Push alerts: ON":"Enable push alerts";}
+      toast("Enabled: "+enabled.join(" + ")+". Alerts now arrive even when the app is closed.");
+    }catch(e){toast("Push setup: "+e.message)}
+    finally{btn.disabled=false;setLabel(lsGet(LS_ON)==="1"&&btn.dataset.on==="1")}
   });
 })();
