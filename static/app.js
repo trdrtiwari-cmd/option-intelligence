@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.18.9";
+const FRONTEND_VERSION="1.18.10";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -225,7 +225,7 @@ function renderDashChecks(a){
     li.appendChild(b);li.appendChild(t);li.appendChild(sm2);ul.appendChild(li)});
 }
 
-// ---------------- v1.18.9: price / score / trend / decision follow the CHART VIEW and the selected CE/PE ----------------
+// ---------------- v1.18.10: price / score / trend / decision follow the CHART VIEW and the selected CE/PE ----------------
 // Index view  -> the cards describe the index (as before).
 // Option view -> the cards describe the selected contract's own premium chart; the index trend and the index signal stay
 //                visible next to it, and the decision combines both (a BUY needs the index signal AND the premium trend to agree).
@@ -461,7 +461,7 @@ async function refreshChartSource(){
 async function api(url, options={}){
   // Preserve caller-supplied method, headers and body. Push registration uses POST;
   // dropping options here silently converted it to GET and caused HTTP 405.
-  // v1.18.9: every request has a deadline. When a phone suspends the tab mid-request the promise can stay pending forever,
+  // v1.18.10: every request has a deadline. When a phone suspends the tab mid-request the promise can stay pending forever,
   // which used to leave refreshBusy stuck on and froze ALL later refreshes ("Updated 7:41" while it was already 7:54).
   const ctl=new AbortController(),limit=options.timeout||20000,timer=setTimeout(()=>ctl.abort(),limit);
   let res;try{res=await fetch(url,{...options,signal:options.signal||ctl.signal})}catch(e){if(e&&e.name==="AbortError")throw new Error("Request timed out - tap Refresh data");throw e}finally{clearTimeout(timer)}
@@ -558,11 +558,22 @@ function renderMarketPill(m){
   el.className=m.open?"pill live":"pill muted";
   el.title=(m.ist_time||"")+" IST · "+(m.note||"");
 }
+async function hardReloadApp(){
+  try{const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)))}catch{}
+  try{const regs=await navigator.serviceWorker.getRegistrations();await Promise.all(regs.map(r=>r.update().catch(()=>{})))}catch{}
+  location.reload();
+}
 async function checkStatus(){
   try{
     const s=await api("/api/status"),el=$("apiStatus");
     $("buildInfo").textContent=`page v${FRONTEND_VERSION} · server v${s.version||"?"}`;
-    if(s.version&&s.version!==FRONTEND_VERSION&&true){const b=$("staleBanner");b.textContent="⚠ This page is out of date (page v"+FRONTEND_VERSION+" vs server v"+s.version+"). Press Ctrl+F5 to load the latest version — the old script is cached in your browser.";b.hidden=false}
+    if(s.version&&s.version!==FRONTEND_VERSION){
+      // v1.18.10: update by itself (a phone has no Ctrl+F5). Clear the app's saved files once per new server version and reload;
+      // if that did not fix it, show a button instead of looping.
+      const b=$("staleBanner"),tried=(()=>{try{return sessionStorage.getItem("oi-updated-for")===s.version}catch{return false}})();
+      if(!tried){try{sessionStorage.setItem("oi-updated-for",s.version)}catch{};b.textContent="Updating to v"+s.version+"…";b.hidden=false;await hardReloadApp();return}
+      b.textContent="⚠ A newer version (v"+s.version+") is available. ";const btn=document.createElement("button");btn.type="button";btn.textContent="Update now";btn.onclick=hardReloadApp;b.appendChild(btn);b.hidden=false
+    }
     if(s.token_state==="VALID"){el.textContent="Upstox token valid";el.className="pill ok"}
     else if(s.token_state==="EXPIRED"){el.textContent="Upstox token expired — click Connect Upstox";el.className="pill bad"}
     else if(s.token_configured){el.textContent="Upstox token set (could not verify)";el.className="pill muted"}
@@ -1246,11 +1257,11 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.18.9: push storage initialization compatibility; synchronized frontend version.
+// v1.18.10: push storage initialization compatibility; synchronized frontend version.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
   const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
-  // v1.18.9: when this browser already allowed notifications, re-register silently on every visit. Subscriptions can be
+  // v1.18.10: when this browser already allowed notifications, re-register silently on every visit. Subscriptions can be
   // dropped by the browser or the server (new database, key change); this keeps background alerts working without taps.
   async function silentWebSubscribe(){
     try{
