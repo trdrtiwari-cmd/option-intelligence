@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.18.7";
+const FRONTEND_VERSION="1.18.8";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -414,7 +414,11 @@ async function refreshChartSource(){
 async function api(url, options={}){
   // Preserve caller-supplied method, headers and body. Push registration uses POST;
   // dropping options here silently converted it to GET and caused HTTP 405.
-  const res=await fetch(url, options);let data;try{data=await res.json()}catch{data={detail:await res.text()}}
+  // v1.18.8: every request has a deadline. When a phone suspends the tab mid-request the promise can stay pending forever,
+  // which used to leave refreshBusy stuck on and froze ALL later refreshes ("Updated 7:41" while it was already 7:54).
+  const ctl=new AbortController(),limit=options.timeout||20000,timer=setTimeout(()=>ctl.abort(),limit);
+  let res;try{res=await fetch(url,{...options,signal:options.signal||ctl.signal})}catch(e){if(e&&e.name==="AbortError")throw new Error("Request timed out - tap Refresh data");throw e}finally{clearTimeout(timer)}
+  let data;try{data=await res.json()}catch{data={detail:await res.text()}}
   if(!res.ok)throw new Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail||data));
   return data;
 }
@@ -474,10 +478,11 @@ async function refresh(){
   }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
   finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}
 }
-let analysisBusy=false;
+let analysisBusy=false,analysisBusySince=0;
 async function runAnalysis(force){
+  if(analysisBusy&&Date.now()-analysisBusySince>30000)analysisBusy=false;     // watchdog: a stuck run must not block every later one
   if(analysisBusy||(!force&&Date.now()-lastAnalysisAt<4000))return;   // analysis is heavy: at most every ~4 s, never overlapping
-  analysisBusy=true;
+  analysisBusy=true;analysisBusySince=Date.now();
   try{
     const sym=getSymbol(),interval=getInterval();
     let a;try{a=await api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}&reconfirm=${getReconfirm()}`)}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
@@ -652,7 +657,7 @@ $("chartMinimize").addEventListener("click",()=>{
 window.addEventListener("keydown",e=>{if(e.key==="Escape"&&chartPanel.classList.contains("chart-maximized"))$("chartMaximize").click()});
 ["optionTypeFilter","moneynessFilter"].forEach(id=>$(id)?.addEventListener("change",renderFilteredChain));
 if(new URLSearchParams(location.search).get("connected")==="1")toast("Upstox OAuth completed for this running instance. Add a durable token method before production use.");
-let autoTimer=null,refreshBusy=false;
+let autoTimer=null,refreshBusy=false,refreshBusySince=0;
 initChart();checkStatus();
 // Auto refresh: user-selectable (default 2 s). It also runs after market close so REST quote/status
 // and stale-data messaging can update. It never overlaps a prior refresh; a slow request delays the
@@ -662,14 +667,33 @@ function startAutoRefresh(){
   const sec=Math.max(2,Number($("refreshEvery").value)||2);
   try{localStorage.setItem("oi-refresh-sec",String(sec))}catch{}
   autoTimer=setInterval(async()=>{
-    if(document.visibilityState!=="visible"||refreshBusy)return;
-    refreshBusy=true;
+    if(document.visibilityState!=="visible")return;
+    if(refreshBusy&&Date.now()-refreshBusySince>30000)refreshBusy=false;        // watchdog
+    if(refreshBusy)return;
+    refreshBusy=true;refreshBusySince=Date.now();
     try{await refresh()}catch(e){console.warn("Auto-refresh failed:",e)}finally{refreshBusy=false}
   },sec*1000);
 }
 try{const saved=localStorage.getItem("oi-refresh-sec");if(saved&&[...$("refreshEvery").options].some(o=>o.value===saved))$("refreshEvery").value=saved}catch{}
 $("refreshEvery").addEventListener("change",startAutoRefresh);startAutoRefresh();refresh();
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&!refreshBusy){refresh();checkStatus()}});
+// Coming back to the app (unlock the phone, switch back from another app, reconnect to the network): throw away anything that
+// was in flight while the tab was frozen, then reload everything at once, instead of waiting for a stuck request.
+let lastResumeAt=0;
+function resumeNow(){
+  if(document.visibilityState!=="visible"||Date.now()-lastResumeAt<1500)return;
+  lastResumeAt=Date.now();
+  refreshBusy=false;analysisBusy=false;restPriceBusy=false;try{paperRefreshBusy=false}catch{}
+  chartRequestId++;
+  refresh();checkStatus();
+  try{refreshDerivatives()}catch{}
+  try{if(marketOpen)refreshChainQuiet()}catch{}
+  try{if(!liveSocket||liveSocket.readyState!==1)connectLiveSocket()}catch{}
+  startAutoRefresh();
+}
+document.addEventListener("visibilitychange",resumeNow);
+window.addEventListener("pageshow",resumeNow);
+window.addEventListener("focus",resumeNow);
+window.addEventListener("online",resumeNow);
 let liveSocket=null, lastDerivatives=null, liveSocketGen=0, liveReconnectTimer=null;
 function renderLiveTicks(ticks){
   const body=$("liveTicksRows");
@@ -1172,11 +1196,11 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.18.7: push storage initialization compatibility; synchronized frontend version.
+// v1.18.8: push storage initialization compatibility; synchronized frontend version.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
   const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
-  // v1.18.7: when this browser already allowed notifications, re-register silently on every visit. Subscriptions can be
+  // v1.18.8: when this browser already allowed notifications, re-register silently on every visit. Subscriptions can be
   // dropped by the browser or the server (new database, key change); this keeps background alerts working without taps.
   async function silentWebSubscribe(){
     try{

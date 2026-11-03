@@ -128,7 +128,7 @@
     const d = await res.json();
     user = d.user;
     if (meta.user != null && meta.user !== user.id) {                    // someone else used this browser: never mix accounts
-      Object.keys(MAP).forEach(ls.del); meta = { user: user.id, keys: {} };
+      Object.keys(MAP).forEach(ls.del); meta = { user: user.id, keys: {} }; try { window.OIBootCache && window.OIBootCache.clear(); } catch { }
     } else if (meta.user == null) {
       meta.user = user.id;                                              // data from before accounts existed belongs to the first account that signs in
     }
@@ -282,7 +282,7 @@
       try { await flushAll(false); } catch { }
       if (Object.values(meta.keys).some(m => m.dirty) && !confirm("Some recent changes could not be saved to your account yet. Log out anyway and lose them?")) { out.disabled = false; out.textContent = "Log out"; return; }
       try { await origFetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch { }
-      Object.keys(MAP).forEach(ls.del); ls.del(META_KEY);              // nothing left behind for the next person on this browser
+      Object.keys(MAP).forEach(ls.del); ls.del(META_KEY); ls.del("oi-sync-user"); try { window.OIBootCache && window.OIBootCache.clear(); } catch { }   // nothing left behind for the next person on this browser
       location.replace("/login");
     };
     chip.append(statusEl, name, out); host.appendChild(chip);
@@ -301,9 +301,25 @@
   }
 
   (async function boot() {
+    // Fast start (v1.18.8): a device that has synced before opens the page IMMEDIATELY with its own saved data and checks the
+    // account in the background (prefs.js / app.js already apply changes from other devices when the pull finishes). Only a
+    // brand-new device waits for the first pull, because it has nothing of its own yet.
+    let cached = null;
+    try { cached = JSON.parse(ls.get("oi-sync-user") || "null"); } catch { }
+    if (cached && cached.id != null && meta.user === cached.id) {
+      user = cached;
+      whenReady(() => { mountChip(); loadNext(); });
+      try {
+        const ok = await pull(true);
+        if (ok && user && user.id !== cached.id) location.reload();     // another account signed in elsewhere: restart clean
+        else if (ok) { ls.set("oi-sync-user", JSON.stringify(user)); refreshStatus(); }
+      } catch (e) { offline = true; refreshStatus(); }
+      return;
+    }
     let ok = true;
     try { ok = await pull(true); } catch (e) { offline = true; }       // server unreachable: carry on with this device's data
     if (!ok) return;                                                   // redirecting to /login
+    if (user) ls.set("oi-sync-user", JSON.stringify(user));
     whenReady(() => { mountChip(); loadNext(); });
   })();
 

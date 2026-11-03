@@ -5,6 +5,7 @@
    - If the network is down, page loads show a friendly offline screen. */
 const VERSION = "__VERSION__";
 const CACHE = "oi-shell-" + VERSION;
+const SHELL_PAGES = new Set(["/", "/dashboard", "/signals"]);
 const PRECACHE = ["/static/offline.html", "/static/icons/icon-192.png", "/static/icons/icon-512.png", "/static/manifest.webmanifest"];
 
 self.addEventListener("install", e => {
@@ -19,6 +20,20 @@ self.addEventListener("fetch", e => {
   const p = url.pathname;
   if (p.startsWith("/api/") || p.startsWith("/ws/") || p.startsWith("/auth/") || p === "/sw.js") return;   // always live
   if (req.mode === "navigate") {
+    // v1.18.8: the three main pages open INSTANTLY from the saved copy (even while the server is waking up) and are refreshed
+    // in the background for next time. A redirect (signed out) is never saved, and removes the saved copy.
+    if (SHELL_PAGES.has(p)) {
+      e.respondWith(caches.open(CACHE).then(async c => {
+        const hit = await c.match(p);
+        const update = fetch(req).then(res => {
+          if (res.ok && !res.redirected) c.put(p, res.clone()); else if (res.redirected || res.status === 401) c.delete(p);
+          return res;
+        });
+        if (hit) { e.waitUntil(update.catch(() => { })); return hit; }
+        return update.catch(() => caches.match("/static/offline.html"));
+      }));
+      return;
+    }
     e.respondWith(fetch(req).catch(() => caches.match("/static/offline.html")));
     return;
   }

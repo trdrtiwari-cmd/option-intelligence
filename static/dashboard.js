@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 const IST_OFFSET = 19800;
-let summaryBusy = false, graphBusy = false, marketOpen = false, graphChart = null, ceSeries = null, peSeries = null, lastGraph = null, fitKey = null;
+let summaryBusy = false, summaryBusySince = 0, graphBusy = false, marketOpen = false, graphChart = null, ceSeries = null, peSeries = null, lastGraph = null, fitKey = null;
 
 function fmt(v, n = 2) { return v === null || v === undefined || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: n, minimumFractionDigits: n }); }
 function pctText(v, n = 2) { return v === null || v === undefined || !Number.isFinite(Number(v)) ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(n)}%`; }
@@ -9,7 +9,12 @@ function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); return node; }
 async function api(url) {
-  const res = await fetch(url); let data;
+  // v1.18.8: deadline on every request, so a request frozen while the phone slept can never leave the page stuck on "loading".
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 20000); let res;
+  try { res = await fetch(url, { signal: ctl.signal }); }
+  catch (e) { throw e && e.name === "AbortError" ? new Error("Request timed out - tap Refresh") : e; }
+  finally { clearTimeout(t); }
+  let data;
   try { data = await res.json(); } catch { data = { detail: await res.text() }; }
   if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
   return data;
@@ -207,7 +212,8 @@ function renderGraph(g) {
 function qs() { return `symbol=${sym()}&universe=${$("universe").value}&expiry=${$("expiry").value}&interval=${$("interval").value}&offset=${$("offset").value}`; }
 let lastSummary = null;
 async function loadSummary() {
-  if (summaryBusy) return; summaryBusy = true;
+  if (summaryBusy && Date.now() - summaryBusySince > 30000) summaryBusy = false;     // watchdog
+  if (summaryBusy) return; summaryBusy = true; summaryBusySince = Date.now();
   const btn = $("refreshBtn"); btn.disabled = true;
   try {
     const d = await api("/api/dashboard/summary?" + qs()); lastSummary = d;
@@ -232,6 +238,7 @@ $("symbol").addEventListener("change", () => { $("universe").value = sym() === "
 $("graphMode").addEventListener("change", () => { if (lastGraph) renderGraph(lastGraph); });
 $("refreshBtn").addEventListener("click", loadSummary);
 $("refreshEvery").addEventListener("change", startTimer);
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") loadSummary(); });
+function resumeNow() { if (document.visibilityState === "visible") { summaryBusy = false; loadSummary(); startTimer(); } }
+document.addEventListener("visibilitychange", resumeNow); window.addEventListener("pageshow", resumeNow); window.addEventListener("online", resumeNow);
 try { const saved = localStorage.getItem("oi-dc-refresh"); if (saved && [...$("refreshEvery").options].some(o => o.value === saved)) $("refreshEvery").value = saved; } catch {}
 initGraph(); startTimer(); loadSummary();
