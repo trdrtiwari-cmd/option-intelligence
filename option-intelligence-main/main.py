@@ -22,6 +22,7 @@ import signal_exits as sx
 import notifier
 import option_plan as op
 import signal_board as sb
+import monitor as mon
 
 # Resolve the project directory before any path-backed configuration is initialized.
 BASE_DIR = Path(__file__).resolve().parent
@@ -147,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.19.9"
+APP_VERSION = "1.20.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1635,6 +1636,7 @@ def _float_or_none(value):
 
 init_signal_log()
 sb.init(SIGNAL_LOG_DB)          # v1.19.5 signal board (every option signal, same file)
+mon.init(SIGNAL_LOG_DB)         # v1.20.0 strategy monitor findings + Claude reviews (same file)
 
 
 def _live_index_price(sym):
@@ -1803,17 +1805,25 @@ def _signal_rows_all():
 
 def mirror_signal_log():
     import hashlib
-    for prefix, rows_all in (("signal_log:", _signal_rows_all()), ("signal_board:", _board_rows_all())):
+    for prefix, rows_all in (("signal_log:", _signal_rows_all()), ("signal_board:", _board_rows_all()),
+                             ("monitor_events:", _table_rows_all("monitor_events")), ("monitor_reviews:", _table_rows_all("monitor_reviews"))):
         months = {}
         for r in rows_all:
             r.pop("id", None)
-            months.setdefault(str(r.get("session_date") or "")[:7], []).append(r)
+            r.pop("context", None)
+            months.setdefault(str(r.get("session_date") or r.get("day") or "")[:7], []).append(r)
         for month, rows in months.items():
             blob = json.dumps(rows, separators=(",", ":"), default=str)
             h = hashlib.sha1(blob.encode()).hexdigest()
             if _SL_MIRROR_HASH.get(prefix + month) != h:
                 acc.meta_set(prefix + month, blob)
                 _SL_MIRROR_HASH[prefix + month] = h
+
+
+def _table_rows_all(table):
+    with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(r) for r in db.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()]
 
 
 def _board_rows_all():
@@ -1826,7 +1836,8 @@ def restore_signal_log():
     """Re-insert rows missing from the local file (after a restart wiped it). Existing rows are never overwritten."""
     restored = 0
     import hashlib
-    for prefix, table in (("signal_log:", "signal_log"), ("signal_board:", "option_signals")):
+    for prefix, table in (("signal_log:", "signal_log"), ("signal_board:", "option_signals"),
+                          ("monitor_events:", "monitor_events"), ("monitor_reviews:", "monitor_reviews")):
         for item in acc.meta_list(prefix):
             try:
                 rows = json.loads(item["value"])
@@ -1850,6 +1861,9 @@ async def _restore_signal_log_and_config():
         if cfg:
             sx.set_overrides(json.loads(cfg))
             _set_option_overrides(json.loads(cfg))
+        ms = await asyncio.to_thread(acc.meta_get, "monitor_settings")
+        if ms:
+            _apply_monitor_settings(json.loads(ms))
         n = await asyncio.to_thread(restore_signal_log)
         _SIGNAL_LOG_DIRTY.set()          # first mirror of anything already in the local file
         if n:
@@ -1992,9 +2006,235 @@ async def _init_push_storage():
 
 @app.on_event("startup")
 async def _start_signal_exit_watcher():
-    global _EXIT_WATCHER_TASK
+    global _EXIT_WATCHER_TASK, _MONITOR_TASK
     if _EXIT_WATCHER_TASK is None or _EXIT_WATCHER_TASK.done():
         _EXIT_WATCHER_TASK = asyncio.create_task(_signal_exit_watcher())
+    if _MONITOR_TASK is None or _MONITOR_TASK.done():
+        _MONITOR_TASK = asyncio.create_task(_monitor_loop())
+
+
+# ---- v1.20.0 strategy monitor --------------------------------------------------------------------------------------------------
+# Code finds the problems (feed, rule breaks, losses and their causes, missed moves and the gates behind them, drift, suggestions);
+# Claude explains them and writes a ranked review. Analysis only: nothing here places, changes or blocks a trade.
+_MONITOR_TASK = None
+_SMON = {"feed_at": 0.0, "trades_at": 0.0, "replay_at": 0.0, "replay_day": None, "rep": None, "rep_combo": None, "eod_day": None,
+        "last_review_at": 0.0, "pushed": {}, "status": "idle", "error": None, "running": False}
+
+
+def _apply_monitor_settings(d):
+    for k in ("enabled", "claude", "push"):
+        if k in d:
+            mon.SETTINGS[k] = bool(d[k])
+    if "max_calls" in d:
+        mon.SETTINGS["max_calls"] = max(0, min(500, int(d["max_calls"])))
+    if "review_every_min" in d:
+        mon.SETTINGS["review_every_min"] = max(10, min(240, int(d["review_every_min"])))
+
+
+def _monitor_combo():
+    """The combination people are actually watching (most recent), else NIFTY 5-minute standard."""
+    if _USER_COMBOS:
+        sym, interval, mode, score_min = max(_USER_COMBOS, key=_USER_COMBOS.get)
+        if interval in (1, 3, 5, 15):
+            return sym, interval, mode, score_min
+    return "NIFTY", 5, "standard", 70
+
+
+async def _monitor_replay(sym, interval, mode, score_min, days=10):
+    """The diagnostics replay over the last `days` (same engine and entry windows as live), used for missed moves + suggestions."""
+    result = await candles(symbol=sym, interval=interval, days=days)
+    htf_interval = 15 if interval < 15 else None
+    htf_raw = (await candles(symbol=sym, interval=htf_interval, days=days))["candles"] if htf_interval else None
+    return await asyncio.to_thread(dgn.run, result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw,
+                                   htf_interval=htf_interval, volume_source=result.get("volume_source"), score_min=score_min)
+
+
+async def _monitor_store(findings, day, sym, explain=True):
+    """Store new findings; push the serious ones; ask Claude for a short note on the ones worth explaining."""
+    new = []
+    for f in findings:
+        f = {**f, "day": day, "symbol": f.get("symbol") or sym}
+        eid = await asyncio.to_thread(mon.add_event, SIGNAL_LOG_DB, f, SIGNAL_LOG_LOCK)
+        if eid:
+            f["id"] = eid
+            new.append(f)
+    for f in new:
+        pk = (f["kind"], f.get("symbol"))
+        if f["severity"] == "high" and mon.SETTINGS["push"] and in_session() and time.time() - _SMON["pushed"].get(pk, 0) > 600:
+            _SMON["pushed"][pk] = time.time()        # at most one push per kind and symbol every 10 minutes
+            title, body = "Strategy monitor", f["title"]
+            for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
+                await asyncio.to_thread(acc.push_add_history, uid, "SYSTEM", "ALL", "-", title, body, utc_now_iso())
+            await _dispatch_confirmed_push(title, body, "SYSTEM", "WAIT", "MONITOR")
+        if explain and f["kind"] in ("LOSS", "MISSED", "RULE", "DRIFT") and f["severity"] != "info":     # FEED findings explain themselves
+            await _monitor_note(f, day)
+    return new
+
+
+async def _monitor_note(f, day):
+    if not (mon.SETTINGS["claude"] and mon.api_key()):
+        return
+    if await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK) >= mon.SETTINGS["max_calls"]:
+        return
+    text, err = await mon.claude_call(mon.SYSTEM_NOTE, mon.note_prompt(f), mon.SETTINGS["model"], max_tokens=300)
+    if text:
+        await asyncio.to_thread(mon.set_note, SIGNAL_LOG_DB, f["id"], text, mon.SETTINGS["model"], SIGNAL_LOG_LOCK)
+    elif err:
+        _SMON["error"] = err
+
+
+async def monitor_review(kind="intraday", force=False):
+    """Replay the recent days, collect today's findings and (when a key is set) ask Claude for the ranked review."""
+    if _SMON["running"]:
+        return {"status": "already running"}
+    _SMON["running"], _SMON["status"], _SMON["error"] = True, "running replay", None
+    try:
+        now = datetime.now(IST)
+        day = now.date().isoformat()
+        sym, interval, mode, score_min = _monitor_combo()
+        rep = None
+        if runtime_token:
+            try:
+                rep = await _monitor_replay(sym, interval, mode, score_min)
+                _SMON.update(rep=rep, replay_at=time.time(), replay_day=day, rep_combo=[sym, interval, mode, score_min])
+            except Exception as exc:
+                _SMON["error"] = f"replay: {str(getattr(exc, 'detail', exc))[:160]}"
+        rep = rep or _SMON.get("rep") or {}
+        log = (await get_signal_log(day, day, "", 10000))["rows"]
+        board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, day, day, "", "", 2000, SIGNAL_LOG_LOCK)
+        sugg = mon.suggestions(rep) if rep else []
+        findings = mon.missed_from_replay(rep, day) + mon.drift(mon.today_stats(log), rep)
+        findings += [{"kind": "SUGGESTION", "severity": "info", "title": x["title"], "detail": x, "dedupe": "sugg-" + x["title"][:80]} for x in sugg]
+        await _monitor_store(findings, day, sym, explain=kind != "eod")
+        _SMON["status"] = "review"
+        text, err, model = None, None, None
+        all_today = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 200, SIGNAL_LOG_LOCK)
+        ctx = mon.review_context(day, sym, log, [e for e in all_today if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep, sugg)
+        if mon.SETTINGS["claude"] and mon.api_key():
+            if force or await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK) < mon.SETTINGS["max_calls"]:
+                model = mon.SETTINGS["review_model"] if kind == "eod" else mon.SETTINGS["model"]
+                text, err = await mon.claude_call(mon.SYSTEM_REVIEW, json.dumps(ctx, default=str, ensure_ascii=False), model, max_tokens=1200, timeout=90.0)
+                if err:
+                    _SMON["error"] = err
+        if not text:
+            model = None
+            text = ("Claude is not connected (set ANTHROPIC_API_KEY on Render) - code findings only." if not mon.api_key()
+                    else f"Claude review unavailable: {err or 'daily call limit reached'}") + "\n\n" + "\n".join(
+                f"- [{x['area']}] {x['title']}: {x['evidence']}" + (f" ({x['caution']})" if x.get("caution") else "") for x in sugg)
+        rid = await asyncio.to_thread(mon.add_review, SIGNAL_LOG_DB, {"day": day, "symbol": sym, "kind": kind, "model": model, "text": text,
+                                                                       "suggestions": sugg, "context": ctx}, SIGNAL_LOG_LOCK)
+        _SMON["last_review_at"] = time.time()
+        _SIGNAL_LOG_DIRTY.set()
+        if kind == "eod" and model and mon.SETTINGS["push"]:
+            title, body = "Claude daily strategy review ready", text.strip().split("\n")[0][:180]
+            for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
+                await asyncio.to_thread(acc.push_add_history, uid, "SUMMARY", "ALL", "-", title, body, utc_now_iso())
+            await _dispatch_confirmed_push(title, body, "SUMMARY", "WAIT", "REVIEW")
+        return {"status": "done", "review_id": rid, "claude": bool(model)}
+    finally:
+        _SMON["running"] = False
+        _SMON["status"] = "idle"
+
+
+def _monitor_feed_state(sym, now):
+    with STREAM_LOCK:
+        running = bool(STREAMS.get(sym))
+        idx = _tick_view(INDEX_KEYS[sym], now)
+    ages = [now - ts for k, (ts, _r) in list(_AN_CACHE.items()) if isinstance(k, tuple) and len(k) == 5 and k[0] == sym]
+    return {"symbol": sym, "stream_running": running, "index_tick_age": idx.get("age_seconds") if idx else None,
+            "analysis_age": min(ages) if ages else None, "token_ok": TOKEN_CHECK.get("state") != "EXPIRED"}
+
+
+async def _monitor_loop():
+    while True:
+        try:
+            now_dt = datetime.now(IST)
+            day = now_dt.date().isoformat()
+            info = _session_for(now_dt)
+            if mon.SETTINGS["enabled"] and info.get("open_day") and info.get("start") and info.get("end"):
+                start = datetime.combine(now_dt.date(), info["start"], tzinfo=IST)
+                end = datetime.combine(now_dt.date(), info["end"], tzinfo=IST)
+                t = time.time()
+                live = start + timedelta(minutes=3) <= now_dt <= end
+                if live and t - _SMON["feed_at"] >= 5:
+                    _SMON["feed_at"] = t
+                    watched = {k[0] for k, v in _USER_COMBOS.items() if t - v < 600} or {_monitor_combo()[0]}
+                    open_by = await asyncio.to_thread(sx.open_trade_count, SIGNAL_LOG_DB, SIGNAL_LOG_LOCK)
+                    for sym in watched & set(INDEX_KEYS):
+                        st = _monitor_feed_state(sym, t)
+                        st["signal_active"] = bool(open_by.get(sym)) if isinstance(open_by, dict) else False
+                        await _monitor_store(mon.check_feed(st), day, sym)
+                if start <= now_dt <= end + timedelta(minutes=30) and t - _SMON["trades_at"] >= 60:
+                    _SMON["trades_at"] = t
+                    log = (await get_signal_log(day, day, "", 10000))["rows"]
+                    board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, day, day, "", "", 2000, SIGNAL_LOG_LOCK)
+                    await _monitor_store(mon.check_trades(log) + mon.losses(log) + mon.missed_from_board(board), day, _monitor_combo()[0])
+                review_from = start + timedelta(minutes=45)        # 10:00 on a normal day
+                if live and now_dt >= review_from and t - _SMON["last_review_at"] >= mon.SETTINGS["review_every_min"] * 60:
+                    await monitor_review("intraday")
+                eod_at = end + timedelta(minutes=10)
+                if eod_at <= now_dt <= end + timedelta(minutes=90) and _SMON["eod_day"] != day:
+                    _SMON["eod_day"] = day
+                    await monitor_review("eod")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _SMON["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            logger.info("Strategy monitor: %s", _SMON["error"])
+        await asyncio.sleep(5)
+
+
+class MonitorSettings(BaseModel):
+    enabled: Optional[bool] = None
+    claude: Optional[bool] = None
+    push: Optional[bool] = None
+    max_calls: Optional[int] = None
+    review_every_min: Optional[int] = None
+
+
+@app.get("/api/monitor")
+async def monitor_get(request: Request, start: str = "", end: str = "", kind: str = "", limit: int = 300):
+    _need_user(request)
+    if kind and kind.upper() not in mon.KINDS:
+        raise HTTPException(400, "kind must be one of: " + ", ".join(mon.KINDS))
+    day = ist_now().date().isoformat()
+    evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, start, end, kind.upper(), min(2000, max(1, limit)), SIGNAL_LOG_LOCK)
+    rvs = await asyncio.to_thread(mon.reviews, SIGNAL_LOG_DB, start, end, 20, SIGNAL_LOG_LOCK)
+    return {"events": evs, "reviews": rvs, "settings": {k: v for k, v in mon.SETTINGS.items()},
+            "status": {"api_key_set": bool(mon.api_key()), "calls_today": await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK),
+                       "running": _SMON["running"], "state": _SMON["status"], "error": _SMON["error"], "combo": _SMON["rep_combo"] or list(_monitor_combo()),
+                       "last_replay": datetime.fromtimestamp(_SMON["replay_at"], IST).isoformat(timespec="seconds") if _SMON["replay_at"] else None,
+                       "last_review": datetime.fromtimestamp(_SMON["last_review_at"], IST).isoformat(timespec="seconds") if _SMON["last_review_at"] else None}}
+
+
+@app.get("/api/monitor/status")
+async def monitor_status(request: Request):
+    _need_user(request)
+    day = ist_now().date().isoformat()
+    evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 500, SIGNAL_LOG_LOCK)
+    real = [e for e in evs if e["kind"] != "SUGGESTION"]
+    return {"enabled": mon.SETTINGS["enabled"], "claude": bool(mon.api_key()) and mon.SETTINGS["claude"],
+            "high": sum(e["severity"] == "high" for e in real), "medium": sum(e["severity"] == "medium" for e in real),
+            "info": sum(e["severity"] == "info" for e in real), "latest": real[0]["title"] if real else None}
+
+
+@app.post("/api/monitor/settings")
+async def monitor_settings(request: Request, payload: MonitorSettings):
+    _require_admin(request)
+    d = {k: v for k, v in payload.model_dump().items() if v is not None} if hasattr(payload, "model_dump") else {k: v for k, v in payload.dict().items() if v is not None}
+    _apply_monitor_settings(d)
+    cur = {k: mon.SETTINGS[k] for k in ("enabled", "claude", "push", "max_calls", "review_every_min")}
+    await asyncio.to_thread(acc.meta_set, "monitor_settings", json.dumps(cur))
+    return {"settings": dict(mon.SETTINGS)}
+
+
+@app.post("/api/monitor/review-now")
+async def monitor_review_now(request: Request):
+    _require_admin(request)
+    if _SMON["running"]:
+        return {"status": "already running"}
+    _spawn(monitor_review("manual", force=True))
+    return {"status": "started"}
 
 
 _BG_TASKS = set()

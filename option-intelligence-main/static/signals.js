@@ -96,7 +96,7 @@ async function load() {
     if (!r.ok) throw Error(await r.text());
     rows = (await r.json()).rows || [];
     $('count').textContent = `${rows.length} records`;
-    render(); loadSummary(); loadBoard();
+    render(); loadSummary(); loadBoard(); loadMonitor();
     loadPrices().then(render);
   } catch (e) {
     $('rows').innerHTML = `<tr><td colspan="11" class="empty">Could not load log: ${esc(e.message)}</td></tr>`;
@@ -218,3 +218,61 @@ $('exportCsv').onclick = () => exportFile('csv');
 ['startDate', 'endDate', 'symbol'].forEach(id => $(id).addEventListener('change', load));
 loadConfig().then(load);
 setInterval(() => { if (document.visibilityState === 'visible') load(); }, 10000);
+
+
+// ---- v1.20.0 Claude strategy monitor
+let monReviews = [];
+const monColor = {high: 'var(--red)', medium: 'var(--yellow)', info: 'var(--blue)'};
+function monDetail(e) {
+  const d = e.detail || {};
+  if (e.kind === 'LOSS' && Array.isArray(d.causes)) return d.causes.map(c => `<div>• <b>${esc(c.cause)}</b> - ${esc(c.why)}</div>`).join('');
+  if (e.kind === 'MISSED' && Array.isArray(d.blocked_by)) return '<div>Blocked by: ' + d.blocked_by.map(esc).join(' · ') + '</div>';
+  if (e.kind === 'MISSED' && d.reason) return '<div>' + esc(d.reason) + '</div>';
+  if (e.kind === 'SUGGESTION') return `<div>${esc(d.evidence || '')}</div>` + (d.caution ? `<div class="sig-sub">Caution: ${esc(d.caution)}</div>` : '');
+  return '';
+}
+function showReview(i) {
+  const r = monReviews[i];
+  if (!r) { $('monReviewText').textContent = 'No review yet. One runs every 30 minutes from 10:00 and 10 minutes after the close, or press "Run review now".'; return; }
+  $('monReviewHead').textContent = `${r.kind === 'eod' ? 'End-of-day review' : r.kind === 'manual' ? 'Review (run manually)' : 'Intraday review'} · ${timeOnly(r.created_at).slice(0, 16)} · ${r.model ? 'Claude ' + r.model : 'code findings only'}`;
+  $('monReviewText').textContent = r.text || '';
+}
+async function loadMonitor() {
+  try {
+    const p = filters(); p.delete('symbol'); p.delete('limit'); p.set('kind', $('monKind').value);
+    const r = await fetch('/api/monitor?' + p, {credentials: 'same-origin'});
+    if (!r.ok) throw Error(await r.text());
+    const d = await r.json(), st = d.status || {}, cfg = d.settings || {};
+    $('monStatus').innerHTML = `${cfg.enabled ? '● Monitoring' : '○ Monitor off'} · ${st.api_key_set ? 'Claude connected' : '<b>Claude not connected</b> - add ANTHROPIC_API_KEY on Render (code checks still run)'} · `
+      + `${st.calls_today ?? 0} / ${cfg.max_calls} Claude calls today · replay ${esc((st.combo || []).join(' '))}`
+      + (st.last_review ? ` · last review ${esc(timeOnly(st.last_review).slice(11, 16))}` : '') + (st.running ? ' · <b>running…</b>' : '')
+      + (st.error ? ` · <span style="color:var(--red)">${esc(st.error)}</span>` : '');
+    if (document.activeElement?.closest?.('#monSettings') == null) {
+      $('monEnabled').checked = !!cfg.enabled; $('monClaude').checked = !!cfg.claude; $('monPush').checked = !!cfg.push;
+      $('monMax').value = cfg.max_calls; $('monEvery').value = cfg.review_every_min;
+    }
+    const keep = $('monReviewPick').value;
+    monReviews = d.reviews || [];
+    $('monReviewPick').innerHTML = monReviews.map((x, i) => `<option value="${i}">${esc(timeOnly(x.created_at).slice(0, 16))} · ${esc(x.kind)}${x.model ? '' : ' (no Claude)'}</option>`).join('');
+    if (keep && monReviews[+keep]) $('monReviewPick').value = keep;
+    showReview(+($('monReviewPick').value || 0));
+    $('monRows').innerHTML = d.events.length ? d.events.map(e =>
+      `<tr><td>${esc(timeOnly(e.created_at).slice(0, 16))}</td><td><span style="color:${monColor[e.severity] || ''};font-weight:600">${esc(e.kind)}</span>${sub(esc(e.symbol || ''))}</td>`
+      + `<td class="wrap">${esc(e.title)}${monDetail(e)}</td><td class="wrap">${e.claude_note ? esc(e.claude_note) : '<span class="sub">—</span>'}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty">No findings for these dates. They are added automatically during market hours.</td></tr>';
+  } catch (e) { $('monRows').innerHTML = `<tr><td colspan="4" class="empty">Could not load the monitor: ${esc(e.message)}</td></tr>`; }
+}
+$('monKind').addEventListener('change', loadMonitor);
+$('monReviewPick').addEventListener('change', e => showReview(+e.target.value));
+$('monSave').onclick = async () => {
+  const body = {enabled: $('monEnabled').checked, claude: $('monClaude').checked, push: $('monPush').checked,
+                max_calls: Number($('monMax').value) || 0, review_every_min: Number($('monEvery').value) || 30};
+  const r = await fetch('/api/monitor/settings', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  $('monSaved').textContent = r.ok ? 'Saved.' : 'Only the owner account can change these.';
+  loadMonitor();
+};
+$('monReview').onclick = async () => {
+  const r = await fetch('/api/monitor/review-now', {method: 'POST', credentials: 'same-origin'});
+  $('monSaved').textContent = r.ok ? 'Review started - it takes up to a minute (replay + Claude).' : 'Only the owner account can run it.';
+  setTimeout(loadMonitor, 1500); setTimeout(loadMonitor, 20000); setTimeout(loadMonitor, 60000);
+};

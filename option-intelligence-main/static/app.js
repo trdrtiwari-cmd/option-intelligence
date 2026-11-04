@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.19.9";
+const FRONTEND_VERSION="1.20.0";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1567,3 +1567,15 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
   });
   window.addEventListener("oi-notify-pref",e=>apply(e.detail));
 })();
+
+// v1.20.0 strategy monitor pill: today's findings at a glance, links to the Signals page panel
+async function loadMonitorPill(){
+  const el=$("monPill");if(!el)return;
+  try{const m=await api("/api/monitor/status");
+    if(!m.enabled){el.textContent="Monitor off";el.className="pill muted";return}
+    const n=(m.high||0)+(m.medium||0);
+    el.textContent=n?`Monitor: ${n} issue${n>1?"s":""}${m.claude?" · Claude":""}`:`Monitor: OK${m.claude?" · Claude":""}`;
+    el.className="pill "+(m.high?"bad":m.medium?"stale":"ok");el.title=m.latest||"No issues found today";
+  }catch{el.textContent="Monitor";el.className="pill muted"}
+}
+loadMonitorPill();setInterval(()=>{if(document.visibilityState==="visible")loadMonitorPill()},30000);

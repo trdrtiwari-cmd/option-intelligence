@@ -1,5 +1,18 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.0 - Claude strategy monitor
+
+A new **Claude strategy monitor** panel on the Signals page (and a "Monitor" pill on the terminal). Analysis only: it never places, changes or blocks a trade.
+
+**Found by code (free, always on during market hours):**
+* **Feed** (every 5 s): stream down, index ticks > 5 s old, analysis > 10 s old, token expired - "high" when a trade is open (push, max one per 10 min).
+* **Rule breaks** (every 60 s): stop under 1.5 ATR, exit after 15:20, stop filled > 0.3 ATR beyond the stop, option premium far from what its delta predicted.
+* **Why each loss happened**: gave back a winner (went ≥ 1 ATR your way first), wrong from the first bar, no follow-through, midday entry, ran out of time, option lost more than the index move explains, spike through the stop.
+* **Missed moves**: every 30 min the last 10 days are replayed with the live rules; today's ≥ 2.5 ATR moves that were not confirmed are listed with the gates that blocked them. Signal-board setups (WATCH / SETUP / NO BUY / FAILED) that were not bought but then paid are listed too.
+* **Drift** (today's win rate 25+ points under the replay) and **suggestions** from the replay: gates whose blocked-only setups made money (candidates to relax) or lost (keep), losing groups, better exits with the same 1.5 ATR stop, the gate behind most missed moves - each with its evidence and a caution.
+
+**Explained by Claude (needs `ANTHROPIC_API_KEY`):** a short note on each loss / missed move / rule break / drift (`MONITOR_MODEL`, default claude-haiku-5-5), an intraday review every `MONITOR_REVIEW_MIN` minutes from 10:00, and an end-of-day review 10 minutes after the close (`REVIEW_MODEL`, default claude-sonnet-5-5) with ranked suggested changes; push "review ready". `MONITOR_MAX_CALLS_PER_DAY` (default 40) caps the API use. Without a key everything above still runs and the review lists the code suggestions. Settings (on/off, Claude, push, calls/day, review interval) are on the Signals page (owner only) and saved in the database; findings and reviews are mirrored to the accounts database like the signal log.
+
 ## v1.19.9 - the "Updated" line shows live updates
 
 * While the market is open, the line under Refresh data now shows the time of the last live update to 0.1 s (e.g. "● Live 11:02:15.3 · every 0.1 s · analysis 1.2 s old"). Before, it only changed when the 2 s REST reload or a new analysis arrived, so the 0.1 s feed looked like 2 s.
