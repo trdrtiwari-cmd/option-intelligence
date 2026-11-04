@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.19.0";
+const FRONTEND_VERSION="1.19.3";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -360,6 +360,25 @@ function autoSwitchOption(a){
   if($("chartView").value!=="option"){$("chartView").value="option";try{$("chartView").dispatchEvent(new Event("change"))}catch{refreshChartSource()}}
   toast(`${lvl} ${pk.type}: chart switched to ${pk.name||pk.strike+" "+pk.type} (${pk.label}) @ ${fmt(pk.ltp)}`);
 }
+// ---------------- v1.19.3: automatic trendlines (static/trendlines.js finds them; drawn here) ----------------
+let tlSeries=[],lastTrendlines=null;
+function drawTrendlines(cs){
+  for(const s of tlSeries){try{chart.removeSeries(s)}catch{}}tlSeries=[];
+  const cell=$("chartTrend");
+  if($("showTL")?.checked===false||!window.OITrendlines){lastTrendlines=null;if(cell)cell.textContent="off";return}
+  const t=window.OITrendlines.computeTrendlines(cs);lastTrendlines=t;
+  const LS=LightweightCharts.LineStyle,parts=[];
+  for(const tl of [t.support,t.resistance]){
+    if(!tl)continue;
+    const sup=tl.kind==="support",color=sup?"#3fd0c9":"#ffb547";
+    const s=chart.addLineSeries({color,lineWidth:2,lineStyle:tl.broken?LS.Dashed:LS.Solid,priceLineVisible:false,lastValueVisible:true,
+      title:(sup?"TL S":"TL R")+(tl.broken?" ✕":""),crosshairMarkerVisible:false,autoscaleInfoProvider:()=>null});
+    s.setData([{time:tl.from.time,value:tl.from.value},{time:tl.to.time,value:tl.to.value}]);tlSeries.push(s);
+    const arrow=tl.direction==="rising"?"↗":tl.direction==="falling"?"↘":"→";
+    parts.push(`${sup?"Support":"Resistance"} ${arrow} ${fmt(tl.value)}${tl.broken?(sup?" — BROKEN below":" — BROKEN above"):` (${tl.touches} touches)`}`);
+  }
+  if(cell)cell.textContent=parts.length?parts.join(" · "):"none clear";
+}
 let srSeries=[],srReq=0,srTfCache={key:null,at:0,sr:null};
 function clearSRLines(){
   for(const s of srSeries){try{chart.removeSeries(s)}catch{}}srSeries=[];
@@ -475,6 +494,7 @@ function renderCandles(candles){
     const id=++srReq;
     srFromHigherTf(tfNum).then(h=>{if(id===srReq&&$("srTf").value===tf&&h)applySR(h,lastTime,`${tfNum}-minute candles`)}).catch(()=>{});
   }
+  try{drawTrendlines(unique)}catch(e){console.warn("trendlines",e)}
   applyChartRange(unique.length);
   const vwapLegend=document.querySelector(".vwap-legend"),vwapIsVol=!!vw.at(-1)?.volumeBased;
   if(vwapLegend)vwapLegend.textContent=vwapIsVol?"━ VWAP":"━ Session avg price (no index volume)";
@@ -734,7 +754,7 @@ $("interval").addEventListener("change",refresh);
 $("loadContracts").addEventListener("click",()=>loadContracts(true));
 $("loadChain").addEventListener("click",()=>loadChain());
 $("chartView").addEventListener("change",refreshChartSource);
-["showEma","showVWAP","showSR"].forEach(id=>$(id).addEventListener("change",()=>renderCandles(currentCandles)));
+["showEma","showVWAP","showSR","showTL"].forEach(id=>$(id)&&$(id).addEventListener("change",()=>renderCandles(currentCandles)));
 $("srTf").addEventListener("change",()=>{srTfCache={key:null,at:0,sr:null};renderCandles(currentCandles)});
 const chartPanel=document.querySelector(".chart-panel");
 const chartWrap=$("chart");

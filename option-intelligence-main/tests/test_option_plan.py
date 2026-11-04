@@ -158,3 +158,29 @@ if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
             fn(); print("ok", name)
+
+
+def test_winrate_exit_plan_small_target_wide_stop():
+    pick = op.pick_contract(chain(), 23960, "CE", "NIFTY", lot_size=65)
+    w = op.EXIT_PLANS["winrate"]
+    cfg = {"charges_rs": 60, "min_target_pts": w["min_target_pts"], "min_rr": w["min_rr"], "min_target_atr": w["min_target_atr"], "min_premium_rr": w["min_premium_rr"]}
+    plan = op.profit_plan("CE", 23960, 18.4, None, pick, None, sl_atr=w["sl_atr"], min_sl_pts=w["min_sl_pts"], target_atr=w["target_atr"], cfg=cfg)
+    ix = plan["index"]
+    assert ix["risk_pts"] == 20 and abs(ix["reward_pts"] - 15) < 0.01, ix     # 0.6 ATR = 11 pts -> 15-pt minimum; 1 ATR = 18.4 -> 20-pt minimum
+    assert plan["ok"], plan["checks"]
+
+
+def test_winrate_finder_needs_both_halves():
+    import diagnostics as dg
+    rows = []
+    for i, day in enumerate(["2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]):
+        for j in range(4):
+            win = (j != 0)                                                    # 3 of 4 win -> 75 %
+            g = {f"{t}/{s}": ((t - 4) if win else (-s - 4)) for t in dg.TARGET_GRID for s in dg.STOP_GRID}
+            rows.append({"day": day, "grid": g, "atr_grid": {}})
+    wf = dg.winrate_finder(rows)
+    assert wf["split"] and wf["cells"] and all(c["worst_win"] >= 70 and c["worst_avg"] > 0 for c in wf["cells"])
+    for r in rows:                                                          # second half collapses -> nothing passes
+        if r["day"] >= "2026-10-06":
+            r["grid"] = {k: -24 for k in r["grid"]}
+    assert not dg.winrate_finder(rows)["cells"]

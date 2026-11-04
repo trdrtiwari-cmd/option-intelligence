@@ -19,7 +19,7 @@
 
   // Controls saved per page. Order matters when one control resets another (dashboard: symbol resets universe).
   const FIELDS = {
-    terminal: ["symbol", "interval", "chartView", "autoOption", "showEma", "showVWAP", "showSR", "srTf", "optionTypeFilter", "moneynessFilter",
+    terminal: ["symbol", "interval", "chartView", "autoOption", "showEma", "showVWAP", "showSR", "showTL", "srTf", "optionTypeFilter", "moneynessFilter",
       "paperRiskMode", "paperExitTarget", "paperAtrInterval", "paperSlMult", "paperT1Mult", "paperT2Mult", "paperT3Mult"],
     dashboard: ["symbol", "universe", "offset", "interval", "graphMode"],
     diagnostics: ["symbol", "interval", "days", "mode", "scoreMin", "target", "stop", "cost", "horizon"],

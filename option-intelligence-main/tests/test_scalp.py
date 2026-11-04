@@ -58,8 +58,17 @@ def test_scalp_straight_run_is_not_chased():
 
 def test_scalp_catches_pause_break_continuation():
     # the last bounce candle is followed by a red candle that closes below the bounce candle's low
-    a = run(selloff([-20]), "scalp")
-    std = run(selloff([-20]), "standard")
+    import indicators as _ind
+    blocked = run(selloff([-20]), "scalp")
+    if blocked["regime_phase"] == "BREAKDOWN":       # v1.19.1: a fresh breakdown bar is not an entry
+        assert blocked["signal"] != "CONFIRMED_PE"
+    old = _ind.FRESH_BREAK_BLOCK
+    _ind.FRESH_BREAK_BLOCK = "0"                      # the rest checks the pause-break trigger mechanics on their own
+    try:
+        a = run(selloff([-20]), "scalp")
+        std = run(selloff([-20]), "standard")
+    finally:
+        _ind.FRESH_BREAK_BLOCK = old
     print("scalp  :", a["signal"], "|", [(g["label"][:34], g["pass"]) for g in a["gates"] if not g["pass"]])
     print("standard:", std["signal"], "|", [(g["label"][:34], g["pass"]) for g in std["gates"] if not g["pass"]])
     assert gate(a, "Entry trigger")["pass"], gate(a, "Entry trigger")

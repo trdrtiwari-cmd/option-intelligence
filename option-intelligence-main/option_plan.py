@@ -52,6 +52,19 @@ DEFAULTS = {
     "min_premium_rr": _envf("OPTION_MIN_PREMIUM_RR", 1.2),
     "max_premium_sl_pct": _envf("OPTION_MAX_PREMIUM_SL_PCT", 25.0),
     "hold_minutes": _envf("OPTION_HOLD_MINUTES", 45.0),       # expected holding time, for theta decay
+    "min_target_pts": 0.0,
+}
+
+# v1.19.1 exit plans. "balanced" = the replay-calibrated 0.75 ATR stop / 3 ATR target (fewer winners, bigger ones).
+# "winrate" = small target, wider stop: more trades end as winners (the Oct-Nov standard-mode replays had 72-83 % winners at
+# 15-pt targets with 20-30 pt stops) but each winner is small, so after costs the average is close to zero. Use it only when the
+# Diagnostics "Win-rate finder" shows it held in BOTH halves of your own recent data.
+EXIT_PLANS = {
+    "balanced": {"label": "Balanced (0.75 ATR stop / 3 ATR target)"},
+    "winrate": {"label": "High win-rate (target 0.6 ATR, min 15 pts / stop 1 ATR, min 20 pts)",
+                "target_atr": _envf("WINRATE_TARGET_ATR", 0.6), "min_target_pts": _envf("WINRATE_MIN_TARGET_PTS", 15),
+                "sl_atr": _envf("WINRATE_SL_ATR", 1.0), "min_sl_pts": _envf("WINRATE_MIN_SL_PTS", 20),
+                "min_rr": 0.4, "min_target_atr": 0.4, "min_premium_rr": 0.4},
 }
 
 
@@ -197,7 +210,7 @@ def profit_plan(side, entry, atr, sr=None, pick=None, premium_trend=None, sl_atr
                 "summary": "Profit check not possible (no price / ATR)."}
     d = 1 if side == "CE" else -1
     risk = max(sl_atr * atr, min_sl_pts)
-    base = target_atr * atr
+    base = max(target_atr * atr, c.get("min_target_pts") or 0.0)
     target_pts, basis, barrier = base, f"{target_atr:g} ATR", None
     levels = (sr or {}).get("resistances" if side == "CE" else "supports") or []
     for lv in levels:
@@ -210,7 +223,7 @@ def profit_plan(side, entry, atr, sr=None, pick=None, premium_trend=None, sl_atr
             target_pts = capped
             basis = f"just before {'R' if side == 'CE' else 'S'} {lv['price']:,.2f} ({lv['strength']}, {lv.get('basis') or 'zone'})"
         break
-    min_target = max(c["min_rr"] * risk, c["min_target_atr"] * atr)
+    min_target = max(c["min_rr"] * risk, c["min_target_atr"] * atr, min(c.get("min_target_pts") or 0.0, base))
     rr = target_pts / risk if risk else 0
     checks.append({"label": f"Room to the target (≥ {c['min_rr']:g} × risk and ≥ {c['min_target_atr']:g} ATR)", "pass": target_pts >= min_target - 1e-9,
                    "detail": f"target {target_pts:+.1f} pts ({basis}) vs stop {risk:.1f} pts · reward:risk {rr:.2f}"

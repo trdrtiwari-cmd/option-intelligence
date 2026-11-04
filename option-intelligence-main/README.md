@@ -1,5 +1,41 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.19.3 - automatic trendlines on the chart
+
+* New **Auto trendlines** switch (chart tools, on by default, saved with your settings). Works on the index chart and on the option-premium chart.
+* **Support trendline** (teal): joins two swing lows; every close since the first point stayed above it. **Resistance trendline** (orange): joins two swing highs; every close stayed below it. When several lines qualify, the one with the most touches wins, then the most recent. Lines that are too steep (a spike) or more than 4 ATR away from price are ignored.
+* A line becomes **dashed with ✕** when one of the last three bars closed through it (a break). The label on the price scale shows the line's current value (TL S / TL R).
+* The **Trendlines** cell under the chart reads e.g. "Support ↗ 23,948 (3 touches) · Resistance ↘ 24,012", or "BROKEN below" after a break.
+* Lines are found from the last ~150 candles (about two sessions on 5-minute), using closed swing points only. They are a chart aid: the signal engine does not use them yet.
+
+## v1.19.2 - no notifications while the market is closed
+
+* **Real trading calendar:** the app reads each day's NSE timings from Upstox (`/v2/market/timings/{date}`, no login needed), so exchange holidays count as closed and special sessions (e.g. Muhurat) as open. Until that answer arrives the Mon-Fri 09:15-15:30 schedule is used.
+* **Exit alerts:** a trade that gets settled after the close (for example the server was asleep and works the exit out later from the 1-minute candles) is recorded in the Signals page and Notification history, but no longer sends a phone / Telegram alert. Exits during the session, and the 15:20 square-off (15 min grace), still alert.
+* **"Monitor was offline" alert:** only sent when the server wakes up during market hours (it used to fire when the server woke up in the evening).
+* **Day summary:** only 5-60 minutes after the close on a trading day, never later at night or on holidays.
+* **"Reconnect Upstox" alert:** only from 45 min before the open until the close on trading days.
+* Signal alerts re-check the market status at the moment they are sent.
+
+## v1.19.1 - corrections from the 5 Oct - 4 Nov replays (NIFTY 5m, scalp + standard)
+
+Measured on the four diagnostics files (30-pt target / 20-pt stop, 4 pts cost). "First half" = 5-19 Oct, "second half" = 21 Oct - 4 Nov.
+
+| Scalp | trades | winners | avg pts | first half | second half |
+|---|---|---|---|---|---|
+| Replay as exported | 82 | 55 % | +3.4 | 59 % | 51 % |
+| Only the live entry window 09:45-13:30 | 44 | 64 % | +7.8 | 73 % | 55 % |
+| + no entry on a fresh breakout / breakdown bar | 26 | **69 %** | **+10.6** | 83 % | 57 % |
+
+Standard mode: 53 → 29 → 19 trades, 51 % → 55 % → 63 % winners (+1.4 → +7.6 pts), but only 40 % in the second half.
+
+* **Fresh breakout / breakdown entries are blocked for both sides, both modes** (`FRESH_BREAK_BLOCK=1`). Scalp BREAKDOWN entries: 32 trades, 44 % winners, -2.1 pts (second half 31 %, -8.6); standard BREAKDOWN 25 %, BREAKOUT 38 %. This replaces v1.19.0's "strong breakout allowed" rule, which rested on a synthetic test; the real data says wait for the retest. `FRESH_BREAK_BLOCK=quality` brings the v1.19.0 rule back.
+* **Diagnostics now apply the live entry window** (09:45 - ENTRY_CUTOFF). The old replay also counted 09:15-09:45 and post-13:30 entries the app never sends, which made every report look worse than the live signals (13:30-14:30 entries: 31-36 % winners).
+* **Win-rate finder** (Diagnostics): lists exits that reach ≥ 70 % winners with a positive average in BOTH halves of the period - or says that none does.
+* **Exit plan setting** (Signals page): *Balanced* (default, 0.75 ATR stop / 3 ATR target, S/R-capped) or *High win-rate* (target 0.6 ATR, min 15 pts / stop 1 ATR, min 20 pts). Small-target exits had 72-83 % winners in the standard replays but only about 0 to +3 pts per trade after costs; switch only if the finder confirms it on your next run.
+
+**Honest status of the 70 % goal:** over the whole month the filtered scalp signals won 69 %, but 57 % in the latest two weeks, on 26 trades. That is not yet proof of a 70 % strategy. Re-run Diagnostics (scalp, 20+ days) after deploying and read the win-rate finder before relying on it.
+
 ## v1.19.0 - earlier signals, option buy plan, real P/L per signal, phone layout
 
 **Why 4 Nov 2026 gave one late, losing signal (found in the code, checked on a synthetic range → trend replay):**

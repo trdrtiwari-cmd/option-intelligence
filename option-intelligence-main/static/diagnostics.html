@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.19.0">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.19.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.19.3">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.19.3">
 </head>
 <body>
 <header class="topbar">
@@ -41,12 +41,13 @@
     <section class="panel"><div class="section-head"><div><h2>Exit styles — fixed targets vs trailing vs scaling out</h2><p>Same entries, different ways of getting out. Cost is already deducted.</p></div></div><div class="table-wrap"><table id="strategies"></table></div>
       <h3 class="dg-sub">How sensitive is the result to your cost allowance?</h3><div class="table-wrap"><table id="costTable"></table></div></section>
     <section class="panel"><h2>Where it wins and loses</h2><div id="groups" class="dg-groups"></div></section>
+    <section class="panel"><div class="section-head"><div><h2>Win-rate finder — exits with ≥ 70 % winners in BOTH halves</h2><p id="wfNote">An exit only counts when it wins ≥ 70 % of trades with a positive average in the first half AND the second half of the period.</p></div></div><div class="table-wrap"><table id="wfTable" class="cardify"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>Missed big moves — which gate held the signal back</h2><p id="mmRule">Clean moves the engine did not confirm in time, and the gates that were failing on that side when each move started.</p></div></div><div class="table-wrap"><table id="missedBlockers"></table></div><div class="table-wrap" style="margin-top:10px"><table id="missedExamples"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>Gate check — setups blocked by exactly one gate</h2><p>If these would have paid more than confirmed signals, that gate is too strict. If they would have lost, it is doing its job.</p></div></div><div class="table-wrap"><table id="ablation"></table></div></section>
     <section class="panel"><h2>Read this before acting on it</h2><ul id="limits" class="dg-verdict"></ul></section>
   </div>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/sync.js?v=1.19.0" data-next="/static/diagnostics.js?v=1.19.0"></script>
-<script src="/static/mobile.js?v=1.19.0" defer></script>
+<script src="/static/sync.js?v=1.19.3" data-next="/static/diagnostics.js?v=1.19.3"></script>
+<script src="/static/mobile.js?v=1.19.3" defer></script>
 </body></html>

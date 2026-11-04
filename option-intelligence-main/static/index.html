@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.19.0">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.19.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.19.3">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.19.3">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -46,11 +46,12 @@
 
   <section class="layout">
     <div class="panel chart-panel">
-      <div class="section-head chart-section-head"><div><h2>Market candles</h2><p id="chartSubtitle">NIFTY 50 · 5-minute OHLC</p><div class="chart-line-legend"><span class="ema9-legend">━ EMA 9</span><span class="ema21-legend">━ EMA 21</span><span class="vwap-legend">━ VWAP</span><span class="green">● Bull candle</span><span class="red">● Bear candle</span></div></div><div class="chart-actions"><button type="button" class="secondary" id="chartFit" title="Zoom back to the latest sessions">⤢ Reset view</button><button type="button" class="secondary" id="chartMinimize">− Minimize chart</button><button type="button" id="chartMaximize">⛶ Maximize</button></div></div>
+      <div class="section-head chart-section-head"><div><h2>Market candles</h2><p id="chartSubtitle">NIFTY 50 · 5-minute OHLC</p><div class="chart-line-legend"><span class="ema9-legend">━ EMA 9</span><span class="ema21-legend">━ EMA 21</span><span class="vwap-legend">━ VWAP</span><span class="tl-legend-s">╱ Support trendline</span><span class="tl-legend-r">╲ Resistance trendline</span><span class="green">● Bull candle</span><span class="red">● Bear candle</span></div></div><div class="chart-actions"><button type="button" class="secondary" id="chartFit" title="Zoom back to the latest sessions">⤢ Reset view</button><button type="button" class="secondary" id="chartMinimize">− Minimize chart</button><button type="button" id="chartMaximize">⛶ Maximize</button></div></div>
       <div class="chart-tools" aria-label="Chart overlays">
         <label><input type="checkbox" id="showEma" checked> EMA 9/21</label>
         <label><input type="checkbox" id="showVWAP" checked> VWAP</label>
         <label><input type="checkbox" id="showSR" checked> Auto S/R</label>
+        <label><input type="checkbox" id="showTL" checked> Auto trendlines</label>
       </div>
       <div id="chart" class="chart"></div>
       <div class="chart-indicators" id="chartIndicators">
@@ -58,6 +59,7 @@
         <div><span>ATR (14)</span><b id="chartAtr">—</b></div>
         <div><span>Support</span><b id="chartSupport">—</b></div>
         <div><span>Resistance</span><b id="chartResistance">—</b></div>
+        <div class="tl-cell"><span>Trendlines</span><b id="chartTrend">—</b></div>
         <div><span>Volume</span><b id="chartVolume">—</b></div>
       </div>
       <div class="chart-note" id="chartNote">Historical candles. Select an option contract to view its premium candles.</div>
@@ -248,6 +250,6 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/boot.js?v=1.19.0"></script><script src="/static/sync.js?v=1.19.0" data-next="/static/app.js?v=1.19.0"></script>
-<script src="/static/mobile.js?v=1.19.0" defer></script>
+<script src="/static/trendlines.js?v=1.19.3"></script><script src="/static/boot.js?v=1.19.3"></script><script src="/static/sync.js?v=1.19.3" data-next="/static/app.js?v=1.19.3"></script>
+<script src="/static/mobile.js?v=1.19.3" defer></script>
 </body></html>

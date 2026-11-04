@@ -133,20 +133,18 @@ def test_entry_window_starts_at_0945():
     assert [g for g in r["gates"] if g["label"].startswith("Entry time window")][0]["pass"]
 
 
-def test_ce_fresh_breakout_gate_scalp_only():
+def test_fresh_break_gate_both_modes():
+    """v1.19.1: a fresh breakout / breakdown bar is never an entry, in either mode (real Oct-Nov replays: 25-44 % winners)."""
     import test_regime as R
     rows = R.build([(14, 22800, 22810), (30, 22810, 23000)])
     now = ind.parse_time(rows[-1]["time"]) + __import__("datetime").timedelta(minutes=10)
-    sc = ind.analyze(rows, "NIFTY", 5, now=now, mode="scalp")
-    std = ind.analyze(rows, "NIFTY", 5, now=now, mode="standard")
-    g = [x for x in sc["gates"] if x["label"].startswith("CE breakout is strong")]
-    assert sc["side"] == "CE" and g, (sc["side"], sc["regime_phase"], g)
-    if sc["regime_phase"] != "BREAKOUT":
-        assert g[0]["pass"]
-    else:   # v1.19: a breakout passes only when the bar is strong
-        ok, _ = ind.breakout_quality(ind.normalize_candles(rows)[:-1] if False else ind.drop_forming(ind.normalize_candles(rows), 5, now)[0], sc["atr"], "CE")
-        assert g[0]["pass"] == ok
-    assert not [x for x in std["gates"] if x["label"].startswith("CE breakout is strong")]
+    for mode in ("scalp", "standard"):
+        a = ind.analyze(rows, "NIFTY", 5, now=now, mode=mode)
+        g = [x for x in a["gates"] if x["label"].startswith("Not a fresh breakout / breakdown")]
+        assert a["side"] == "CE" and g, (mode, a["side"], [x["label"] for x in a["gates"]])
+        assert g[0]["pass"] == (a["regime_phase"] != "BREAKOUT"), (mode, a["regime_phase"], g)
+        if a["regime_phase"] == "BREAKOUT":
+            assert a["signal"] != "CONFIRMED_CE"
 
 
 def test_breakout_quality_weak_vs_strong():

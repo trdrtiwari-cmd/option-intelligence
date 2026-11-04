@@ -146,7 +146,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.19.0"
+APP_VERSION = "1.19.3"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -203,11 +203,70 @@ def ist_now():
     return datetime.now(IST)
 
 
+# ---- v1.19.2: real trading calendar. Upstox publishes each day's exchange timings (empty on a holiday, special hours on e.g. Muhurat
+# trading) at /v2/market/timings/{date} - no login needed. Cached per day; until it is known the regular Mon-Fri 09:15-15:30 schedule is used.
+_TRADING_DAY = {}            # "YYYY-MM-DD" -> {"open_day": bool, "start": time, "end": time, "source": str, "note": str}
+_TRADING_DAY_BUSY = set()
+
+
+async def refresh_trading_day(d=None):
+    d = d or ist_now().date()
+    key = d.isoformat()
+    if key in _TRADING_DAY or key in _TRADING_DAY_BUSY:
+        return _TRADING_DAY.get(key)
+    _TRADING_DAY_BUSY.add(key)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            r = await c.get(f"{API_BASE}/v2/market/timings/{key}", headers={"Accept": "application/json"})
+        if r.status_code != 200:
+            return None
+        rows = (r.json() or {}).get("data") or []
+        nse = next((x for x in rows if str(x.get("exchange", "")).upper() == "NSE"), None) or \
+              next((x for x in rows if str(x.get("exchange", "")).upper() == "NFO"), None)
+        if nse and nse.get("start_time") and nse.get("end_time"):
+            st = datetime.fromtimestamp(float(nse["start_time"]) / 1000, IST).time()
+            en = datetime.fromtimestamp(float(nse["end_time"]) / 1000, IST).time()
+            info = {"open_day": True, "start": st, "end": en, "source": "Upstox market timings",
+                    "note": f"NSE open {st.strftime('%H:%M')}-{en.strftime('%H:%M')} IST today (Upstox market timings)"}
+        else:
+            info = {"open_day": False, "start": None, "end": None, "source": "Upstox market timings",
+                    "note": "NSE is closed today (holiday / weekend per Upstox market timings)"}
+        _TRADING_DAY[key] = info
+        if len(_TRADING_DAY) > 20:
+            for k in sorted(_TRADING_DAY)[:-10]:
+                _TRADING_DAY.pop(k, None)
+        return info
+    except Exception as exc:
+        logger.info("Market timings unavailable: %s", str(exc)[:120])
+        return None
+    finally:
+        _TRADING_DAY_BUSY.discard(key)
+
+
+def _session_for(dt):
+    info = _TRADING_DAY.get(dt.date().isoformat())
+    if info:
+        return info
+    if dt.weekday() >= 5:
+        return {"open_day": False, "start": None, "end": None, "source": "weekday schedule", "note": "Weekend"}
+    return {"open_day": True, "start": dtime(9, 15), "end": dtime(15, 30), "source": "weekday schedule",
+            "note": "Regular NSE schedule (Mon-Fri 09:15-15:30 IST); today's holiday status not confirmed yet."}
+
+
+def in_session(dt=None, grace_minutes=0):
+    """True while NSE is open (plus `grace_minutes` after the close), using the real calendar when known."""
+    dt = (dt or ist_now()).astimezone(IST)
+    info = _session_for(dt)
+    if not info["open_day"]:
+        return False
+    end = (datetime.combine(dt.date(), info["end"]) + timedelta(minutes=grace_minutes)).time()
+    return info["start"] <= dt.time() <= end
+
+
 def market_status():
     now = ist_now()
-    is_open = now.weekday() < 5 and dtime(9, 15) <= now.time() <= dtime(15, 30)
-    return {"open": is_open, "ist_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "note": "Regular NSE schedule (Mon-Fri 09:15-15:30 IST); exchange holidays are not checked."}
+    info = _session_for(now)
+    return {"open": in_session(now), "trading_day": info["open_day"], "ist_time": now.strftime("%Y-%m-%d %H:%M:%S"), "note": info["note"]}
 
 
 def token_or_401():
@@ -1574,13 +1633,14 @@ async def _after_exits(sym, closed, live):
             if price is not None:
                 rs = await asyncio.to_thread(sx.set_option_exit, SIGNAL_LOG_DB, c["id"], price, src, SIGNAL_LOG_LOCK)
                 _SIGNAL_LOG_DIRTY.set()
-            if market_status()["open"] or live or (time.time() - _MON.get("started_at", 0) > 60):
-                _spawn(_send_exit_alert(sym, row, c, price, rs))
+            # v1.19.2: no phone alerts while the market is closed. An exit worked out later (server was asleep) goes to the
+            # notification history and the Signals page only.
+            _spawn(_send_exit_alert(sym, row, c, price, rs, push=in_session(grace_minutes=15)))
         except Exception as exc:
             logger.warning("Exit bookkeeping failed: %s", str(exc)[:160])
 
 
-async def _send_exit_alert(sym, row, c, opt_exit, rs):
+async def _send_exit_alert(sym, row, c, opt_exit, rs, push=True):
     try:
         name = row.get("option_name") or f"{sym} {row.get('side')}"
         word = {"TARGET": "TARGET hit", "STOP": "STOP-LOSS hit", "SQUAREOFF": "time exit"}.get(c["status"], c["status"])
@@ -1590,8 +1650,12 @@ async def _send_exit_alert(sym, row, c, opt_exit, rs):
         body = (f"Index {float(row.get('entry') or 0):,.2f} → {float(c['exit_price']):,.2f} at {when} IST ({c['gross']:+.1f} gross, {c['net']:+.1f} net pts).\n"
                 + (f"Premium {oe:,.2f} → {opt_exit:,.2f}" + (f" × {row.get('qty')} − charges ₹{float(row.get('charges_rs') or 0):,.0f} = ₹{rs:+,.0f}" if rs is not None else "") + ".\n" if oe and opt_exit else "")
                 + "Paper result recorded in the Daily Signal Log.")
+        if not push:
+            body += "\n(Settled after the market closed - recorded without a phone alert.)"
         for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
             await asyncio.to_thread(acc.push_add_history, uid, "EXIT", sym, row.get("side") or "", title, body, utc_now_iso())
+        if not push:
+            return
         await notifier.send_alert(title, body, "default")
         await _dispatch_confirmed_push(title, body, sym, row.get("side") or "", "EXIT")
     except Exception as exc:
@@ -1667,8 +1731,12 @@ async def _end_of_day_summary():
     """Once per trading day, shortly after the close, push the day's strategy result to the phone."""
     global _EOD_SENT
     now = datetime.now(IST)
-    if now.weekday() >= 5 or now.time() < dtime(15, 35) or _EOD_SENT == now.date():
+    info = _session_for(now)
+    if not info["open_day"] or _EOD_SENT == now.date():
         return
+    close_dt = datetime.combine(now.date(), info["end"], tzinfo=IST)
+    if not (close_dt + timedelta(minutes=5) <= now <= close_dt + timedelta(minutes=60)):
+        return                                      # v1.19.2: only 5-60 min after the close, never late at night
     _EOD_SENT = now.date()
     day = now.date().isoformat()
     data = await get_signal_log(day, day, "", 10000)
@@ -1696,6 +1764,8 @@ async def _signal_exit_watcher():
     while True:
         delay = 3.0
         try:
+            if ist_now().date().isoformat() not in _TRADING_DAY:
+                _spawn(refresh_trading_day())
             open_by_symbol = await asyncio.to_thread(sx.open_trade_count, SIGNAL_LOG_DB, SIGNAL_LOG_LOCK)
             is_open = market_status()["open"]
             delay = 3.0 if is_open else 60.0
@@ -2056,7 +2126,7 @@ def _mon_refresh(syms, interval, mode, score_min):
 
 
 def _market_open_at(dt):
-    return dt.weekday() < 5 and dtime(9, 15) <= dt.time() <= dtime(15, 30)
+    return in_session(dt)
 
 
 async def _alert_poller():
@@ -2109,6 +2179,9 @@ async def _report_monitor_gap():
         if gap < 420 or not (_market_open_at(prev_dt) or _market_open_at(now)):
             return
         _MON["gap"] = {"from": prev_dt.strftime("%d %b %H:%M"), "to": now.strftime("%H:%M"), "minutes": round(gap / 60)}
+        await refresh_trading_day()
+        if not in_session(now):             # v1.19.2: shown on the monitor line, but no phone alert while the market is closed
+            return
         title = "Option Intelligence - monitor was offline"
         body = (f"The server was asleep or restarted from {prev_dt.strftime('%H:%M')} to {now.strftime('%H:%M')} IST ({round(gap / 60)} min). "
                 "Signals in that window were not watched. Add a free pinger on /health every 5 min so it stays awake (see README).")
@@ -2118,6 +2191,11 @@ async def _report_monitor_gap():
         await _dispatch_confirmed_push(title, body, "SYSTEM", "WAIT", "GAP")
     except Exception as exc:
         logger.debug("Monitor gap report: %s", str(exc)[:140])
+
+
+@app.on_event("startup")
+async def _load_trading_calendar():
+    asyncio.create_task(refresh_trading_day())
 
 
 @app.on_event("startup")
@@ -2131,9 +2209,14 @@ _TOKEN_ALERT_DAY = None
 async def _token_expired_alert():
     """Upstox tokens expire daily. Without a fresh one no signals can be computed, so tell the owner once per day."""
     global _TOKEN_ALERT_DAY
-    today = datetime.now(IST).date()
+    now = datetime.now(IST)
+    today = now.date()
     if _TOKEN_ALERT_DAY == today:
         return
+    info = _session_for(now)
+    if not info["open_day"] or not (datetime.combine(today, info["start"], tzinfo=IST) - timedelta(minutes=45) <= now
+                                    <= datetime.combine(today, info["end"], tzinfo=IST)):
+        return                              # v1.19.2: no "reconnect" alert at night / on holidays
     _TOKEN_ALERT_DAY = today
     title, body = "Option Intelligence - reconnect Upstox", "The Upstox token has expired, so signals and alerts are paused. Open the app > More > Connect Upstox to refresh it."
     await notifier.send_alert(title, body, "high", force=True)
@@ -2237,7 +2320,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan")
 
 
 def _set_option_overrides(d):
@@ -2258,6 +2341,8 @@ async def signal_log_config():
             "sl_atr": c["sl_atr"], "target_atr": c["target_atr"],
             "default_sl_atr": t.get("atr_sl"), "default_target_atr": t.get("atr_t2"), "min_sl_points": t.get("atr_min_sl_pts"),
             "custom": bool(c["sl_atr"] and c["target_atr"]),
+            "exit_plan": OPTION_OVERRIDES.get("exit_plan") or os.getenv("EXIT_PLAN", "balanced"),
+            "exit_plans": {k: v["label"] for k, v in op.EXIT_PLANS.items()},
             "option": {"steps": oc["steps"], "moneyness": oc["moneyness"], "lots": oc["lots"], "charges_rs": oc["charges_rs"], "min_rr": oc["min_rr"],
                        "custom": bool(OPTION_OVERRIDES)}}
 
@@ -2271,6 +2356,7 @@ class SignalLogConfig(BaseModel):
     opt_lots: Optional[int] = None
     opt_charges_rs: Optional[float] = None  # round-trip charges per trade (Rs)
     opt_min_rr: Optional[float] = None      # minimum index reward : risk for a BUY
+    opt_exit_plan: Optional[str] = None     # v1.19.1: balanced | winrate
 
 
 @app.post("/api/signals/config")
@@ -2307,6 +2393,10 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         if not 0.5 <= payload.opt_min_rr <= 5:
             raise HTTPException(400, "Minimum reward:risk must be 0.5-5")
         new["opt_min_rr"] = float(payload.opt_min_rr)
+    if payload.opt_exit_plan:
+        if payload.opt_exit_plan not in op.EXIT_PLANS:
+            raise HTTPException(400, "Exit plan must be balanced or winrate")
+        new["opt_exit_plan"] = payload.opt_exit_plan
     sx.set_overrides(new)
     _set_option_overrides(new)
     try:
@@ -2623,6 +2713,12 @@ async def _buy_plan(sym, interval, mode, score_min, a, raw_candles, pick):
     t, sc = dd.THRESHOLDS, sx.config()
     sl_atr = sc["sl_atr"] or t["atr_sl"]
     tgt_atr = sc["target_atr"] or {"T1": t["atr_t1"], "T2": t["atr_t2"], "T3": t["atr_t3"]}.get(sc["target"], t["atr_t2"])
+    min_sl, ocfg = t["atr_min_sl_pts"], _opt_cfg()
+    plan_name = OPTION_OVERRIDES.get("exit_plan") or os.getenv("EXIT_PLAN", "balanced")
+    wp = op.EXIT_PLANS.get(plan_name) if plan_name == "winrate" else None
+    if wp:                                       # v1.19.1 high win-rate exit plan: small target, wider stop
+        sl_atr, tgt_atr, min_sl = wp["sl_atr"], wp["target_atr"], wp["min_sl_pts"]
+        ocfg.update(min_target_pts=wp["min_target_pts"], min_rr=wp["min_rr"], min_target_atr=wp["min_target_atr"], min_premium_rr=wp["min_premium_rr"])
     entry = _live_index_price(sym) or _float_or_none(a.get("last_close"))
     try:
         sr = op.sr_levels(normalize_candles(raw_candles), a.get("atr"), interval, sym)
@@ -2636,7 +2732,8 @@ async def _buy_plan(sym, interval, mode, score_min, a, raw_candles, pick):
                                                             score_min=score_min if score_min in (60, 65, 70) else 70), timeout=6)
         except Exception as exc:
             logger.info("Premium trend unavailable: %s", str(getattr(exc, "detail", exc))[:120])
-    plan = op.profit_plan(side, entry, a.get("atr"), sr, pick, ptrend, sl_atr, t["atr_min_sl_pts"], tgt_atr, _opt_cfg())
+    plan = op.profit_plan(side, entry, a.get("atr"), sr, pick, ptrend, sl_atr, min_sl, tgt_atr, ocfg)
+    plan["exit_plan"] = "winrate" if wp else "balanced"
     plan["sr"] = {"resistances": (sr or {}).get("resistances", [])[:3], "supports": (sr or {}).get("supports", [])[:3]}
     return plan
 
@@ -2668,7 +2765,7 @@ async def _route_signal_alerts(sym, interval, mode, a, fused, market_open):
         if len(d) > 300:
             for k in sorted(d, key=d.get)[:100]:
                 d.pop(k, None)
-    if not send or not market_open or not PUSH_DELIVERY_ENABLED():
+    if not send or not market_open or not in_session() or not PUSH_DELIVERY_ENABLED():     # re-checked at send time (v1.19.2)
         return
     if send in ("STARTED", "FAILED", "CONFIRMED") and send not in notifier.events():
         return

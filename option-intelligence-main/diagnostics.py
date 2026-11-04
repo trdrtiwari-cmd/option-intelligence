@@ -22,6 +22,7 @@ from datetime import timedelta
 
 import dashboard_data as dd
 from indicators import IST, analyze, normalize_candles
+import signal_fusion as _sf
 
 TARGET_GRID = (15, 20, 25, 30, 40, 60)
 STOP_GRID = (10, 15, 20, 25, 30, 40)
@@ -34,8 +35,10 @@ MIN_N = 8          # fewer samples than this are shown but never used to draw a 
 
 # ---------------------------------------------------------------- replay
 def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None, first_bar=40,
-           window=None, progress=None, score_min=70):
-    """One record per closed bar from `first_bar` on: the technical signal as it stood when that bar closed."""
+           window=None, progress=None, score_min=70, live_window=True):
+    """One record per closed bar from `first_bar` on: the technical signal as it stood when that bar closed.
+    live_window (v1.19.1): apply the live app's entry-time window (ENTRY_START_MIN..ENTRY_CUTOFF) so the replay only counts
+    entries the app would actually have signalled. Before this, entries at 09:15-09:45 and after 13:30 were counted too."""
     cs = normalize_candles(raw_candles)
     htf = normalize_candles(htf_raw) if htf_raw and htf_interval else []
     window = window or int(10 * 375 / max(1, interval))      # the live terminal analyses ~10 days of candles; use the same lookback
@@ -52,7 +55,13 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
         if a.get("status") != "ok":
             continue
         side, atr = a.get("side"), a.get("atr")
-        gates = a.get("gates") or []
+        gates = list(a.get("gates") or [])
+        if live_window and side:
+            m = close_dt.astimezone(IST).hour * 60 + close_dt.astimezone(IST).minute
+            ok = _sf.ENTRY_START_MIN <= m < _sf.ENTRY_CUTOFF_MIN
+            gates.append({"label": "Entry time window (live app)", "pass": ok, "detail": ""})
+            if not ok and a["signal"].startswith("CONFIRMED"):
+                a = dict(a, signal="WATCH_" + side)
         failed = [g["label"] for g in gates if not g["pass"]]
         trig = next((g for g in gates if g["label"].startswith(("Entry trigger", "Pullback-and-resume"))), None)
         trigger = None
@@ -385,6 +394,34 @@ def verdict(rep):
     return out
 
 
+# ---------------------------------------------------------------- win-rate finder (v1.19.1)
+def winrate_finder(rows, min_win=70.0):
+    """Which exit (fixed points or ATR multiples) gives >= min_win % winners AND a positive average in BOTH halves of the period?
+    A rule that only works in one half is luck, not an edge. Returns {"split", "cells": [...], "near": [...]}."""
+    days = sorted({r["day"] for r in rows})
+    if len(days) < 4 or len(rows) < 12:
+        return {"split": None, "cells": [], "near": [], "note": "Too few days / signals to split the period in two."}
+    cut = days[len(days) // 2]
+    h1 = [r for r in rows if r["day"] < cut]
+    h2 = [r for r in rows if r["day"] >= cut]
+    cells = []
+    for kind, key, keys in (("points", "grid", [f"{t}/{s}" for t in TARGET_GRID for s in STOP_GRID]),
+                            ("ATR", "atr_grid", [f"{t}/{s}" for t in ATR_TARGETS for s in ATR_STOPS])):
+        for k in keys:
+            a = stats([r[key][k] for r in rows if k in r.get(key, {})])
+            b = stats([r[key][k] for r in h1 if k in r.get(key, {})])
+            c = stats([r[key][k] for r in h2 if k in r.get(key, {})])
+            if not (a.get("n") and b.get("n") and c.get("n")):
+                continue
+            t, s_ = k.split("/")
+            cells.append({"kind": kind, "target": float(t), "stop": float(s_), "all": a, "first": b, "second": c,
+                          "worst_win": min(b["win_rate"], c["win_rate"]), "worst_avg": min(b["avg"], c["avg"])})
+    good = sorted([x for x in cells if x["worst_win"] >= min_win and x["worst_avg"] > 0], key=lambda x: (-x["worst_avg"], -x["worst_win"]))
+    near = sorted([x for x in cells if x["worst_avg"] > 0], key=lambda x: -x["worst_win"])[:8]
+    return {"split": {"first": f"{days[0]} – {h1[-1]['day'] if h1 else '-'}", "second": f"{cut} – {days[-1]}", "n1": len(h1), "n2": len(h2)},
+            "cells": good[:10], "near": near, "min_win": min_win}
+
+
 # ---------------------------------------------------------------- missed big moves (v1.19)
 def missed_moves(cs, replayed, horizon=12, move_atr=2.5, max_adverse_atr=0.75, before=2, after=3):
     """'Which gate made me miss the big move?' answered from the replay.
@@ -446,8 +483,9 @@ def missed_moves(cs, replayed, horizon=12, move_atr=2.5, max_adverse_atr=0.75, b
 
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70):
-    cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress, score_min=score_min)
+        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70, live_window=True):
+    cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress, score_min=score_min,
+                          live_window=live_window)
     confirmed, near = events_from(replayed)
     conf_rows = evaluate(cs, confirmed, interval, horizon, cost, target, stop, with_extras=True)
     near_rows = evaluate(cs, near, interval, horizon, cost, target, stop)
@@ -456,6 +494,21 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
     params = {"symbol": symbol, "interval": interval, "mode": mode, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
               "days": days, "bars_evaluated": len(replayed)}
     rep = build_report(conf_rows, near_rows, params, random_stats)
+    wf = winrate_finder(conf_rows)
+    rep["winrate_finder"] = wf
+    if wf.get("split"):
+        if wf["cells"]:
+            b = wf["cells"][0]
+            unit = " ATR" if b["kind"] == "ATR" else " pts"
+            rep["verdict"].insert(1, {"level": "good", "text": f"≥ 70 % winners in BOTH halves of the period: target {b['target']:g}{unit} / stop {b['stop']:g}{unit} → "
+                                      f"{b['all']['win_rate']}% winners, {b['all']['avg']:+.1f} pts/trade overall (first half {b['first']['win_rate']}% / {b['first']['avg']:+.1f}, "
+                                      f"second half {b['second']['win_rate']}% / {b['second']['avg']:+.1f}). Use this exit on the Signals page (Exit plan: High win-rate) only if it keeps holding on the next run."})
+        else:
+            nb = wf["near"][0] if wf["near"] else None
+            rep["verdict"].insert(1, {"level": "info", "text": "No exit reached 70 % winners with a positive average in BOTH halves of this period."
+                                      + (f" Closest: target {nb['target']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} / stop {nb['stop']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} "
+                                         f"— worst half {nb['worst_win']}% winners, {nb['worst_avg']:+.1f} pts/trade." if nb else "")
+                                      + " A higher win rate here would only come from a smaller target than stop, which these signals do not pay for."})
     mm = missed_moves(cs, replayed, horizon=horizon)
     rep["missed_moves"] = mm
     if mm["moves"]:

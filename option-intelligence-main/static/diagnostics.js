@@ -78,6 +78,16 @@
       const box = el("div", "dg-group"); box.appendChild(el("h3", "", name)); const t = el("table"); table(t, ["Bucket", "Trades", "Win", "Avg pts", "Total", "PF", "±SE"], rows.map(r => [r.label, ...statCells(r)])); const w = el("div", "table-wrap"); w.appendChild(t); box.appendChild(w); gr.appendChild(box);
     });
     table($("ablation"), ["Only this gate failed", "Setups", "Win", "Avg pts", "Total", "PF", "±SE"], rep.ablation.length ? rep.ablation.map(a => [a.gate, ...statCells(a)]) : [["No one-gate near-misses in this period", "", "", "", "", "", ""]]);
+    const wf = rep.winrate_finder;
+    if (wf && $("wfTable")) {
+      const rows = (wf.cells && wf.cells.length) ? wf.cells : (wf.near || []);
+      $("wfNote").textContent = !wf.split ? (wf.note || "Too few signals.") : (wf.cells && wf.cells.length
+        ? `Halves: ${wf.split.first} (${wf.split.n1} signals) and ${wf.split.second} (${wf.split.n2}). These exits passed in both.`
+        : `Halves: ${wf.split.first} and ${wf.split.second}. NO exit passed in both halves — closest exits with a positive average shown.`);
+      const u = x => x.kind === "ATR" ? " ATR" : " pts";
+      table($("wfTable"), ["Exit (target / stop)", "All: win · avg", "First half", "Second half"], rows.map(x => [`${x.target}${u(x)} / ${x.stop}${u(x)}`,
+        `${x.all.win_rate}% · ${num(x.all.avg)}`, `${x.first.win_rate}% · ${num(x.first.avg)}`, `${x.second.win_rate}% · ${num(x.second.avg)}`]));
+    }
     const mm = rep.missed_moves;
     if (mm && $("missedBlockers")) {
       $("mmRule").textContent = mm.moves ? `${mm.moves} big moves · caught ${mm.caught} · missed ${mm.missed}. Rule: ${mm.rule}.` : "No clean big moves in this period.";

@@ -112,8 +112,8 @@ async function loadConfig() {
   const o = cfg.option || {};
   if ($('optSteps')) {
     $('optSteps').value = String(o.steps ?? 2); $('optMoney').value = o.moneyness || 'ITM'; $('optLots').value = o.lots ?? 1;
-    $('optCharges').value = o.charges_rs ?? 60; $('optRr').value = o.min_rr ?? 1.5;
-    $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · a BUY needs reward : risk ≥ ${o.min_rr ?? 1.5}.`;
+    $('optCharges').value = o.charges_rs ?? 60; $('optRr').value = o.min_rr ?? 1.5; $('optExit').value = cfg.exit_plan || 'balanced';
+    $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · ${cfg.exit_plan === 'winrate' ? 'exit plan: HIGH WIN-RATE (small target, wider stop).' : `a BUY needs reward : risk ≥ ${o.min_rr ?? 1.5}.`}`;
   }
 }
 
@@ -150,7 +150,7 @@ function renderSummary() {
 async function saveAtr(reset) {
   const msg = $('atrMsg'); msg.textContent = 'Saving…';
   const optBody = () => ({opt_steps: Number($('optSteps').value), opt_moneyness: $('optMoney').value, opt_lots: Number($('optLots').value) || 1,
-                          opt_charges_rs: Number($('optCharges').value) || 0, opt_min_rr: Number($('optRr').value) || 1.5});
+                          opt_charges_rs: Number($('optCharges').value) || 0, opt_min_rr: Number($('optRr').value) || 1.5, opt_exit_plan: $('optExit').value});
   const keepAtr = cfg.custom ? {sl_atr: cfg.sl_atr, target_atr: cfg.target_atr} : {};
   const keepCost = $('costPts').value === '' ? {} : {cost_points: Number($('costPts').value)};
   const body = reset === 'opt' ? {...optBody(), ...keepAtr, ...keepCost} : reset ? optBody() : {...optBody(), sl_atr: $('slAtr').value === '' ? null : Number($('slAtr').value), target_atr: $('tgtAtr').value === '' ? null : Number($('tgtAtr').value),

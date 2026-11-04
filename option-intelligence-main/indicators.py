@@ -89,10 +89,12 @@ CE_NEEDS_STRUCTURE = _os.getenv("CE_NEEDS_STRUCTURE", "1") != "0"
 # v1.15: 12 scalp CE entries taken inside a fresh BREAKOUT phase won 33% and lost 88 pts (every one of the 12 CE-breakout trades;
 # CE entries in an established TREND made +62). A fresh breakout is the most likely false move, so CE waits for the retest.
 CE_BLOCK_BREAKOUT = _os.getenv("CE_BLOCK_BREAKOUT", "1") != "0"
-# v1.19: the breakout block used to stop EVERY CE inside a fresh breakout - including the clean ones that start the day's main move
-# (4 Nov: UPTREND breakout, score 92, decision WAIT). Now only a WEAK breakout bar is blocked (closes in the lower part of its range,
-# a blow-off bar, or already far above the old range). CE_BLOCK_BREAKOUT=strict restores the old "block every breakout" rule.
-CE_BREAKOUT_STRICT = _os.getenv("CE_BLOCK_BREAKOUT", "1").strip().lower() == "strict"
+# v1.19.1: entries ON a fresh breakout / breakdown bar are blocked for BOTH sides and in BOTH modes (wait for the retest / TREND phase).
+# Real replays, 5 Oct - 4 Nov 2026 (NIFTY 5m): scalp BREAKDOWN entries 32 trades, 44% winners, -2.1 pts/trade (Oct 21 - Nov 4: 31%, -8.6);
+# standard BREAKDOWN 8 trades 25% / -11.5 and BREAKOUT 8 trades 38% / -6.0, versus TREND-phase entries 57-61% winners. Blocking them lifted
+# the 30/20 win rate in both halves of the month. FRESH_BREAK_BLOCK=quality allows only strong break bars (v1.19.0 rule); =0 turns it off.
+FRESH_BREAK_BLOCK = (_os.getenv("FRESH_BREAK_BLOCK", "1").strip().lower() or "1")
+CE_BREAKOUT_STRICT = FRESH_BREAK_BLOCK == "1"      # kept for compatibility with older settings / tests
 # v1.19: ADX (14) and Supertrend (10, 3) are the two slowest inputs. ADX is Wilder-smoothed twice (~2 x 14 bars of lag) and is
 # usually still < 20 for the first 8-15 bars of a new trend; Supertrend only flips after price travels ~3 ATR from the extreme.
 # As HARD gates they held the standard mode back until most of the move was gone, so a confirmed price-structure trend
@@ -634,16 +636,17 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         if side == "CE" and rules.get("ce_needs_structure"):
             gates.append({"label": "CE needs price-structure uptrend (not indicators alone)", "pass": trend_dir == 1,
                           "detail": regime_note if trend_dir == 1 else "No higher-high / EMA / range-break proof of an uptrend yet — CE entries on lagging indicators alone won 2 of 9 in the replay"})
-        if side == "CE" and rules.get("ce_block_breakout"):
-            if regime_phase != "BREAKOUT":
-                gates.append({"label": "CE breakout is strong (weak breakouts wait for the retest)", "pass": True, "detail": "Not a fresh breakout"})
-            elif CE_BREAKOUT_STRICT:
-                gates.append({"label": "CE not inside a fresh breakout (wait for the retest)", "pass": False,
-                              "detail": "Fresh breakout bar — CE_BLOCK_BREAKOUT=strict blocks every breakout entry"})
-            else:
+        fresh_phase = "BREAKOUT" if side == "CE" else "BREAKDOWN"
+        if FRESH_BREAK_BLOCK != "0":
+            if regime_phase != fresh_phase:
+                gates.append({"label": "Not a fresh breakout / breakdown bar (wait for the retest)", "pass": True, "detail": f"Phase: {regime_phase or 'no fresh break'}"})
+            elif FRESH_BREAK_BLOCK == "quality":
                 bq_ok, bq_detail = breakout_quality(cs, atr, side)
-                gates.append({"label": "CE breakout is strong (weak breakouts wait for the retest)", "pass": bq_ok,
-                              "detail": ("Strong breakout bar: " if bq_ok else "Weak breakout bar — likely false, wait for the retest: ") + bq_detail})
+                gates.append({"label": "Not a fresh breakout / breakdown bar (wait for the retest)", "pass": bq_ok,
+                              "detail": ("Strong break bar allowed (FRESH_BREAK_BLOCK=quality): " if bq_ok else "Weak break bar: ") + bq_detail})
+            else:
+                gates.append({"label": "Not a fresh breakout / breakdown bar (wait for the retest)", "pass": False,
+                              "detail": f"Fresh {fresh_phase.lower()} bar — in the Oct-Nov replays these entries won 25-44% and lost money; the retest entry (TREND phase) won 57-61%"})
         candle_check = candle_confirmation(cs, side)
         if rules["micro_trigger"]:
             gates.append({"label": "Closed-candle price-action confirmation", "pass": candle_check["confirmed"], "detail": candle_check["detail"]})
