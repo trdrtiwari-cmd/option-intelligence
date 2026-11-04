@@ -147,7 +147,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.19.5"
+APP_VERSION = "1.19.6"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1272,19 +1272,105 @@ async def live_derivatives(symbol: str = "NIFTY", expiry_date: str = "current_we
     }
 
 
+WS_TICK_SEC = float(os.getenv("WS_TICK_SEC", "0.25"))      # v1.19.6: index price pushed up to 4x a second (only when it moves)
+WS_PUSH_SEC = float(os.getenv("WS_PUSH_SEC", "1.0"))       # forming candles + analysis pushed about once a second while open
+
+
+def _ws_sub(msg, cur):
+    """Validate a browser subscription {type:"sub", interval, mode, score_min, reconfirm}. Bad fields keep the current value."""
+    out = dict(cur)
+    try:
+        iv = int(msg.get("interval", out.get("interval", 5)))
+        if iv in (1, 2, 3, 5, 10, 15, 30):
+            out["interval"] = iv
+        if msg.get("mode") in MODES:
+            out["mode"] = msg["mode"]
+        sm = int(msg.get("score_min", out.get("score_min", 70)))
+        if sm in (60, 65, 70):
+            out["score_min"] = sm
+        rc = int(msg.get("reconfirm", out.get("reconfirm", -1)))
+        if rc == -1 or 0 <= rc <= 600:
+            out["reconfirm"] = rc
+        out["view"] = "option" if msg.get("view") == "option" else "index"
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
 @app.websocket("/ws/live")
 async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
+    """Real-time feed for one page (v1.19.6).
+
+    Before: ticks every 0.5 s here, while the chart (10 days of candles) and the analysis were re-downloaded by the page every
+    2-4 s over REST - so the score, decision and buy plan always lagged and a phone spent its time on large JSON downloads.
+    Now the page sends {"type":"sub", interval, mode, score_min, reconfirm} once and this socket pushes:
+      * "index"    - the index price whenever it moves (every WS_TICK_SEC, default 0.25 s)
+      * "ticks"    - all subscribed option ticks, once a second
+      * "bars"     - the last 3 candles of the chart interval whenever they change (forming bar incl. volume)
+      * "analysis" - the shared analysis result the moment a newer one is computed (score, decision, buy plan, reconfirm)
+    REST stays as the fallback and for the first full load."""
     await websocket.accept()
     sym = symbol.upper()
     if sym not in INDEX_KEYS:
         await websocket.close(code=4400)
         return
     index_key = INDEX_KEYS[sym]
+    send_lock = asyncio.Lock()
+    sub = {"interval": None, "mode": "standard", "score_min": 70, "reconfirm": -1, "view": "index"}
+    sent = {"an": None, "bars": None, "idx": None, "ticks_at": 0.0, "push_at": 0.0}
+    pump_task = None
+
+    async def send(obj):
+        async with send_lock:
+            await websocket.send_json(obj)
+
+    async def reader():
+        while True:
+            msg = await websocket.receive_json()
+            if isinstance(msg, dict) and msg.get("type") == "sub":
+                new = _ws_sub(msg, sub)
+                if new != sub:
+                    sub.clear()
+                    sub.update(new)
+                    sent["an"] = sent["bars"] = None       # settings changed: push the matching result straight away
+                    sent["push_at"] = 0.0
+
+    async def pump():
+        iv = sub.get("interval")
+        if not iv or not runtime_token:
+            return
+        snap = dict(sub)
+        try:
+            if snap["view"] == "index":
+                c = await candles(symbol=sym, interval=iv, days=10)
+                tail = (c.get("candles") or [])[-3:]
+                sig = json.dumps(tail, sort_keys=True, default=str)
+                if tail and sig != sent["bars"] and snap == sub:
+                    sent["bars"] = sig
+                    await send({"type": "bars", "symbol": sym, "interval": iv, "candles": tail, "feed": c.get("feed"),
+                                "volume_source": c.get("volume_source"), "timestamp": utc_now_iso()})
+            a = await analysis(symbol=sym, interval=iv, mode=snap["mode"], score_min=snap["score_min"], reconfirm=snap["reconfirm"])
+            hit = _AN_CACHE.get((sym, iv, snap["mode"], snap["score_min"], snap["reconfirm"]))
+            stamp = hit[0] if hit else (a.get("timing") or {}).get("generated_at")
+            if stamp != sent["an"] and snap == sub:
+                sent["an"] = stamp
+                await send({"type": "analysis", "symbol": sym, "interval": iv, "mode": snap["mode"], "score_min": snap["score_min"],
+                            "reconfirm": snap["reconfirm"], "data": a, "timestamp": utc_now_iso()})
+        except HTTPException as exc:
+            logger.debug("ws push skipped: %s", str(exc.detail)[:120])
+        except (WebSocketDisconnect, RuntimeError):
+            raise
+        except Exception as exc:
+            logger.info("ws push failed: %s", exc)
+
+    read_task = asyncio.create_task(reader())
     loops = 0
     try:
         while True:
-            # (Re)start the stream with at least the index, even before the option chain is loaded.
-            if loops % 20 == 0 and runtime_token and not STREAMS.get(sym):
+            if read_task.done():
+                break                                       # browser went away (or sent garbage)
+            # (Re)start the stream with at least the index, even before the option chain is loaded (~every 10 s).
+            if loops % max(1, int(10 / WS_TICK_SEC)) == 0 and runtime_token and not STREAMS.get(sym):
                 _start_stream(sym, _stream_keys(sym))
             loops += 1
             now = time.time()
@@ -1292,21 +1378,38 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                 stream_error = STREAM_ERRORS.get(sym)
                 state = STREAMS.get(sym)
                 keys = [k for k in (state.get("keys", []) if state else []) if k != index_key]
-                recent = [v for v in (_tick_view(k, now) for k in keys) if v]
+                want_all = now - sent["ticks_at"] >= 1.0
+                recent = [v for v in (_tick_view(k, now) for k in keys) if v] if want_all else []
                 idx = _tick_view(index_key, now)
             index_tick = None
             if idx and idx.get("ltp") is not None:
                 index_tick = {"ltp": idx["ltp"], "close_price": idx.get("close_price"), "age_seconds": idx["age_seconds"], "fresh": idx["fresh"]}
-            any_fresh = any(x["fresh"] for x in recent) or bool(index_tick and index_tick["fresh"])
             market = market_status()
-            stream = "LIVE" if any_fresh else ("MARKET CLOSED" if not market["open"] and (recent or index_tick) else "STALE/CONNECTING")
-            await websocket.send_json({"type": "ticks", "symbol": sym, "timestamp": utc_now_iso(), "stream": stream,
-                                       "error": stream_error, "index": index_tick, "ticks": recent})
-            await asyncio.sleep(0.5)
+            if want_all:
+                sent["ticks_at"] = now
+                any_fresh = any(x["fresh"] for x in recent) or bool(index_tick and index_tick["fresh"])
+                stream = "LIVE" if any_fresh else ("MARKET CLOSED" if not market["open"] and (recent or index_tick) else "STALE/CONNECTING")
+                await send({"type": "ticks", "symbol": sym, "timestamp": utc_now_iso(), "stream": stream,
+                            "error": stream_error, "index": index_tick, "ticks": recent})
+                sent["idx"] = index_tick and index_tick["ltp"]
+            elif index_tick and index_tick["fresh"] and index_tick["ltp"] != sent["idx"]:
+                sent["idx"] = index_tick["ltp"]
+                await send({"type": "index", "symbol": sym, "index": index_tick})
+            every = WS_PUSH_SEC if market["open"] else 15.0
+            if (pump_task is None or pump_task.done()) and now - sent["push_at"] >= every:
+                if pump_task is not None and pump_task.done() and not pump_task.cancelled() and pump_task.exception():
+                    break                                   # the send inside the push failed: the socket is gone
+                sent["push_at"] = now
+                pump_task = asyncio.create_task(pump())
+            await asyncio.sleep(WS_TICK_SEC)
     except WebSocketDisconnect:
         return
     except Exception as exc:
         logger.debug("Browser websocket closed: %s", exc)
+    finally:
+        for t in (read_task, pump_task):
+            if t is not None and not t.done():
+                t.cancel()
 
 
 @app.get("/api/index-ltp")

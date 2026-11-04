@@ -80,7 +80,7 @@ def test_end_to_end_on_trending_data_finds_signals():
     assert rep["confirmed"]["count"] >= 4, rep["confirmed"]
     assert rep["confirmed"]["stats"]["avg"] > 0, rep["confirmed"]["stats"]     # a staircase fall pays after a PE signal
     assert rep["random_entries"]["n"] > 50
-    assert len(rep["strategies"]) == len(dg.STRATEGIES) and next(x for x in rep["cost_table"] if x["cost"] == 2)["avg"] == rep["confirmed"]["stats"]["avg"]
+    assert len(rep["strategies"]) == len(dg.STRATEGIES) + len(dg.ATR_STRATEGIES) and next(x for x in rep["cost_table"] if x["cost"] == 2)["avg"] == rep["confirmed"]["stats"]["avg"]
     assert rep["trades"] and {"day", "time", "side", "pnl", "zone"} <= set(rep["trades"][0])
     assert "Price zone vs signal side (dashboard's zone check)" in rep["groups"]
     assert rep["grid"] and rep["verdict"] and all("level" in v and "text" in v for v in rep["verdict"])
@@ -130,3 +130,10 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn(); print("ok", name)
     print("all diagnostics tests passed")
+
+
+def test_atr_trailing_keeps_minimum_stop():
+    # v1.19.6: ATR trailing never stops out tighter than 1.5 ATR before activation
+    path = [{"open": 100, "high": 101, "low": 100 - 1.4 * 10, "close": 99}, {"open": 99, "high": 99, "low": 80, "close": 80}]
+    for name, fn in dg.ATR_STRATEGIES:
+        assert fn(path, 100.0, 1, 10.0) == -15.0, name

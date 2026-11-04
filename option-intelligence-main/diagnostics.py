@@ -157,6 +157,16 @@ STRATEGIES = (
 )
 
 
+# v1.19.6: the same exit styles in ATR units, all keeping the 1.5 ATR minimum stop the live plan uses. Compare each with
+# the live plan (stop 1.5 / target 1.5 ATR) - a trailing variant only replaces the live plan if it wins in BOTH halves.
+ATR_STRATEGIES = (
+    ("ATR trail: stop 1.5, trail 1.0 once +1.0", lambda p, e, d, a: managed_exit(p, e, d, 1.5 * a, activate=1.0 * a, trail=1.0 * a)[0]),
+    ("ATR trail: stop 1.5, trail 1.0 once +1.5", lambda p, e, d, a: managed_exit(p, e, d, 1.5 * a, activate=1.5 * a, trail=1.0 * a)[0]),
+    ("ATR trail: stop 1.5, trail 0.75 once +1.2", lambda p, e, d, a: managed_exit(p, e, d, 1.5 * a, activate=1.2 * a, trail=0.75 * a)[0]),
+    ("ATR scale out: ½ at +1.5, rest trails 1.0 (stop 1.5)", lambda p, e, d, a: managed_exit(p, e, d, 1.5 * a, trail=1.0 * a, half_at=1.5 * a)[0]),
+)
+
+
 def excursions(path, entry, d):
     mfe = max((c["high"] - entry) if d > 0 else (entry - c["low"]) for c in path)
     mae = max((entry - c["low"]) if d > 0 else (c["high"] - entry) for c in path)
@@ -189,6 +199,8 @@ def evaluate(cs, events, interval, horizon, cost, target, stop, with_extras=Fals
         grid = {f"{t}/{s}": first_touch(path, entry, d, t, s)[0] - cost for t in TARGET_GRID for s in STOP_GRID}
         strat = {name: fn(path, entry, d) - cost for name, fn in STRATEGIES} if with_extras else {}
         atr_v = ev.get("atr")
+        if with_extras and atr_v:
+            strat.update({name: fn(path, entry, d, atr_v) - cost for name, fn in ATR_STRATEGIES})
         atr_grid = {f"{t}/{s_}": first_touch(path, entry, d, t * atr_v, s_ * atr_v)[0] - cost
                     for t in ATR_TARGETS for s_ in ATR_STOPS} if atr_v else {}
         dt = cs[ev["i"]]["_dt"].astimezone(IST)
@@ -306,7 +318,9 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
         "Cutoff what-if: entries before / after 12:00": _bucket(rows_conf, lambda r: "before 12:00" if r["minute"] < 720 else "12:00 or later", ["before 12:00", "12:00 or later"]),
         "Cutoff what-if: entries before / after 13:30": _bucket(rows_conf, lambda r: "before 13:30" if r["minute"] < 810 else "13:30 or later", ["before 13:30", "13:30 or later"]),
     }
-    report["strategies"] = [{"name": name, **stats([r["strat"][name] for r in rows_conf if name in r["strat"]])} for name, _ in STRATEGIES] if rows_conf else []
+    report["strategies"] = [{"name": name, **stats([r["strat"][name] for r in rows_conf if name in r["strat"]])}
+                            for name, _ in STRATEGIES + ATR_STRATEGIES] if rows_conf else []
+    report["strategies"] = [x for x in report["strategies"] if x.get("n")]
     report["cost_table"] = [{"cost": c2, **stats([r["pnl"] + cost - c2 for r in rows_conf])} for c2 in (0, 2, 4, 6, 8)] if rows_conf else []
     report["trades"] = [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pnl": round(r["pnl"], 1), "exit": r["exit"], "mfe": round(r["mfe"], 1),
                          "mae": round(r["mae"], 1), "score": r["score"], "regime": r["regime"], "phase": r["phase"], "trigger": r["trigger"],
@@ -347,10 +361,14 @@ def verdict(rep):
     if base.get("n", 0) >= MIN_N and rnd.get("n", 0) >= 50 and base.get("se") is not None:
         edge = base["avg"] - rnd["avg"]
         se = math.sqrt((base["se"] or 0) ** 2 + (rnd["se"] or 0) ** 2)
-        lvl = "good" if edge > SIG_Z * se and base["n"] >= 30 else "bad" if edge < 0 and abs(edge) > SIG_Z * se else "info"
+        clear = edge > SIG_Z * se
+        lvl = "good" if clear and base["n"] >= 30 else "bad" if edge < 0 and abs(edge) > SIG_Z * se else "info"
+        # v1.19.6: a large edge with fewer than 30 trades is "promising, not proven" - it used to be called "indistinguishable from random".
+        tail = (" — statistically real." if lvl == "good" else " — the signals are WORSE than guessing." if lvl == "bad"
+                else f" — clearly better than random, but only {base['n']} trades; it needs 30+ before it counts as proven." if clear
+                else " — indistinguishable from random entries in this sample, so the direction/timing logic is not adding value yet; results are being driven by the exit rule and cost.")
         out.append({"level": lvl, "text": f"Versus random entries: random CE/PE entries with the same exit made {rnd['avg']:+.1f} points per trade (n={rnd['n']}); the signals made {base['avg']:+.1f}. "
-                    f"Signal edge = {edge:+.1f} points per trade" + (" — statistically real." if lvl == "good" else " — the signals are WORSE than guessing." if lvl == "bad"
-                    else " — indistinguishable from random entries in this sample, so the direction/timing logic is not adding value yet; results are being driven by the exit rule and cost.")})
+                    f"Signal edge = {edge:+.1f} points per trade" + tail})
     if c.get("median_mfe") is not None:
         out.append({"level": "info", "text": f"After a confirmed signal the market typically went {c['median_mfe']} points your way at best and {c['median_mae']} points against you "
                     f"before the horizon. {c['pct_reach_20']}% reached +20, {c['pct_reach_30']}% reached +30, {c['pct_reach_40']}% reached +40."
@@ -515,6 +533,15 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
             rep["verdict"].insert(0, {"level": "good" if a_["avg"] > 0 else "bad",
                                       "text": f"Live exit plan (stop {sl_m:g} ATR / target {tg_m:g} ATR, square-off 15:20): {a_['n']} trades, {a_['win_rate']}% winners, "
                                               f"{a_['avg']:+.1f} pts per trade ({a_['total']:+.0f} total).{halves}"})
+            atr_st = [x for x in rep.get("strategies", []) if x["name"].startswith("ATR ") and x.get("n", 0) >= MIN_N]
+            if atr_st:
+                top = max(atr_st, key=lambda x: x["avg"])
+                better = top["avg"] > a_["avg"] + 1.0
+                rep["verdict"].insert(1, {"level": "action" if better else "info",
+                                          "text": f"Same 1.5 ATR stop, managed exit: “{top['name']}” → {top['win_rate']}% winners, {top['avg']:+.1f} pts per trade "
+                                                  f"(n={top['n']}) versus {a_['avg']:+.1f} for the live 1.5/1.5 ATR plan. "
+                                                  + ("Letting winners run with a trailing stop beats the fixed target here — re-check on the next run before switching."
+                                                     if better else "The fixed 1.5 ATR target is as good or better — keep it.")})
     except Exception:
         pass
     wf = winrate_finder(conf_rows)
@@ -525,7 +552,8 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
             unit = " ATR" if b["kind"] == "ATR" else " pts"
             rep["verdict"].insert(1, {"level": "good", "text": f"≥ 70 % winners in BOTH halves of the period: target {b['target']:g}{unit} / stop {b['stop']:g}{unit} → "
                                       f"{b['all']['win_rate']}% winners, {b['all']['avg']:+.1f} pts/trade overall (first half {b['first']['win_rate']}% / {b['first']['avg']:+.1f}, "
-                                      f"second half {b['second']['win_rate']}% / {b['second']['avg']:+.1f}). Use this exit on the Signals page (Exit plan: High win-rate) only if it keeps holding on the next run."})
+                                      f"second half {b['second']['win_rate']}% / {b['second']['avg']:+.1f})."
+                                      + (" Its stop is tighter than the 1.5 ATR minimum the live plan keeps, so it is shown for comparison only." if (b['kind'] != 'ATR' and b['stop'] < 1.5 * (rep.get('median_atr') or 0)) or (b['kind'] == 'ATR' and b['stop'] < 1.5) else " You can set it on the Signals page (custom target / stop in ATR) if it holds on the next run.")})
         else:
             nb = wf["near"][0] if wf["near"] else None
             rep["verdict"].insert(1, {"level": "info", "text": "No exit reached 70 % winners with a positive average in BOTH halves of this period."

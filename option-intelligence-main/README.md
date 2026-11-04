@@ -1,5 +1,18 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.19.6 - real-time push over the live socket, diagnostics corrections
+
+**Why it felt slow:** only option ticks came over the WebSocket (every 0.5 s). The chart re-downloaded **10 days of candles** and the score / decision / buy plan were fetched over REST every 2-4 s, one after the other - on a phone most of that time was spent downloading the same history again.
+
+**Now (`/ws/live`):** the page subscribes once (`{"type":"sub", interval, mode, score_min, reconfirm}`) and the server pushes
+* `index` - the index price every time it moves (checked every 0.25 s, `WS_TICK_SEC`);
+* `bars` - only the last 3 candles of the chart interval, whenever they change (forming bar incl. futures volume), merged into the chart in place;
+* `analysis` - the shared analysis (score, regime, final decision, buy plan, reconfirmation) the moment a newer one is computed (about every second while the market is open, `WS_PUSH_SEC`);
+* `ticks` - all option ticks, once a second.
+While pushes are arriving the full REST reload runs only every 30 s as a safety net; if the socket drops, the old 2 s polling takes over automatically. The analysis itself still depends on Upstox's REST intraday candles (cached 3 s), so a new 1-minute bar's indicators can be up to ~3 s behind the tick price - the price and forming candle are tick-live.
+
+**Diagnostics corrections (latest NIFTY files, 5 Oct - 4 Nov):** live 1.5/1.5 ATR plan: standard 15 trades 60 % / +6.5 pts, scalp 22 trades 59 % / +7.5 pts; 30/20 points exit 73 % / +13.3 and 68 % / +10.5. The best exit in both files was a trailing stop, so diagnostics now also test **ATR trailing exits that keep your 1.5 ATR minimum stop** (trail 1 ATR once +1 / +1.5 ATR, trail 0.75 ATR once +1.2 ATR, half out at +1.5 ATR) and say whether one beats the live plan. The "versus random entries" line no longer calls a +14-16 pt edge "indistinguishable from random" just because there are fewer than 30 trades (it now says "better than random, not yet proven"), and the ≥ 70 % finder no longer points at the removed "High win-rate" plan - it says when its stop is tighter than your 1.5 ATR minimum. Live entry rules are unchanged: 15-22 trades are not enough to justify re-tuning them.
+
 ## v1.19.5 - fixes from the 5 diagnostics files, 1.5 ATR stop, signal board
 
 **What the data showed (5 Oct - 4 Nov 2026, NIFTY 5m, scalp + standard, 30/20 exit, 4 pts cost):**

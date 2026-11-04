@@ -1,6 +1,7 @@
-const FRONTEND_VERSION="1.19.5";
+const FRONTEND_VERSION="1.19.6";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
+let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastOptionAnalysis=null, lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
@@ -539,9 +540,12 @@ function optionRelVolume(cs,intervalMin){
   const prior=priorRaw.map(x=>Math.min(x,cap)).reduce((a,b)=>a+b,0)/20;
   return prior>0?{rel:last3/prior,last3,prior,total:v.reduce((a,b)=>a+b,0),bars:use.length,sessionOnly:sess.length>=23}:null;
 }
+let optVolAt=0,optVolKey="";
 async function loadOptionVolume(){
   if(!paperSelected){lastOptionVol={none:true};renderSignal();return}
-  const sel=paperSelected,name=`${sel.type} ${sel.strike}`;
+  const sel=paperSelected,name=`${sel.type} ${sel.strike}`,vk=`${sel.instrument_key}|${getInterval()}`;
+  if(vk===optVolKey&&Date.now()-optVolAt<5000)return;      // v1.19.6: analysis now arrives every second; volume needs no more than 5 s
+  optVolKey=vk;optVolAt=Date.now();
   try{
     const d=await api(`/api/candles?symbol=${encodeURIComponent(sel.symbol)}&instrument_key=${encodeURIComponent(sel.instrument_key)}&interval=${getInterval()}&days=5`);
     const r=optionRelVolume(prepCandles(d.candles),getInterval());
@@ -569,6 +573,7 @@ async function refreshSignalContext(){
   renderSignal();
 }
 async function refresh(){
+  sendLiveSub();lastFullRefresh=Date.now();
   if($("chartView").value==="option"){await refreshChartSource();try{await refreshSignalContext()}catch(e){$("analysisNote").textContent=e.message}loadOptionVolume();$("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()} · option premium view${paperSelected?"":" · select an option contract"}`;return}
   const manual=!refreshBusy;if(manual){$("refreshBtn").disabled=true;$("refreshBtn").textContent="Loading…"}
   try{
@@ -593,6 +598,13 @@ async function runAnalysis(force){
     const sym=getSymbol(),interval=getInterval();
     let a;try{a=await api(`/api/analysis?symbol=${sym}&interval=${interval}&mode=${getMode()}&score_min=${getScoreMin()}&reconfirm=${getReconfirm()}`)}catch(e){a={status:"unavailable",decision:"WAIT",message:`Analysis unavailable: ${e.message}`,score:0,bull_score:0,bear_score:0};}
     if(sym!==getSymbol()||interval!==getInterval())return;   // the user switched symbol/timeframe while this was running
+    applyAnalysis(a);
+  }catch(e){$("analysisNote").textContent=e.message}
+  finally{analysisBusy=false}
+}
+// v1.19.6: one renderer for the analysis, used by the REST poll AND by the result the live socket pushes the moment it is computed.
+function applyAnalysis(a){
+  {
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";
     $("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
     $("decision").textContent=a.decision||"WAIT";
@@ -605,8 +617,7 @@ async function runAnalysis(force){
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
     $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
     lastAnalysis=a;lastAnalysisAt=Date.now();renderSignal();loadOptionVolume();
-  }catch(e){$("analysisNote").textContent=e.message}
-  finally{analysisBusy=false}
+  }
 }
 function renderMarketPill(m){
   const el=$("marketStatus");if(!el||!m)return;
@@ -787,6 +798,9 @@ function startAutoRefresh(){
     if(document.visibilityState!=="visible")return;
     if(refreshBusy&&Date.now()-refreshBusySince>30000)refreshBusy=false;        // watchdog
     if(refreshBusy)return;
+    sendLiveSub();
+    // v1.19.6: while the live socket is pushing candles + analysis, the full REST reload only runs every 30 s as a safety net.
+    if(livePushFresh()&&Date.now()-lastFullRefresh<30000)return;
     refreshBusy=true;refreshBusySince=Date.now();
     try{await refresh()}catch(e){console.warn("Auto-refresh failed:",e)}finally{refreshBusy=false}
   },sec*1000);
@@ -893,6 +907,48 @@ setInterval(async()=>{
       if(q.status!=="LIVE_TICK"&&marketOpen)applyIndexTick({ltp:q.ltp,close_price:q.close_price,age_seconds:0,fresh:true,rest:true})}}
   catch{}finally{restPriceBusy=false}
 },2000);
+// ---- v1.19.6 real-time push ------------------------------------------------------------------------------------------------
+function liveSubObj(){return{type:"sub",interval:getInterval(),mode:getMode(),score_min:getScoreMin(),reconfirm:getReconfirm(),view:$("chartView").value==="option"?"option":"index"}}
+function liveSocketOpen(){try{return !!liveSocket&&liveSocket.readyState===WebSocket.OPEN}catch{return false}}   // TDZ-safe: may run before the socket code below is initialised
+function sendLiveSub(){
+  if(!liveSocketOpen())return;
+  const o=liveSubObj(),k=JSON.stringify(o);if(k===liveSubSent)return;
+  try{liveSocket.send(k);liveSubSent=k;wsBarsAt=wsAnalysisAt=0}catch{}
+}
+function livePushFresh(){
+  if(!liveSocketOpen()||!marketOpen)return false;
+  const now=Date.now(),idx=$("chartView").value!=="option";
+  return now-wsAnalysisAt<8000&&(!idx||now-wsBarsAt<8000);
+}
+function onLiveAnalysis(m){
+  const o=liveSubObj();
+  if(m.symbol!==getSymbol()||m.interval!==o.interval||m.mode!==o.mode||m.score_min!==o.score_min||m.reconfirm!==o.reconfirm||!m.data)return;
+  wsAnalysisAt=Date.now();
+  const a=m.data;
+  if(o.view==="option"){
+    lastAnalysis=a;lastAnalysisAt=Date.now();
+    $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
+    $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";renderSignal();
+  }else applyAnalysis(a);
+  const lu=$("lastUpdated");if(lu&&o.view!=="option")lu.textContent=`Live push ${new Date().toLocaleTimeString()} · analysis ${a.cache_age_s!=null?fmt(a.cache_age_s,1)+" s old":"new"}`;
+}
+// The server sends the last 3 candles of the chart interval whenever they change: replace / append them in place, so the chart
+// (incl. volume, EMA, VWAP) moves without re-downloading 10 days of candles.
+function mergeLiveBars(m){
+  if(chartSource!=="index"||$("chartView").value!=="index"||!currentCandles.length||!(m.candles||[]).length)return;
+  let appended=false,changed=false;
+  for(const b of m.candles){
+    const t=toChartTime(b.time);if(!Number.isFinite(t)||![b.open,b.high,b.low,b.close].every(v=>Number.isFinite(+v)))continue;
+    let j=-1;for(let i=currentCandles.length-1;i>=Math.max(0,currentCandles.length-6);i--){if(toChartTime(currentCandles[i].time)===t){j=i;break}}
+    const lastT=toChartTime(currentCandles[currentCandles.length-1].time);
+    if(j>=0){const c=currentCandles[j];if(+c.open!==+b.open||+c.high!==+b.high||+c.low!==+b.low||+c.close!==+b.close||+(c.volume||0)!==+(b.volume||0)){currentCandles[j]={...b};changed=true}}
+    else if(t>lastT){currentCandles.push({...b});appended=changed=true}
+  }
+  if(!changed)return;
+  const now=Date.now();
+  if(appended||now-lastBarsRender>2000){lastBarsRender=now;renderCandles(currentCandles)}
+  else{const b=currentCandles[currentCandles.length-1];try{candleSeries.update({time:toChartTime(b.time),open:+b.open,high:+b.high,low:+b.low,close:+b.close})}catch{}}
+}
 function connectLiveSocket(){
   // One socket at a time. Old handlers are detached first so closing it cannot schedule a second reconnect.
   clearTimeout(liveReconnectTimer);
@@ -901,11 +957,15 @@ function connectLiveSocket(){
   const proto=location.protocol==="https:"?"wss:":"ws:";
   const ws=new WebSocket(`${proto}//${location.host}/ws/live?symbol=${encodeURIComponent(getSymbol())}`);
   liveSocket=ws;
-  ws.onopen=()=>{if(gen!==liveSocketGen)return;$("streamStatus").textContent="CONNECTED";$("streamStatus").className="pill ok"};
+  ws.onopen=()=>{if(gen!==liveSocketGen)return;liveSubSent="";wsBarsAt=wsAnalysisAt=0;sendLiveSub();$("streamStatus").textContent="CONNECTED";$("streamStatus").className="pill ok"};
   ws.onmessage=ev=>{
     if(gen!==liveSocketGen)return;
     try{
-      const m=JSON.parse(ev.data),ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));
+      const m=JSON.parse(ev.data);
+      if(m.type==="index"){applyIndexTick(m.index);return}
+      if(m.type==="bars"){if(m.interval===getInterval()){wsBarsAt=Date.now();mergeLiveBars(m)}return}
+      if(m.type==="analysis"){onLiveAnalysis(m);return}
+      const ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));
       renderLiveTicks(ticks);
       applyIndexTick(m.index);
       if(paperSelected)ticks.forEach(t=>{if(t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});
