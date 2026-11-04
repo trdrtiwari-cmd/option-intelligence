@@ -1,0 +1,18 @@
+# Keeps a Render Free service awake so the background alert monitor keeps running when nobody has the app open.
+# Setup: GitHub repo > Settings > Secrets and variables > Actions > New secret  APP_URL = https://YOUR-APP.onrender.com
+# GitHub runs scheduled jobs on a best-effort basis (often a few minutes late); UptimeRobot / cron-job.org every 5 min is more regular.
+name: keepalive
+on:
+  schedule:
+    - cron: "*/5 3-11 * * 1-5"      # every 5 min, 08:30-17:30 IST on weekdays (UTC hours 3-11)
+  workflow_dispatch: {}
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          if [ -z "$APP_URL" ]; then echo "Set the APP_URL secret"; exit 1; fi
+          curl -fsS --retry 3 --retry-delay 5 --max-time 60 "${APP_URL%/}/health"

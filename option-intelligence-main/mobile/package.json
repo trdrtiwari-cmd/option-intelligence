@@ -1,0 +1,26 @@
+{
+  "name": "option-intelligence-mobile",
+  "version": "1.18.0",
+  "private": true,
+  "description": "Native Android / iOS shell for the Option Intelligence web app (loads your hosted site).",
+  "scripts": {
+    "set-url": "node set-url.mjs",
+    "assets": "capacitor-assets generate --iconBackgroundColor '#0b1220' --splashBackgroundColor '#0b1220'",
+    "android:add": "cap add android",
+    "android:sync": "node set-url.mjs && cap sync android",
+    "android:open": "cap open android",
+    "ios:add": "cap add ios",
+    "ios:sync": "node set-url.mjs && cap sync ios",
+    "ios:open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/ios": "^6.1.2",
+    "@capacitor/push-notifications": "^6.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^6.1.2"
+  }
+}
