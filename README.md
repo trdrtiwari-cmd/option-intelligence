@@ -1,21 +1,39 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
-## v1.18.14 - push alerts as close to "always on" as browsers allow
+## v1.19.0 - fewer missed moves, option leg on the signal, a real Daily Signal Record
 
-* The Android app asks for notification permission at launch (no tap needed). In the browser/PWA the first tap on each page load asks (up to 3 times), and an orange bar at the top offers a one-tap **Turn on** until push is on; it also explains how to unblock notifications or add the app to the iPhone Home Screen.
+**1. Which indicator was costing the moves (and what changed)**
+Your 92/100 UPTREND read still said WAIT, and only one signal (a loss) was logged all day. I replayed 300 simulated trend / chop days bar by bar through `indicators.analyze` and removed one gate at a time ("leave-one-gate-out"). Missed trend days / trend-day P/L (standard mode, 227 trend days):
 
-## v1.18.13 - choose which signals send a notification
+| Gate removed | missed trend days | trend-day P/L | chop-day P/L |
+|---|---|---|---|
+| none (v1.18.11) | 150 | +2,254 | -544 |
+| **RSI "overextended" ceiling (< 68 CE / > 32 PE)** | **89** | **+4,123** | -597 |
+| CE needs price-structure | 135 | +3,059 | -634 |
+| "Not chasing" | 126 | +3,042 | -540 |
+| ADX / Supertrend / HTF / candle / RSI slope | 146-150 | about the same | about the same |
 
-* New **Notifications** setting on the phone (More menu) and next to *Enable push alerts* on the terminal: **All signal changes** or **Confirmed buy signals only**. It is saved on your account and the server applies it per account, so it works with the app closed.
-* *All signal changes* = setup detected, CONFIRMED, failed reconfirmation, and any other change of the final signal (e.g. WATCH CE to CONFLICT). *Confirmed only* = just CONFIRMED buy CE/PE. Day summary, token-expired, monitor-offline and test alerts always arrive. Default is *All* (same alerts as before, plus changes).
-* Telegram / ntfy / email still follow `ALERT_EVENTS`.
+* **RSI ceiling = the one that hurts.** RSI is a lagging, mean-reverting oscillator: in a genuine trend it sits above 68 (below 32) for most of the move, so the gate shut the door exactly when price structure said "trend". It is now **72 / 28 when price structure (higher highs, EMA 9/21, range break) confirms the trend in the signal's direction**, and stays 68 / 32 otherwise. Climactic RSI (below 28, or above 72) is still blocked. Override: `RSI_CE_MAX_TREND`, `RSI_PE_MIN_TREND` (68 / 32 restores v1.18).
+* **Two "experimental" fusion gates removed.** `score < 90` blocked the *strongest* setups (that is the 92/100 WAIT in your screenshot) and `before 13:30` duplicated the entry window with a hard-coded time, so `ENTRY_CUTOFF` could never take effect. The entry window (`ENTRY_CUTOFF`, default 13:30) is now the only time cut-off.
+* ADX, Supertrend, HTF, the candle gate and the RSI slope were redundant with price structure (removing any of them changed almost nothing), so they were left alone.
+* **Honest limit:** the study uses simulated days (no market data can be pulled from the build environment), so it proves *which gate delays signals*, not what the new edge earns on real NIFTY. Run `/diagnostics` on real data with `RSI_CE_MAX_TREND=68` and `=72` and keep whichever is better.
 
-## v1.18.12 - push stays on, owner check fixed, signal log follows the terminal
+**2. The -74 point "stop" bug (why the one signal lost so much)**
+A 15-pt stop was booked as -74 pts because the exit engine only looked at the price it happened to see; a sleeping server booked the stop at the price it woke up to. Exits are now **candle-accurate**: the engine walks every bar after the entry bar, fills the stop *at the stop* (a bar that opens through it is a real gap, filled at the open), stop first when a bar touches both, and trades from an earlier session are reconstructed from candles to the 15:20 square-off instead of being marked EXPIRED.
 
-* **Push alerts no longer need enabling again and again.** The phone now shows its last known state instantly, silently re-registers with the server on every open / return to the app / every 10 min whenever notification permission is granted, and asks for permission once on the first tap (at most once a day; never when blocked). A slow service worker is no longer read as "push off".
-* A 400 reply from the push service no longer deletes a phone's registration (only 401/403/404/410 do).
-* **"No web device is registered for the configured owner account"** now counts Android-app (native) devices too, and tells you which user id(s) actually have devices. Either set `PUSH_OWNER_USER_ID` to that id or leave it empty to notify every account.
-* **Signal log:** the background monitor now also analyses the settings (interval / mode / score) your terminal used in the last 6 hours (max 3 extra; `ALERT_FOLLOW_TERMINAL=0` turns it off), so confirmed signals are logged even when the page is closed. `/api/push/status` shows the last logged signal and any write error.
+**3. Option leg: the chart follows the signal, BUY needs a profit check**
+* WATCH or CONFIRMED CE -> the chart moves **by itself** to the CE **two strikes above the ATM**; PE -> the PE **two strikes below the ATM** (out of the money). `OPTION_STRIKE_OFFSET` (2) and `OPTION_STRIKE_SIDE` (`OTM`, or `ITM`) change it; the terminal select "Follow signal contract" switches it off. The contract is **locked** for the life of the setup (no hopping between strikes) and released if price runs past it or the setup is gone 5 min. If the chart was switched automatically it returns to the index 3 min after the setup disappears.
+* CONFIRMED (every gate + the 60 s reconfirm hold) still is not a BUY. The contract must pass a **profit check**: premium usable, spread, its own premium chart rising, room to the nearest swing high/low or round number, and reward : risk >= `OPTION_MIN_RR` (1.3) after costs. **The target is set by that analysis**: the normal 3 ATR target, pulled back to just short of the nearest wall. Pass -> "BUY NIFTY 24050 CE" with buy price, stop-loss, target; fail -> "CONFIRMED CE - NO BUY" with the reasons (and an alert saying why). If the option chain is unavailable the index setup is logged on index levels and labelled so.
+* Alerts now carry the contract, buy price, stop and target. One setup = one logged signal (no stacking while a trade of that side is open).
+
+**4. Daily Signal Record** (`/signals`)
+Every BUY is recorded with: contract, buy price, stop-loss, target (option premium **and** index levels), exit, status and **net P/L in index points and in rupees per lot** (real contract price at exit when the live stream has it, otherwise entry + delta x index move, labelled "est."). Day / month results include net rupees. CSV / Excel exports carry the new columns.
+
+**5. Mobile text**
+Table cells wrapped letter by letter ("Si/g/n/al/s", "Me/diu/m", "23,/943/.68") because every cell was allowed to break anywhere. Cells now keep their text whole; long text columns wrap at words; the record and results tables become one card per row on a phone. Terminal cards show one fact per line (regime evidence, server monitor), the score card names the side, and the Decision card says what it is waiting for instead of "hard gates not met".
+
+New environment variables: `OPTION_LEG` (0 turns the option leg off), `OPTION_STRIKE_OFFSET`, `OPTION_STRIKE_SIDE`, `OPTION_MIN_RR`, `OPTION_SWING_SPAN`, `OPTION_MIN_PREMIUM`, `OPTION_MAX_SPREAD_PCT`, `RSI_CE_MAX_TREND`, `RSI_PE_MIN_TREND`. Tests: `tests/test_option_plan.py` (15 new).
+
 
 ## v1.18.11 - alerts that actually arrive + faster data
 

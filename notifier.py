@@ -115,17 +115,24 @@ async def send_alert(title, body, priority="default", force=False):
 
 
 def format_event(event, sym, interval, mode, side, a, rc, levels=None, now_text=""):
-    """(title, body, priority) for a reconfirmation event."""
+    """(title, body, priority) for a reconfirmation event. levels may carry the option leg: contract, opt_entry, opt_sl, opt_target, rr."""
     price = a.get("last_close")
     score = a.get("score")
+    levels = levels or {}
     lv = ""
-    if levels and levels.get("entry"):
-        lv = f"\nEntry ~{levels['entry']:,.0f} | SL {levels.get('stop_loss') or '-'} | Target {levels.get('target') or '-'} (index pts)"
+    if levels.get("entry"):
+        lv = f"\nIndex entry ~{levels['entry']:,.0f} | SL {levels.get('stop_loss') or '-'} | Target {levels.get('target') or '-'} (index pts)"
+    opt = ""
+    if levels.get("contract") and levels.get("opt_entry"):
+        opt = (f"\nBUY {levels['contract']} @ {levels['opt_entry']:,.2f} | SL {levels.get('opt_sl') or '-'} | Target {levels.get('opt_target') or '-'}"
+               + (f" | R:R {levels['rr']}" if levels.get("rr") else ""))
     head = {"STARTED": f"{sym} {side} setup detected - reconfirming",
-            "CONFIRMED": f"{sym} BUY {side} - CONFIRMED",
+            "CONFIRMED": f"{sym} BUY {side} - CONFIRMED" + (f" ({levels['contract']})" if levels.get("contract") else ""),
+            "NOBUY": f"{sym} {side} confirmed - NO BUY (profit check)",
             "FAILED": f"{sym} {side} setup failed reconfirmation"}.get(event, f"{sym} {side} {event}")
     detail = {"STARTED": f"Not an entry yet. It must hold for {rc.get('window')}s without price moving {rc.get('limit_atr')} ATR against it.",
-              "CONFIRMED": f"Held {rc.get('window')}s and passed every terminal gate (check the page for the S/R-room and option-volume gates before entering).",
+              "CONFIRMED": f"Held {rc.get('window')}s, passed every terminal gate and the option profit check (check the page for the S/R-room and option-volume gates before entering).",
+              "NOBUY": f"The index setup held, but not as a trade: {levels.get('why') or 'the option profit check failed'}",
               "FAILED": f"Did not hold: {rc.get('reason')}."}.get(event, "")
-    body = f"{detail}\n{sym} {interval}m | {mode} | index {price:,.2f} | score {score}/100 | {now_text}{lv}\nAnalysis only - not an order."
+    body = f"{detail}\n{sym} {interval}m | {mode} | index {price:,.2f} | score {score}/100 | {now_text}{lv}{opt}\nAnalysis only - not an order."
     return head, body, ("high" if event == "CONFIRMED" else "default")

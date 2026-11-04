@@ -109,3 +109,14 @@ button.danger{background:#7a2433;border-color:#a33648;color:#fff}
 
 /* Keep the full index quote and its daily change legible on narrow cards. */
 #lastPrice{font-variant-numeric:tabular-nums;white-space:nowrap;font-size:clamp(19px,2vw,24px);letter-spacing:-.25px;overflow-wrap:normal;}#priceChange{display:block;min-width:0;line-height:1.45;overflow-wrap:anywhere;}
+
+/* v1.19 - one fact per line in the status cards; option leg box */
+#regimeSub,#decisionSub,#pushStatus,.stat .sub{white-space:pre-line}
+.op-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:6px 0 10px}
+.op-grid>div{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px;min-width:0}
+.op-grid span{display:block;color:var(--muted);font-size:11px;margin-bottom:3px}
+.op-grid b{font-size:15px;overflow-wrap:anywhere}
+.pill.live{color:var(--green);border-color:#24634f}
+.rec-side{font-weight:800}
+.rec-ce{color:var(--green)}.rec-pe{color:var(--red)}
+.table-wrap td.wrapcol,.table-wrap th.wrapcol{white-space:normal;min-width:170px;max-width:340px;text-align:left}

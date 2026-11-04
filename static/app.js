@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.18.14";
+const FRONTEND_VERSION="1.19.0";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
@@ -6,6 +6,8 @@ let lastOptionAnalysis=null, lastVolumeSource=null, lastAnalysis=null, lastSR=nu
 const $ = id => document.getElementById(id);
 function toast(msg){const el=$("toast");el.textContent=msg;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),4500)}
 function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("en-IN",{maximumFractionDigits:n,minimumFractionDigits:n})}
+// Long "a · b · c" notes read as one wall of text on a phone: one fact per line instead.
+function noteLines(t){return String(t||"").split(" · ").map(x=>x.trim()).filter(Boolean).join("\n")}
 function getSymbol(){return $("symbol").value}
 function getInterval(){return Number($("interval").value)}
 function getMode(){const m=$("signalMode");return m?m.value:"standard"}
@@ -236,8 +238,8 @@ function applyChartViewCards(){
   const optView=$("chartView").value==="option"&&paperSelected&&chartSource==="option";
   if(!optView){
     $("decision").style.color="";
-    if($("regimeSub")&&idxOk)$("regimeSub").textContent=`Chart view: index · ${idx.regime_note||"Trend / sideways filter"}`;
-    if(scoreSub&&idxOk)scoreSub.textContent="Index score · 0–100 · not win probability";
+    if($("regimeSub")&&idxOk)$("regimeSub").textContent=`Chart view: index\n${noteLines(idx.regime_note||"Trend / sideways filter")}`;
+    if(scoreSub&&idxOk)scoreSub.textContent=`${idx.side?(idx.side==="CE"?"Bullish":"Bearish")+" lean ("+idx.side+")":"No clear side"} · bull ${idx.bull_score} / bear ${idx.bear_score}\nScore 0–100, not a win probability`;
     return;
   }
   const sel=paperSelected,name=`${sel.type} ${sel.strike}`,o=lastOptionAnalysis&&lastOptionAnalysis._sel===sel?lastOptionAnalysis:null;
@@ -256,7 +258,7 @@ function applyChartViewCards(){
   $("score").textContent=`${bull}/100`;
   if(scoreSub)scoreSub.textContent=`${name} premium · buy-strength · bear ${bear}`+(idxOk?` · index ${idx.score}/100`:"");
   $("regime").textContent=optTrend;$("regime").style.color=trendColor(optTrend);
-  if($("regimeSub"))$("regimeSub").textContent=`Chart (${name} premium): ${optTrend} · Index: ${idxTrend}`+(idxOk&&idx.regime_note?` — ${idx.regime_note}`:"");
+  if($("regimeSub"))$("regimeSub").textContent=`Chart (${name} premium): ${optTrend}\nIndex: ${idxTrend}`+(idxOk&&idx.regime_note?`\n${noteLines(idx.regime_note)}`:"");
   // decision: index signal side/status + premium direction
   const st=lastGateState||{},idxSide=st.side||null,idxStatus=st.status||"WAIT";
   const optUp=bull>bear&&bull>=55,optDown=bear>bull&&bear>=55;
@@ -271,7 +273,51 @@ function applyChartViewCards(){
   if($("signalExplanation"))$("signalExplanation").textContent=sub;
 }
 // ---------------- Signal confirmation (backend checks + S/R room gate) ----------------
-function renderSignal(){_renderSignalBase();try{applyChartViewCards()}catch(e){console.warn("chart-view cards",e)}}
+function renderSignal(){_renderSignalBase();try{applyChartViewCards()}catch(e){console.warn("chart-view cards",e)}try{renderOptionPlan(lastAnalysis);autoFollowChart(lastAnalysis)}catch(e){console.warn("option leg",e)}}
+// ---------------- v1.19: option leg - the chart follows the signal, and the BUY carries a premium entry / stop / target ----------------
+let autoFollowKey=null,autoSwitched=false,optionGoneSince=null;
+const rs=v=>v==null||!Number.isFinite(Number(v))?"—":"₹"+Number(v).toLocaleString("en-IN",{maximumFractionDigits:0});
+function renderOptionPlan(a){
+  const box=$("optionPlanBox");if(!box)return;
+  const o=a&&a.option,fin=a&&a.final;
+  if(!o){box.hidden=true;return}
+  box.hidden=false;
+  const c=(o.plan&&o.plan.contract)||o.chart||{},lv=(o.plan&&o.plan.levels)||null;
+  const stage=fin&&fin.buy?"BUY":fin&&fin.level==="CONFIRMED"?"NO BUY":fin&&fin.level==="PENDING"?"RECONFIRMING":"WATCH";
+  $("opTitle").textContent=c.label?`${c.label}${o.stage==="WATCH"?" — following":""}`:`${o.side} option`;
+  $("opRule").textContent=`Contract rule: ${o.rule}. The chart ${autoFollowEnabled()?"follows it automatically":"does not follow it (switch off)"}.`;
+  const st=$("opStage");st.textContent=stage;st.className="pill "+(stage==="BUY"?"live":stage==="NO BUY"?"bad":"muted");
+  $("opEntry").textContent=lv?fmt(lv.entry):(c.ltp?fmt(c.ltp)+" (live)":"—");
+  $("opSl").textContent=lv?fmt(lv.sl)+(lv.sl_clamped?" (capped)":""):"—";
+  $("opTarget").textContent=lv?`${fmt(lv.target)} · ${lv.target_name}`:"—";
+  $("opRr").textContent=lv?`${fmt(lv.rr,2)} : 1`:"—";
+  $("opIdx").textContent=lv?`${fmt(lv.index_entry)} / ${fmt(lv.index_stop)} / ${fmt(lv.index_target)}`:"—";
+  $("opRs").textContent=lv&&lv.risk_rs!=null?`${rs(lv.risk_rs)} / ${rs(lv.reward_rs)}`:"—";
+  $("opNote").textContent=o.available?(o.plan&&o.plan.summary)||"":(o.reason||"Option contract unavailable — the index stop and target are used.");
+  const ul=$("opChecks");ul.innerHTML="";
+  ((o.plan&&o.plan.checks)||[]).forEach(k=>{const li=document.createElement("li");li.className=k.pass?"gate-pass":"gate-fail";
+    const b=document.createElement("b");b.textContent=k.pass?"✓":"✗";const t=document.createElement("span");t.textContent=" "+k.label;const d=document.createElement("small");d.textContent=k.detail||"";
+    li.appendChild(b);li.appendChild(t);li.appendChild(d);ul.appendChild(li)});
+}
+function autoFollowEnabled(){const m=$("autoFollow");return !m||m.value!=="0"}
+function autoFollowChart(a){
+  const o=a&&a.option,c=o&&o.chart;
+  if(!autoFollowEnabled())return;
+  if(!c||!c.instrument_key||c.symbol!==getSymbol()){
+    // setup gone: after 3 quiet minutes put an automatically-switched chart back on the index
+    if(autoSwitched){if(!optionGoneSince)optionGoneSince=Date.now();else if(Date.now()-optionGoneSince>180000){autoSwitched=false;autoFollowKey=null;optionGoneSince=null;$("chartView").value="index";refreshChartSource();toast("Setup gone — chart is back on the index.")}}
+    return;
+  }
+  optionGoneSince=null;
+  if(autoFollowKey===c.instrument_key)return;                 // already on this contract (a hand-made switch back to the index is respected)
+  autoFollowKey=c.instrument_key;
+  try{
+    selectPaperContract(c.type,c.strike,c.instrument_key,c.ltp,c.expiry,null);
+    if($("chartView").value!=="option"){$("chartView").value="option";refreshChartSource();autoSwitched=true}
+    toast(`${o.stage==="CONFIRMED"?"Signal":"Watch"} ${c.type}: chart moved to ${c.label||c.strike+" "+c.type} (${o.rule}).`);
+  }catch(e){console.warn("auto-follow",e)}
+}
+$("autoFollow")&&$("autoFollow").addEventListener("change",()=>{autoFollowKey=null;try{renderOptionPlan(lastAnalysis);autoFollowChart(lastAnalysis)}catch{}});
 function _renderSignalBase(){
   const a=lastAnalysis,gl=$("gateList"),rows=$("checkRows");
   if(!gl||!rows)return;
@@ -300,10 +346,14 @@ function _renderSignalBase(){
   const gstatus=(side&&gates.length&&!failed.length)?"CONFIRMED":(side&&dom>=55&&failed.length<=2)?"WATCH":"WAIT";
   const fin=a.final||null;
   if(fin&&gstatus!=="CONFIRMED"&&(fin.level==="STALE"||fin.level==="CONFLICT"||fin.level==="PENDING")){text=fin.action;sub=fin.headline;cls="stale";color="var(--yellow)"}
+  // v1.19: the server decides BUY (index setup CONFIRMED + held the reconfirm window + the option profit check passed) or NO BUY (and says why)
+  if(fin&&fin.buy){text=fin.action;sub=fin.headline;cls="live";color=side==="CE"?"var(--green)":"var(--red)"}
+  else if(fin&&fin.level==="CONFIRMED"&&/NO BUY/.test(fin.action||"")){text=fin.action;sub=fin.headline;cls="stale";color="var(--yellow)"}
   lastGateState={side,text,status:gstatus,failed:failed.map(g=>g.label),dom,gates:gates.map(g=>({label:g.label,pass:g.pass,detail:g.detail||""})),timing:a.timing||null,final:fin};
   alertTransitions(a,gstatus,side,fin);
   const tm=a.timing&&a.timing.generated_at_text?a.timing:null;
-  if($("decisionSub"))$("decisionSub").textContent=(gstatus==="CONFIRMED"?"Gates pass — enter only on a held retest":"No entry — hard gates not met")+(tm&&side?` · signal ${tm.generated_at_text}`:"");
+  const waitFor=failed.slice(0,2).map(g=>g.label.replace(/\s*\(.*$/,"")).join("; ");
+  if($("decisionSub"))$("decisionSub").textContent=(fin&&fin.buy?`BUY signal — buy price, stop-loss and target are in the option box${marketOpen?"":" (market closed: last session)"}`:gstatus==="CONFIRMED"?"Gates pass — waiting for the reconfirm hold and the option profit check":side?`No entry yet — waiting for:\n${waitFor||"more confirmation"}`:"No directional edge yet")+(tm&&side?`\nSignal time ${tm.generated_at_text}`:"");
   renderSignalTime(a);renderDashChecks(a);
   $("finalSignal").textContent=text;$("finalSignal").style.color=color;$("finalSignalSub").textContent=sub;
   $("confirmBadge").textContent=text.split(" SETUP")[0];$("confirmBadge").className="pill "+cls;
@@ -508,7 +558,7 @@ async function refreshSignalContext(){
   lastAnalysis=a;lastAnalysisAt=Date.now();
   if(optPromise){const o=await optPromise;if(sel===paperSelected)lastOptionAnalysis={...o,_sel:sel}}
   $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
-  $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
+  $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?noteLines(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
   $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
   renderSignal();
 }
@@ -547,7 +597,7 @@ async function runAnalysis(force){
     $("breakHigh").textContent=fmt(a.breakout_high);$("breakLow").textContent=fmt(a.breakdown_low);
     $("analysisNote").textContent=[a.note||a.message||"Analysis loaded.",a.score_basis].filter(Boolean).join(" · ");
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
-    $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
+    $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?noteLines(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
     lastAnalysis=a;lastAnalysisAt=Date.now();renderSignal();loadOptionVolume();
   }catch(e){$("analysisNote").textContent=e.message}
   finally{analysisBusy=false}
@@ -1257,27 +1307,21 @@ function restoreSavedContract(){try{
 restoreSavedContract();
 window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includes("oi-settings-v1"))restoreSavedContract()});
 
-// v1.18.12: push alerts switch themselves on and stay on. The button used to read "Enable push alerts" after every reopen because
-// (a) the check gave up after 4 s while the phone was still waking its service worker, and (b) a missing registration was only
-// repaired when that check passed. Now: the last known state is shown at once, a granted permission is always re-registered with the
-// server in the background (on open, on returning to the app, every 10 min), and the first tap anywhere asks for permission once.
+// v1.18.11: push storage initialization compatibility; synchronized frontend version.
 (async function initPushControls(){
   const btn=$("enablePush"); if(!btn)return;
   const b64=(s)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
-  const LS_ON="oi-push-on", LS_ASKED="oi-push-asked";
-  const lsGet=k=>{try{return localStorage.getItem(k)}catch{return null}}, lsSet=(k,v)=>{try{localStorage.setItem(k,v)}catch{}};
-  const webSupported=()=>"serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window;
-  const nativePlugin=()=>window.Capacitor?.isNativePlatform?.()&&window.Capacitor?.Plugins?.PushNotifications;
+  // v1.18.11: the button shows the REAL state of this phone at once, from the browser itself (permission + push subscription),
+  // instead of waiting for a server round trip - which is slow when the server is waking up and made it look like push had
+  // switched itself off after every reopen. The server is then checked and the registration repaired in the background.
   const setLabel=on=>{btn.dataset.on=on?"1":"";btn.textContent=on?"Push alerts: ON":"Enable push alerts"};
-  const swReady=ms=>Promise.race([navigator.serviceWorker.ready,new Promise(r=>setTimeout(()=>r(null),ms))]);
   async function localPushState(){
     try{
-      if(nativePlugin())return lsGet(LS_ON)==="1";
-      if(!webSupported()||Notification.permission!=="granted")return false;
-      const reg=await swReady(10000);
-      if(!reg)return lsGet(LS_ON)==="1";            // slow service worker is not the same as "switched off"
-      return !!(await reg.pushManager.getSubscription());
-    }catch{return lsGet(LS_ON)==="1"}
+      if(!("serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window))return false;
+      if(Notification.permission!=="granted")return false;
+      const reg=await Promise.race([navigator.serviceWorker.ready,new Promise(r=>setTimeout(()=>r(null),4000))]);
+      return !!(reg&&await reg.pushManager.getSubscription());
+    }catch{return false}
   }
   function showPushStatus(s){
     const el=$("pushStatus");if(!el)return;
@@ -1286,24 +1330,45 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
     const sy=Object.entries(m.symbols||{}).map(([k,v])=>`${k} ${v.action||"—"}${v.score!=null?" "+v.score:""}`).join(" · ");
     const dev=s.devices||{};
     el.innerHTML="";
-    const line=document.createElement("div");
-    line.textContent=`Server monitor: ${m.running?"running":s.market_open?"NOT running":"idle (market closed)"} · last check ${ago(m.last_check_ago_s)} · phones registered: ${(dev.web||0)+(dev.native||0)}`+(sy?` · ${sy}`:"");
-    el.appendChild(line);
+    const add=(t,color)=>{const d=document.createElement("div");d.textContent=t;if(color)d.style.color=color;el.appendChild(d);return d};
+    add(`Server monitor: ${m.running?"running":s.market_open?"NOT running":"idle (market closed)"} · last check ${ago(m.last_check_ago_s)}`,m.running||!s.market_open?null:"var(--yellow)");
+    add(`Phones registered: ${(dev.web||0)+(dev.native||0)}`);
+    Object.entries(m.symbols||{}).forEach(([k,v])=>add(`${k}: ${v.action||"—"}${v.score!=null?" · score "+v.score:""}`));
     (s.problems||[]).forEach(p=>{const d=document.createElement("div");d.style.color="var(--yellow)";d.textContent="⚠ "+p;el.appendChild(d)});
-    if(s.last_alert){const d=document.createElement("div");d.textContent=`Last alert: ${s.last_alert.event} ${s.last_alert.symbol} ${s.last_alert.side||""} · ${new Date(s.last_alert.at*1000).toLocaleTimeString()}`;el.appendChild(d)}
+    if(s.last_alert){const d=document.createElement("div");d.textContent=`Last alert: ${s.last_alert.event} ${s.last_alert.symbol} ${s.last_alert.side||""} at ${new Date(s.last_alert.at*1000).toLocaleTimeString()}`;el.appendChild(d)}
   }
   async function loadPushStatus(){try{const s=await api("/api/push/status");showPushStatus(s);return s}catch{return null}}
   window.oiLoadPushStatus=loadPushStatus;
-
-  // Native Capacitor Android/iOS push (FCM). ask=false never shows a permission prompt.
-  async function registerNative(ask){
-    const native=nativePlugin(); if(!native)return false;
-    let perm=null; try{perm=await native.checkPermissions()}catch{}
-    if(!perm||perm.receive!=="granted"){
-      if(!ask)return false;
-      perm=await native.requestPermissions();
-      if(perm.receive!=="granted")throw new Error("Push permission not granted");
-    }
+  // Re-register this browser with the server (idempotent). Replaces a subscription made with an older/different server key.
+  async function silentWebSubscribe(){
+    try{
+      if(!(await localPushState()))return false;
+      const cfg=await api("/api/push/config"); if(!(cfg.web_push&&cfg.vapid_public_key))return false;
+      const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
+      if(sub){
+        const cur=sub.options&&sub.options.applicationServerKey?btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""):"";
+        if(cur&&cur!==cfg.vapid_public_key){await sub.unsubscribe();sub=null}
+      }
+      if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
+      await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})});
+      setLabel(true);return true;
+    }catch(e){console.warn("silent push subscribe failed",e);return false}
+  }
+  (async()=>{
+    setLabel(await localPushState());                      // instant, no network
+    loadPushStatus();                                      // status and registration repair run side by side
+    silentWebSubscribe().then(ok=>{if(ok)loadPushStatus()});
+    setInterval(()=>{if(document.visibilityState==="visible")loadPushStatus()},30000);
+  })();
+  btn.addEventListener("click",async()=>{
+    const old=btn.textContent; btn.disabled=true; btn.textContent="Enabling…";
+    try {
+      const cfg=await api("/api/push/config"); let enabled=[];
+      // Native Capacitor Android/iOS push (FCM on Android; Firebase project setup required).
+      const native=window.Capacitor?.isNativePlatform?.() && window.Capacitor?.Plugins?.PushNotifications;
+      if(native){
+        const perm=await native.requestPermissions();
+        if(perm.receive!=="granted")throw new Error("Push permission not granted");
         // Wait for the FCM token and for the server to confirm it was saved.
         // Do not report success merely because the native register() call started.
         await new Promise((resolve,reject)=>{
@@ -1339,100 +1404,17 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
             }
           })();
         });
-    return true;
-  }
-  // Browser/PWA Web Push. Idempotent: replaces a subscription made with an older/different server key and re-saves it on the server.
-  async function registerWeb(ask){
-    if(!webSupported())return false;
-    const cfg=await api("/api/push/config"); if(!(cfg.web_push&&cfg.vapid_public_key))return false;
-    if(Notification.permission==="default"){
-      if(!ask)return false;
-      lsSet(LS_ASKED,String((Number(lsGet(LS_ASKED))||0)+1));
-      const p=await Notification.requestPermission(); if(p!=="granted")throw new Error("Browser notification permission not granted");
-    }
-    if(Notification.permission!=="granted"){
-      if(ask)throw new Error("Notifications are blocked for this app. Open the browser's site settings for this address, set Notifications to Allow, then reopen the app.");
-      return false;
-    }
-    const reg=await swReady(15000); if(!reg)return false;
-    let sub=await reg.pushManager.getSubscription();
-    if(sub){
-      const cur=sub.options&&sub.options.applicationServerKey?btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""):"";
-      if(cur&&cur!==cfg.vapid_public_key){await sub.unsubscribe();sub=null}
-    }
-    if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
-    await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})});
-    return true;
-  }
-  let busy=false,lastEnsure=0;
-  async function ensure(ask){
-    if(busy)return [];
-    busy=true; lastEnsure=Date.now();
-    const enabled=[];
-    try{
-      try{if(await registerNative(ask))enabled.push("native push")}catch(e){if(ask)throw e;console.warn("native push",e)}
-      try{if(await registerWeb(ask))enabled.push("Web Push")}catch(e){if(ask)throw e;console.warn("web push",e)}
-      if(enabled.length){lsSet(LS_ON,"1");setLabel(true);loadPushStatus()}
-      return enabled;
-    }finally{busy=false}
-  }
-
-  setLabel(lsGet(LS_ON)==="1"&&(nativePlugin()||(webSupported()&&Notification.permission==="granted")));   // instant, no network
-  loadPushStatus();
-  ensure(false).then(async got=>{
-    if(!got.length&&nativePlugin()){try{got=await ensure(true)}catch(e){toast("Push setup: "+e.message)}}      // Android app: ask at launch, no tap needed
-    if(!got.length)setLabel(await localPushState());
-    banner();
-  });                                                                                                         // silent repair on every open
-  // Browsers only allow the permission prompt after a tap. So: the first tap on every page load asks (up to 3 times in total - Chrome
-  // blocks a site after 3 dismissals anyway), and a bar at the top stays visible with a one-tap "Turn on" until push is on.
-  function banner(){
-    let el=document.getElementById("pushBar");
-    const on=btn.dataset.on==="1";
-    const perm=webSupported()?Notification.permission:"unsupported";
-    const ios=/iphone|ipad|ipod/i.test(navigator.userAgent);
-    let msg="",act="";
-    if(!on&&!nativePlugin()){
-      if(perm==="denied")msg="Push alerts are blocked. Open your browser's site settings for this app, set Notifications to Allow, then reopen it.";
-      else if(perm==="unsupported"&&ios)msg="To get push alerts on iPhone: tap Share, Add to Home Screen, then open the app from the home screen.";
-      else if(perm==="default"||perm==="granted"){msg="Push alerts are off on this phone.";act="Turn on"}
-    }
-    if(!msg){if(el)el.remove();return}
-    if(!el){el=document.createElement("div");el.id="pushBar";el.style.cssText="position:sticky;top:0;z-index:50;display:flex;gap:10px;align-items:center;justify-content:space-between;padding:8px 12px;background:#7a4b00;color:#fff;font-size:14px";document.body.prepend(el)}
-    el.innerHTML="";const t=document.createElement("span");t.textContent=msg;el.appendChild(t);
-    if(act){const b=document.createElement("button");b.type="button";b.textContent=act;b.style.cssText="flex:none;padding:6px 12px;border-radius:8px;border:0;font-weight:600";b.onclick=()=>btn.click();el.appendChild(b)}
-  }
-  new MutationObserver(banner).observe(btn,{attributes:true,attributeFilter:["data-on"]});
-  if((nativePlugin()||(webSupported()&&Notification.permission==="default"))&&(Number(lsGet(LS_ASKED))||0)<3){
-    document.addEventListener("pointerup",()=>{ensure(true).catch(e=>toast("Push setup: "+e.message)).finally(banner)},{once:true});
-  }
-  document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&Date.now()-lastEnsure>60000)ensure(false)});
-  setInterval(()=>{if(document.visibilityState==="visible")loadPushStatus()},30000);
-  setInterval(()=>{if(document.visibilityState==="visible")ensure(false)},600000);
-  btn.addEventListener("click",async()=>{
-    btn.disabled=true; btn.textContent="Enabling…";
-    try{
-      const enabled=await ensure(true);
+        enabled.push("native push");
+      }
+      // Browser/PWA Web Push. Requires VAPID keys configured on the server.
+      if("serviceWorker" in navigator && "PushManager" in window && cfg.web_push && cfg.vapid_public_key){
+        const perm=await Notification.requestPermission(); if(perm!=="granted")throw new Error("Browser notification permission not granted");
+        const reg=await navigator.serviceWorker.ready; let sub=await reg.pushManager.getSubscription();
+        if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(cfg.vapid_public_key)});
+        await api("/api/push/web/subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subscription:sub.toJSON()})}); enabled.push("Web Push");
+      }
       if(!enabled.length)throw new Error("Push is not available in this browser. On iPhone, add the app to the Home Screen first (Share > Add to Home Screen) and open it from there; on Android use Chrome.");
-      toast("Enabled: "+enabled.join(" + ")+". Alerts now arrive even when the app is closed.");
-    }catch(e){toast("Push setup: "+e.message)}
-    finally{btn.disabled=false;setLabel(lsGet(LS_ON)==="1"&&btn.dataset.on==="1")}
+      toast("Enabled: "+enabled.join(" + ")+". Alerts now arrive even when the app is closed.");setLabel(true);loadPushStatus();
+    } catch(e){toast("Push setup: "+e.message);} finally {btn.disabled=false;btn.textContent=btn.dataset.on?"Push alerts: ON":"Enable push alerts";}
   });
-})();
-
-// v1.18.13: choose which signals send a push - every signal change, or only confirmed buy signals (saved on the account, used by the server).
-(function(){
-  const sel=$("pushType"); if(!sel)return;
-  const apply=m=>{if(m&&sel.value!==m)sel.value=m};
-  fetch("/api/push/prefs",{credentials:"same-origin"}).then(r=>r.ok?r.json():null).then(d=>d&&apply(d.mode)).catch(()=>{});
-  sel.addEventListener("change",async()=>{
-    const want=sel.value;
-    try{
-      const r=await fetch("/api/push/prefs",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:want})});
-      if(!r.ok)throw new Error("HTTP "+r.status);
-      toast(want==="confirmed"?"Push only for CONFIRMED buy signals.":"Push for every signal change.");
-      window.dispatchEvent(new CustomEvent("oi-notify-pref",{detail:want}));
-    }catch(e){toast("Could not save notification type: "+e.message);fetch("/api/push/prefs",{credentials:"same-origin"}).then(r=>r.json()).then(d=>apply(d.mode)).catch(()=>{})}
-  });
-  window.addEventListener("oi-notify-pref",e=>apply(e.detail));
 })();

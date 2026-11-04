@@ -102,7 +102,11 @@ def test_rsi_exhaustion_edges_v116():
     for mode in ("scalp", "standard"):
         a = S2.run(S2.selloff([-20]), mode)
         g = [x for x in a["gates"] if x["label"].startswith("Momentum not overextended")][0]
-        assert "RSI > 32 for PE" in g["label"], g["label"]
+        # v1.19: 32 stays the edge in ordinary conditions; a price-structure DOWNTREND confirmed in the signal's direction widens it to 28
+        if a["regime_label"] == "DOWNTREND":
+            assert "RSI > 28 for PE" in g["label"] and "widened" in g["detail"], (g["label"], g["detail"])
+        else:
+            assert "RSI > 32 for PE" in g["label"], g["label"]
 
 
 def test_rsi_gates_present_and_pe_direction_checked():

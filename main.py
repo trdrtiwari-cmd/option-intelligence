@@ -19,6 +19,7 @@ import dashboard_data as dd
 import diagnostics as dgn
 import signal_fusion as sf
 import signal_exits as sx
+import option_plan as op
 import notifier
 
 # Resolve the project directory before any path-backed configuration is initialized.
@@ -35,35 +36,6 @@ def _push_user(request):
     u = request.scope.get("oi_user") or {}
     return int(u.get("id") if isinstance(u, dict) else getattr(u, "id", 0) or 0)
 
-# ---- per-account notification type (v1.18.13) --------------------------------------------------------------
-# "all"       = every signal change: setup detected (STARTED), CONFIRMED, FAILED, and any other change of the final signal (CHANGED)
-# "confirmed" = only CONFIRMED buy signals. System notices (token expired, monitor offline, day summary, test) always arrive.
-PUSH_PREF_MODES = ("all", "confirmed")
-_GATED_EVENTS = ("STARTED", "FAILED", "CHANGED")
-_PUSH_PREF_CACHE = {}
-
-def _event_allowed(pref, event):
-    return pref == "all" or event not in _GATED_EVENTS
-
-def _user_pref(uid, fresh=False):
-    """Blocking (database). Cached 30 s so a burst of alerts does not hit the database per device."""
-    hit = _PUSH_PREF_CACHE.get(uid)
-    if hit and not fresh and time.time() - hit[0] < 30:
-        return hit[1]
-    try: val = acc.meta_get(f"push_pref:{uid}")
-    except Exception: return hit[1] if hit else "all"
-    val = val if val in PUSH_PREF_MODES else "all"
-    _PUSH_PREF_CACHE[uid] = (time.time(), val)
-    return val
-
-async def _rows_for_event(rows, event):
-    """Keep only the devices whose owner wants this kind of event."""
-    if event not in _GATED_EVENTS or not rows:
-        return rows
-    uids = {r["user_id"] for r in rows}
-    prefs = await asyncio.to_thread(lambda: {u: _user_pref(u) for u in uids})
-    return [r for r in rows if _event_allowed(prefs.get(r["user_id"], "all"), event)]
-
 async def _send_native_fcm(title, body, data=None):
     raw = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw: return {"configured": False, "sent": 0}
@@ -72,7 +44,7 @@ async def _send_native_fcm(title, body, data=None):
         from firebase_admin import credentials, messaging
         try: app_firebase = firebase_admin.get_app()
         except ValueError: app_firebase = firebase_admin.initialize_app(credentials.Certificate(json.loads(raw)))
-        rows = await _rows_for_event(await asyncio.to_thread(acc.push_devices, "native", _push_owner_id()), (data or {}).get("event"))
+        rows = await asyncio.to_thread(acc.push_devices, "native", _push_owner_id())
         sent = 0
         for row in rows:
             try:
@@ -101,7 +73,7 @@ async def _send_web_push(title, body, data=None):
     except Exception as exc:
         logger.warning("pywebpush not installed: %s", str(exc)[:140]); return {"configured": False, "sent": 0, "devices": 0, "error": "pywebpush not installed"}
     try:
-        rows = await _rows_for_event(await asyncio.to_thread(acc.push_devices, "web", _push_owner_id()), (data or {}).get("event"))
+        rows = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
     except Exception as exc:
         logger.warning("Push devices unreadable: %s", str(exc)[:140]); return {"configured": True, "sent": 0, "devices": 0, "error": "database unavailable"}
     payload = json.dumps({"title": title, "body": body, "url": "/", "data": data or {}})
@@ -114,9 +86,9 @@ async def _send_web_push(title, body, data=None):
             return ("ok", None)
         except Exception as exc:
             code = getattr(getattr(exc, "response", None), "status_code", None)
-            if code in (401, 403, 404, 410):
-                # 404/410: subscription gone. 401/403: the push service rejects our key for this subscription (keys changed, or
-                # an old registration). A 400 is NOT treated as dead (v1.18.12): it can be a bad request, and deleting on it made phones lose their registration. Either way it can never work again - drop it so the phone re-registers itself on next open.
+            if code in (400, 401, 403, 404, 410):
+                # 404/410: subscription gone. 400/401/403: the push service rejects our key for this subscription (keys changed, or
+                # an old registration). Either way it can never work again - drop it so the phone re-registers itself on next open.
                 await asyncio.to_thread(acc.push_delete_device, row["id"])
                 return ("dropped", f"HTTP {code}")
             logger.warning("Web push failed: %s", str(exc)[:160]); return ("failed", f"{type(exc).__name__}: {str(exc)[:100]}")
@@ -145,7 +117,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.18.14"
+APP_VERSION = "1.19.0"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1377,7 +1349,7 @@ async def _dashboard_final_for(sym, interval):
 SIGNAL_LOG_DB = Path(os.getenv("SIGNAL_LOG_DB", str(BASE_DIR / "signal_log.sqlite3")))
 SIGNAL_LOG_LOCK = threading.Lock()
 _SIGNAL_LOG_DIRTY = threading.Event()      # set whenever the log changes; the watcher mirrors it to the accounts database
-SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "target_name", "trade_status", "exit_price", "exit_time", "exit_reason", "gross_pnl_points", "net_pnl_points", "peak_points", "worst_points", "levels_backfilled", "atr_at_entry", "sl_atr_mult", "target_atr_mult", "reason"]
+SIGNAL_LOG_FIELDS = ["generated_at", "session_date", "symbol", "interval", "mode", "candle_time", "decision", "final_action", "side", "score", "regime", "pattern", "pattern_confirmed", "last_close", "entry", "stop_loss", "target", "target_name", "trade_status", "exit_price", "exit_time", "exit_reason", "gross_pnl_points", "net_pnl_points", "peak_points", "worst_points", "levels_backfilled", "atr_at_entry", "sl_atr_mult", "target_atr_mult", "contract", "opt_entry", "opt_sl", "opt_target", "opt_exit", "opt_delta", "lot", "opt_gross", "opt_net", "net_rs", "opt_basis", "buy_basis", "rr", "reason"]
 
 def init_signal_log():
     SIGNAL_LOG_DB.parent.mkdir(parents=True, exist_ok=True)
@@ -1386,49 +1358,65 @@ def init_signal_log():
         sx.ensure_columns(db)
         db.commit()
 
+def _open_trade_exists(symbol, side):
+    """True when a paper trade of this symbol and side is still open: one setup is one signal, not one signal per candle."""
+    try:
+        with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+            return bool(db.execute("SELECT 1 FROM signal_log WHERE symbol=? AND side=? AND COALESCE(trade_status,'OPEN')='OPEN' LIMIT 1", (symbol, side)).fetchone())
+    except sqlite3.Error:
+        return False
+
+
 def record_signal_row(symbol, interval, mode, a):
+    """Save a BUY signal in the Daily Signal Record: contract, buy price (premium and index), stop-loss, target, later exit and net P/L.
+    Only a CONFIRMED setup that also passed the option profit check (final.buy) is recorded; WAIT / WATCH / NO BUY never are."""
     try:
         now_ist = datetime.now(IST)
         final = a.get("final") or {}
         action = final.get("action") or a.get("decision") or "WAIT"
         side = str(final.get("side") or a.get("side") or "").upper()
-        # Keep only genuinely confirmed CE/PE setups; WAIT/WATCH/CONFLICT/STALE are never logged.
-        if str(final.get("level") or "").upper() != "CONFIRMED" or side not in ("CE", "PE"):
+        if str(final.get("level") or "").upper() != "CONFIRMED" or side not in ("CE", "PE") or not final.get("buy"):
+            return
+        if _open_trade_exists(symbol, side):
             return
         candle_time = str(a.get("last_closed_bar") or a.get("last_candle_time") or a.get("last_time") or a.get("timestamp") or a.get("last_close_time") or "")
-        # Use the last closed candle time from the analysis output where available; otherwise the data generation minute.
         if not candle_time:
             candle_time = now_ist.strftime("%Y-%m-%d %H:%M")
-        # trade_levels() returns entry_index / sl_index / targets[]; the old code read keys that do not exist,
-        # so every row was logged with blank stop and target and could never auto-exit.
-        entry_px, stop_px, target_px, target_name = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
         atr_v = _float_or_none(a.get("atr"))
+        plan = ((a.get("option") or {}).get("plan") or {}) if final.get("buy_basis") == "option" else {}
+        lv = plan.get("levels") or {}
+        contract = plan.get("contract") or {}
         sl_mult = tgt_mult = None
-        scfg = sx.config()
-        if atr_v and scfg["sl_atr"] and scfg["target_atr"]:        # flexible ATR multiples chosen on the Signals page
-            cl = sx.custom_levels(side, a.get("last_close"), atr_v, scfg["sl_atr"], scfg["target_atr"], dd.THRESHOLDS.get("atr_min_sl_pts", 0))
-            if cl:
-                entry_px, stop_px, target_px = cl[0], cl[1], cl[2]
-                target_name = f"{scfg['target_atr']:g}xATR"
-                sl_mult, tgt_mult = round(cl[3] / atr_v, 2), scfg["target_atr"]
-        elif atr_v and entry_px and stop_px and target_px:           # default plan: record the multiples actually used
-            sl_mult, tgt_mult = round(abs(entry_px - stop_px) / atr_v, 2), round(abs(target_px - entry_px) / atr_v, 2)
+        if lv:
+            # option plan: index entry / stop / target (target already limited by the nearest swing / round-number wall)
+            entry_px, stop_px, target_px, target_name = lv["index_entry"], lv["index_stop"], lv["index_target"], lv.get("target_name")
+            if atr_v:
+                sl_mult, tgt_mult = round(lv["sl_points"] / atr_v, 2), round(lv["target_points"] / atr_v, 2)
+        else:
+            entry_px, stop_px, target_px, target_name = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
+            scfg = sx.config()
+            if atr_v and scfg["sl_atr"] and scfg["target_atr"]:        # flexible ATR multiples chosen on the Signals page
+                cl = sx.custom_levels(side, a.get("last_close"), atr_v, scfg["sl_atr"], scfg["target_atr"], dd.THRESHOLDS.get("atr_min_sl_pts", 0))
+                if cl:
+                    entry_px, stop_px, target_px = cl[0], cl[1], cl[2]
+                    target_name = f"{scfg['target_atr']:g}xATR"
+                    sl_mult, tgt_mult = round(cl[3] / atr_v, 2), scfg["target_atr"]
+            elif atr_v and entry_px and stop_px and target_px:
+                sl_mult, tgt_mult = round(abs(entry_px - stop_px) / atr_v, 2), round(abs(target_px - entry_px) / atr_v, 2)
         pat = a.get("candle_confirmation") or {}
         row = (now_ist.isoformat(timespec="seconds"), now_ist.date().isoformat(), symbol, int(interval), mode, candle_time,
-               str(a.get("decision") or "WAIT"), str(action), str(a.get("side") or ""), float(a.get("score") or 0),
+               str(a.get("decision") or "WAIT"), str(action), side, float(a.get("score") or 0),
                str(a.get("regime_label") or a.get("regime") or ""), str(pat.get("pattern") or ""), int(bool(pat.get("confirmed"))),
                _float_or_none(a.get("last_close")), entry_px, stop_px,
-               target_px, str(final.get("reason") or a.get("message") or a.get("note") or "")[:500], target_name, atr_v, sl_mult, tgt_mult)
+               target_px, str(final.get("headline") or final.get("reason") or a.get("message") or a.get("note") or "")[:500], target_name, atr_v, sl_mult, tgt_mult,
+               contract.get("label"), contract.get("instrument_key"), lv.get("entry"), lv.get("sl"), lv.get("target"), contract.get("delta"),
+               contract.get("lot"), final.get("buy_basis"), lv.get("rr"))
         with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
-            cur = db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason,target_name,atr_at_entry,sl_atr_mult,target_atr_mult) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            db.execute("INSERT OR IGNORE INTO signal_log (generated_at,session_date,symbol,interval,mode,candle_time,decision,final_action,side,score,regime,pattern,pattern_confirmed,last_close,entry,stop_loss,target,reason,target_name,atr_at_entry,sl_atr_mult,target_atr_mult,contract,opt_key,opt_entry,opt_sl,opt_target,opt_delta,lot,buy_basis,rr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
             _SIGNAL_LOG_DIRTY.set()
             db.commit()
-        _MON["last_record"] = {"at": time.time(), "symbol": symbol, "interval": int(interval), "mode": mode, "side": side, "candle": candle_time, "new_row": bool(cur.rowcount)}
-        _MON["last_record_error"] = None
     except Exception as exc:
         logger.warning("Signal log write failed: %s", str(exc)[:160])
-        try: _MON["last_record_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
-        except Exception: pass
 
 MAX_DAILY_LOSSES = int(os.getenv("MAX_DAILY_LOSSES", "2") or 0)      # 0 turns the daily loss limit off
 
@@ -1465,15 +1453,24 @@ def _live_index_price(sym):
     return view["ltp"] if view and view.get("fresh") and view.get("ltp") is not None else None
 
 
-def settle_signal_exits(sym, price, atr=None):
-    """Auto-exit every OPEN logged trade of `sym` that hit stop / safe target / square-off at `price`."""
+def _option_live_ltp(key):
+    """Fresh WebSocket premium of an option contract, or None."""
+    with STREAM_LOCK:
+        view = _tick_view(key, time.time())
+    return view["ltp"] if view and view.get("fresh") and view.get("ltp") else None
+
+
+def settle_signal_exits(sym, price, atr=None, candles=None, interval=None):
+    """Auto-exit every OPEN logged trade of `sym` that hit stop / safe target / square-off. With `candles` the fills are
+    candle-accurate (the stop is booked at the stop, not at whatever price the server woke up to)."""
     try:
         cfg = sx.config()
         backfill = None
         if atr:
             backfill = sx.backfill_points(
                 lambda x: dd.trade_levels({"side": "CE"}, {}, atr=x, price=100.0), float(atr), cfg["target"])
-        closed = sx.settle_open_signals(SIGNAL_LOG_DB, sym, price, datetime.now(IST), atr_backfill=backfill, lock=SIGNAL_LOG_LOCK)
+        closed = sx.settle_open_signals(SIGNAL_LOG_DB, sym, price, datetime.now(IST), atr_backfill=backfill, lock=SIGNAL_LOG_LOCK,
+                                        candles=candles, interval=interval, opt_ltp=_option_live_ltp)
         if closed:
             _SIGNAL_LOG_DIRTY.set()
         for c in closed:
@@ -1483,6 +1480,23 @@ def settle_signal_exits(sym, price, atr=None):
     except Exception as exc:
         logger.warning("Signal auto-exit failed: %s", str(exc)[:160])
         return []
+
+
+_EXIT_CANDLES = {}
+
+
+async def _exit_candles(sym):
+    """1-minute index candles (5 days, so a Friday trade can still be reconstructed on Monday) for candle-accurate exits. Cached 15 s."""
+    hit = _EXIT_CANDLES.get(sym)
+    if hit and time.time() - hit[0] < 15:
+        return hit[1]
+    try:
+        rows = await fetch_candles(INDEX_KEYS[sym], 1, 5)
+    except Exception as exc:
+        logger.debug("Exit candles unavailable for %s: %s", sym, str(exc)[:120])
+        return hit[1] if hit else None
+    _EXIT_CANDLES[sym] = (time.time(), rows)
+    return rows
 
 
 # ---- durable copy of the signal log (v1.18.11) -------------------------------------------------------------
@@ -1600,8 +1614,9 @@ async def _signal_exit_watcher():
                             price = _float_or_none(q.get("ltp"))
                         except Exception as exc:
                             logger.debug("Exit watcher quote unavailable: %s", str(exc)[:120])
-                    if price is not None:
-                        await asyncio.to_thread(settle_signal_exits, sym, price)
+                    cand = await _exit_candles(sym)
+                    if price is not None or cand:
+                        await asyncio.to_thread(settle_signal_exits, sym, price, None, cand, 1 if cand else None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1631,43 +1646,25 @@ def _spawn(coro):
     t = asyncio.create_task(coro); _BG_TASKS.add(t); t.add_done_callback(_BG_TASKS.discard); return t
 
 
-_LAST_FINAL = {}      # (symbol, interval, mode) -> (level, side) seen on the previous analysis
-_CHANGE_SENT = {}     # (symbol, interval, mode, level, side) -> time of the last CHANGED push (flap guard)
-
-def _signal_change_event(key, final, market_open, now=None):
-    """'CHANGED' when the final signal moves to a different (level, side) that has no event of its own. PENDING/CONFIRMED/FAILED already
-    send STARTED/CONFIRMED/FAILED, WAIT is not worth a push, and the first reading after a restart is never a change."""
-    now = now or time.time()
-    cur = (final.get("level"), final.get("side"))
-    prev = _LAST_FINAL.get(key); _LAST_FINAL[key] = cur
-    if not market_open or prev is None or prev == cur or cur[0] in ("WAIT", "PENDING", "CONFIRMED") or prev[0] == "PENDING":
-        return None
-    k = key + cur
-    if now - _CHANGE_SENT.get(k, 0) < 120:
-        return None
-    _CHANGE_SENT[k] = now
-    return "CHANGED"
-
-
 async def _send_signal_alert(event, sym, interval, mode, a, fused):
     """Fire-and-forget: Telegram / ntfy / email message + phone push for a reconfirmation event. Never raises."""
     try:
         side = (fused.get("final") or {}).get("side") or a.get("side") or ""
-        if event == "CHANGED":          # any other change of the final signal: phone push + history only (external channels follow ALERT_EVENTS)
-            f = fused.get("final") or {}
-            title = f"{sym} signal changed: {f.get('action') or '-'}"
-            body = (f"{f.get('headline') or ''}\n{sym} {interval}m | {mode} | index {a.get('last_close'):,.2f} | score {a.get('score')}/100 | "
-                    f"{datetime.now(IST).strftime('%H:%M:%S IST')}\nAnalysis only - not an order.")
-            res = []
-        else:
-            entry, stop, target, _ = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
-            title, body, prio = notifier.format_event(event, sym, interval, mode, side, a, fused.get("reconfirm") or {},
-                                                      {"entry": entry, "stop_loss": stop, "target": target}, datetime.now(IST).strftime("%H:%M:%S IST"))
-            res = await notifier.send_alert(title, body, prio)
+        entry, stop, target, _ = sx.pick_levels(a.get("atr_levels"), a.get("last_close"))
+        levels = {"entry": entry, "stop_loss": stop, "target": target}
+        plan = ((a.get("option") or {}).get("plan") or {})
+        pl = plan.get("levels") or {}
+        if pl:
+            levels.update(entry=pl["index_entry"], stop_loss=pl["index_stop"], target=pl["index_target"], contract=(plan.get("contract") or {}).get("label"),
+                          opt_entry=pl.get("entry"), opt_sl=pl.get("sl"), opt_target=pl.get("target"), rr=pl.get("rr"), why=(fused.get("final") or {}).get("headline"))
+        elif event == "NOBUY":
+            levels["why"] = (fused.get("final") or {}).get("headline")
+        title, body, prio = notifier.format_event(event, sym, interval, mode, side, a, fused.get("reconfirm") or {},
+                                                  levels, datetime.now(IST).strftime("%H:%M:%S IST"))
+        res = await notifier.send_alert(title, body, prio)
         try:
             for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
-                if _event_allowed(await asyncio.to_thread(_user_pref, uid), event):
-                    await asyncio.to_thread(acc.push_add_history, uid, event, sym, side, title, body, utc_now_iso())
+                await asyncio.to_thread(acc.push_add_history, uid, event, sym, side, title, body, utc_now_iso())
         except Exception as exc:
             logger.warning("Notification history not saved: %s", str(exc)[:140])
         push_res = await _dispatch_confirmed_push(title, body, sym, side, event)
@@ -1732,24 +1729,6 @@ async def push_native_register(payload: NativePushToken, request: Request):
     await _run_push_db(acc.push_upsert_device, uid, "native", token, token, utc_now_iso())
     return {"ok":True}
 
-class PushPref(BaseModel):
-    mode: str
-
-@app.get("/api/push/prefs")
-async def push_prefs_get(request: Request):
-    uid = _push_user(request)
-    if not uid: raise HTTPException(401, "Login required")
-    return {"mode": await asyncio.to_thread(_user_pref, uid, True), "modes": {"all": "All signal changes", "confirmed": "Confirmed buy signals only"}}
-
-@app.post("/api/push/prefs")
-async def push_prefs_set(payload: PushPref, request: Request):
-    uid = _push_user(request)
-    if not uid: raise HTTPException(401, "Login required")
-    if payload.mode not in PUSH_PREF_MODES: raise HTTPException(400, "mode must be one of: " + ", ".join(PUSH_PREF_MODES))
-    await _run_push_db(acc.meta_set, f"push_pref:{uid}", payload.mode)
-    _PUSH_PREF_CACHE[uid] = (time.time(), payload.mode)
-    return {"ok": True, "mode": payload.mode}
-
 @app.get("/api/notifications")
 async def notification_history(request: Request, limit: int=100):
     uid=_push_user(request)
@@ -1773,12 +1752,9 @@ async def push_status(request: Request):
         mine = await asyncio.to_thread(acc.push_devices, "web", uid)
         mine_native = await asyncio.to_thread(acc.push_devices, "native", uid)
         owner_web = await asyncio.to_thread(acc.push_devices, "web", _push_owner_id())
-        owner_native = await asyncio.to_thread(acc.push_devices, "native", _push_owner_id())
-        all_ids = sorted({r["user_id"] for r in (await asyncio.to_thread(acc.push_devices, "web", 0)) + (await asyncio.to_thread(acc.push_devices, "native", 0))}) if _push_owner_id() else []
         db_ok = True
     except Exception as exc:
-        mine = mine_native = owner_web = owner_native = []
-        all_ids = []
+        mine = mine_native = owner_web = []
         db_ok = False
     host = lambda r: (lambda e: "Google (Chrome/Android)" if "fcm" in e or "googleapis" in e else "Mozilla" if "mozilla" in e else "Apple" if "apple" in e else "Microsoft" if "windows" in e else "other")(r.get("endpoint", ""))
     st = acc.storage_info()
@@ -1789,11 +1765,7 @@ async def push_status(request: Request):
     if not _web_push_available(): problems.append("The pywebpush package is not installed on the server, so browser push cannot be sent. Redeploy so requirements.txt installs.")
     if not (mine or mine_native): problems.append("This phone/browser is not registered for push. Open the app on it and tap 'Enable push alerts', then allow notifications.")
     if _push_owner_id() and _push_owner_id() != uid: problems.append(f"PUSH_OWNER_USER_ID is {_push_owner_id()} but you are signed in as user {uid}: alerts go only to user {_push_owner_id()}'s devices. Change or clear that setting.")
-    if _push_owner_id() and not (owner_web or owner_native):
-        problems.append(f"No phone/browser is registered for the configured owner account (user {_push_owner_id()})." +
-                        (f" Devices are registered under user id(s) {all_ids}: set PUSH_OWNER_USER_ID to one of them, or clear it to notify every account." if all_ids
-                         else " Open the app on the phone while signed in as that account; it now registers itself."))
-    if _MON.get("last_record_error"): problems.append("Signal log write failed: " + _MON["last_record_error"])
+    if _push_owner_id() and not owner_web: problems.append("No web device is registered for the configured owner account.")
     if not ALERT_BACKGROUND_ON(): problems.append("The background monitor is switched off (ALERT_BACKGROUND=0 or no delivery channel).")
     if not runtime_token: problems.append("No Upstox token: signals cannot be computed. Connect Upstox.")
     elif TOKEN_CHECK.get("state") == "EXPIRED": problems.append("The Upstox token has expired - reconnect Upstox (More > Connect Upstox). Until then nothing is watched.")
@@ -1804,7 +1776,7 @@ async def push_status(request: Request):
                 "running": bool(_MON["last_tick"]) and now - _MON["last_tick"] < 90, "last_check_ago_s": round(now - _MON["last_tick"]) if _MON["last_tick"] else None,
                 "last_ok_ago_s": round(now - _MON["last_ok"]) if _MON["last_ok"] else None, "last_error": _MON["last_error"], "symbols": _MON["symbols"],
                 "watching": {"symbols": syms, "interval": interval, "mode": mode, "score_min": score_min, "poll_s": delay}, "events": sorted(notifier.events())},
-            "last_alert": _MON["last_alert"], "gap": _MON["gap"], "signal_log": {"last_record": _MON.get("last_record"), "error": _MON.get("last_record_error")},
+            "last_alert": _MON["last_alert"], "gap": _MON["gap"],
             "devices": {"web": len(mine), "native": len(mine_native), "kinds": [host(r) for r in mine], "owner_configured": bool(_push_owner_id())},
             "token_state": TOKEN_CHECK.get("state"), "storage": st, "ttl_s": int(os.getenv("PUSH_TTL_SECONDS", "600") or 600), "problems": problems}
 
@@ -1861,7 +1833,6 @@ def ALERT_BACKGROUND_ON():
 _ALERT_POLLER_TASK = None
 
 
-_USER_COMBOS = {}      # (symbol, interval, mode, score_min) -> last time a browser asked for it (v1.18.12)
 _MON = {"started_at": time.time(), "last_tick": 0.0, "last_ok": 0.0, "last_error": None, "symbols": {}, "last_alert": None, "gap": None, "ticks": 0}
 
 
@@ -1875,17 +1846,6 @@ def _poller_cfg():
     try: delay = max(5, int(os.getenv("ALERT_POLL_SECONDS", "10") or 10))
     except ValueError: delay = 10
     return syms, interval, mode, score_min, delay
-
-
-def _watch_list(syms, interval, mode, score_min):
-    """What the background monitor analyses: the ALERT_* settings, plus (v1.18.12) up to 3 other settings a browser used in the last
-    6 hours - otherwise a signal shown on a 15m / standard terminal was only logged while that page happened to be open."""
-    base = [(s, interval, mode, score_min) for s in syms]
-    if os.getenv("ALERT_FOLLOW_TERMINAL", "1").strip() == "0":
-        return base
-    cutoff = time.time() - 6 * 3600
-    extra = [k for k, t in sorted(_USER_COMBOS.items(), key=lambda kv: -kv[1]) if t >= cutoff and k not in base][:3]
-    return base + extra
 
 
 def _mon_note(res, at):
@@ -1923,16 +1883,9 @@ async def _alert_poller():
                 try: await asyncio.to_thread(acc.meta_set, "monitor_heartbeat", str(last_beat))
                 except Exception as exc: logger.debug("Heartbeat not saved: %s", str(exc)[:100])
             if market_status()["open"] and runtime_token and ALERT_BACKGROUND_ON():
-                for (sym, itv, md, smin) in _watch_list(syms, interval, mode, score_min):
-                    if time.time() - LAST_ANALYSIS_AT.get(f"{sym}|{itv}|{md}|{smin}", 0) > 10:
-                        try:
-                            await shared_analysis((sym, itv, md, smin, -1), lambda s=sym, i=itv, m=md, sm=smin: _analysis_compute(symbol=s, interval=i, mode=m, score_min=sm, reconfirm=-1), user_request=False)
-                        except HTTPException as exc:
-                            if exc.status_code == 401:
-                                raise
-                            _MON["last_error"] = f"{sym} {itv}m {md}: HTTP {exc.status_code}: {str(exc.detail)[:100]}"
-                        except Exception as exc:
-                            _MON["last_error"] = f"{sym} {itv}m {md}: {type(exc).__name__}: {str(exc)[:100]}"
+                for sym in syms:
+                    if time.time() - LAST_ANALYSIS_AT.get(f"{sym}|{interval}|{mode}|{score_min}", 0) > 10:
+                        await shared_analysis((sym, interval, mode, score_min, -1), lambda s=sym: _analysis_compute(symbol=s, interval=interval, mode=mode, score_min=score_min, reconfirm=-1), user_request=False)
                 _mon_refresh(syms, interval, mode, score_min)
                 _MON["last_ok"] = time.time(); _MON["last_error"] = None
         except asyncio.CancelledError:
@@ -2076,8 +2029,9 @@ async def settle_signals_now(symbol: str = ""):
                 price = _float_or_none((await index_ltp(sym)).get("ltp"))
             except HTTPException:
                 price = None
-        if price is not None:
-            closed += await asyncio.to_thread(settle_signal_exits, sym, price)
+        cand = await _exit_candles(sym)
+        if price is not None or cand:
+            closed += await asyncio.to_thread(settle_signal_exits, sym, price, None, cand, 1 if cand else None)
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
@@ -2277,10 +2231,67 @@ async def option_analysis(symbol: str = "NIFTY", instrument_key: str = "", inter
     return await shared_analysis(("opt", sym, key_, interval, mode, score_min), compute)
 
 
+# ================================================================ Option leg (v1.19)
+OPTION_LEG_ON = os.getenv("OPTION_LEG", "1") != "0"
+OPTION_LOCK = op.OptionLock()
+
+
+async def _option_leg(sym, interval, mode, a, index_candles):
+    """When the index shows a WATCH or CONFIRMED CE / PE, pick the contract two strikes out of the money (CE above the ATM, PE below it),
+    keep following that contract, and run the profit check on it (premium usable, spread, its own premium chart rising, room to the next
+    swing / round number, reward : risk after costs) so a BUY carries a real option entry, stop and target.
+    Returns (option_info | None, plan | None). plan None with option_info None = nothing to do; never raises for a data problem."""
+    side = a.get("side")
+    sig = str(a.get("signal_technical") or a.get("signal") or "")
+    now = time.time()
+    if not (OPTION_LEG_ON and sym in INDEX_KEYS and side in ("CE", "PE") and sig.startswith(("WATCH_", "CONFIRMED_"))):
+        OPTION_LOCK.idle(sym, now)
+        return None, None
+    info = {"stage": "CONFIRMED" if sig.startswith("CONFIRMED_") else "WATCH", "side": side, "available": False,
+            "rule": f"{op.OFFSET} strikes {'above' if side == 'CE' else 'below'} the ATM ({op.SIDE})"}
+    try:
+        expiry = await resolve_expiry(sym, "current_week")
+        rows = (await get_chain(sym, expiry))["rows"]
+        spot = _live_index_price(sym) or _float_or_none(a.get("last_close"))
+        pick = OPTION_LOCK.pick(sym, rows, spot, side, now)
+        if not pick:
+            info["reason"] = "No option contract found near the ATM (option chain unavailable)"
+            return info, None
+        key = pick["instrument_key"]
+        _pin_keys(sym, [key])                                        # put the contract on the live WebSocket now
+        lot = await lot_size_for(sym, expiry)
+        opt_read = None
+        try:
+            ocs = await fetch_candles(key, interval, 3)
+            opt_read = await asyncio.to_thread(analyze, ocs, f"{sym} option", interval, None, None, None, None, mode, 70)
+        except Exception as exc:
+            logger.debug("Option premium candles unavailable (%s): %s", key, str(exc)[:120])
+        atr_v, price = _float_or_none(a.get("atr")), _float_or_none(a.get("last_close"))
+        room = op.swing_levels(index_candles, price, side, atr_v, sym) if (index_candles and atr_v and price) else None
+        scfg = sx.config()
+        sl_pts = tgt_pts = None
+        if atr_v and scfg["sl_atr"] and scfg["target_atr"]:
+            sl_pts = max(scfg["sl_atr"] * atr_v, dd.THRESHOLDS.get("atr_min_sl_pts", 0))
+            tgt_pts = scfg["target_atr"] * atr_v
+        plan = op.build_plan(side, sym, pick, price, atr_v, dd.THRESHOLDS, cost_points=scfg["cost"], lot=lot, opt_read=opt_read, room=room,
+                             sl_points=sl_pts, target_points=tgt_pts, live_ltp=_option_live_ltp(key))
+        c = plan["contract"] or {}
+        info.update(available=True, expiry=expiry, plan=plan, contract=c, locked=not pick.get("relocked"),
+                    chart={"symbol": sym, "instrument_key": key, "type": side, "strike": pick["strike"], "expiry": expiry,
+                           "ltp": c.get("ltp"), "lot": lot, "label": c.get("label")})
+        return info, plan
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            raise
+        info["reason"] = f"Option chain unavailable: {str(exc.detail)[:140]}"
+    except Exception as exc:
+        logger.warning("Option leg failed: %s", str(exc)[:160])
+        info["reason"] = f"Option leg error: {type(exc).__name__}"
+    return info, None
+
+
 @app.get("/api/analysis")
 async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70, reconfirm: int = -1):
-    if symbol.upper() in INDEX_KEYS and mode in MODES and score_min in (60, 65, 70):
-        _USER_COMBOS[(symbol.upper(), interval, mode, score_min)] = time.time()
     key = (symbol.upper(), interval, mode, score_min, reconfirm)
     return await shared_analysis(key, lambda: _analysis_compute(symbol, interval, mode, score_min, reconfirm))
 
@@ -2335,20 +2346,32 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                         reconfirm={"tracker": RECONFIRM, "name": rc_name, "window": reconfirm, "price": live_px, "ts": time.time()} if sym in INDEX_KEYS else None,
                         daily_losses=stopouts_today(sym) if MAX_DAILY_LOSSES else None, max_daily_losses=MAX_DAILY_LOSSES)
         a["reconfirm"] = fused.get("reconfirm")
-        ev = (fused.get("reconfirm") or {}).get("event")
-        if ev and market["open"] and ev in notifier.events() and PUSH_DELIVERY_ENABLED():
-            _spawn(_send_signal_alert(ev, sym, interval, mode, a, fused))
-        elif not ev and sym in INDEX_KEYS and PUSH_DELIVERY_ENABLED() and _signal_change_event((sym, interval, mode), fused["final"], market["open"]):
-            _spawn(_send_signal_alert("CHANGED", sym, interval, mode, a, fused))
         a["gates"] = (a.get("gates") or []) + fused["gates"]
         a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],
                   "signal_technical": a.get("signal"), "decision_technical": a.get("decision"),
                   "decision": fused["final"]["action"]})
+        # v1.19 option leg + BUY decision. A CONFIRMED index setup becomes a BUY only when the chosen contract's profit check passes.
+        opt, plan = None, None
+        try:
+            opt, plan = await _option_leg(sym, interval, mode, a, result["candles"])
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+        a["option"] = opt
+        op.decide_buy(a["final"], plan if (opt and opt.get("available")) else None, a.get("side"))
+        ev = (fused.get("reconfirm") or {}).get("event")
+        if ev == "CONFIRMED" and not a["final"].get("buy"):
+            ev = "NOBUY"                                       # confirmed on the index but the option profit check said no: tell the user why
+        if ev and market["open"] and (ev in notifier.events() or (ev == "NOBUY" and "CONFIRMED" in notifier.events())) and PUSH_DELIVERY_ENABLED():
+            _spawn(_send_signal_alert(ev, sym, interval, mode, a, fused))
+    except HTTPException:
+        raise
     except Exception as exc:          # fusion must never take the whole analysis down
         logger.warning("Signal fusion failed: %s", exc)
         a["fusion_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     # Auto-exit first (uses the live tick when there is one), then log any new confirmed setup.
-    settle_signal_exits(sym, _live_index_price(sym) or _float_or_none(a.get("last_close")), atr=a.get("atr"))
+    settle_signal_exits(sym, _live_index_price(sym) or _float_or_none(a.get("last_close")), atr=a.get("atr"),
+                        candles=result["candles"], interval=interval)
     record_signal_row(sym, interval, mode, a)
     return a
 

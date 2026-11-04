@@ -270,17 +270,10 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
     if fresh_gate:
         gates.append(fresh_gate)
 
-    if side:
-        # Experimental risk filters from the supplied 51-trade replay. Apply after timing is evaluated
-        # so freshness/staleness diagnostics remain independent of these extra guards.
-        minute_now = now_dt.hour * 60 + now_dt.minute
-        gates.append({"label": "Avoid late-session entries (before 13:30 IST)",
-                      "pass": minute_now < 13 * 60 + 30,
-                      "detail": f"Current time {now_dt.strftime('%H:%M')} IST; supplied replay's 13:30+ group was negative."})
-        dom_score = max(a.get("bull_score") or 0, a.get("bear_score") or 0)
-        gates.append({"label": "Avoid extreme score bucket (score < 90)",
-                      "pass": dom_score < 90,
-                      "detail": f"Technical score {dom_score}/100; supplied replay's 90–100 bucket had negative average P/L."})
+    # v1.19: the two "experimental" gates that used to sit here are gone.
+    #  * "score < 90" blocked the STRONGEST setups (a 92/100 UPTREND read showed WAIT all day) on the strength of one 51-trade bucket.
+    #  * "before 13:30" duplicated the entry-window gate with a hard-coded time, so ENTRY_CUTOFF=15:00 could never take effect.
+    # The entry-window gate above (ENTRY_CUTOFF, default 13:30) is the one place the cut-off lives.
 
     if side and daily_losses is not None and max_daily_losses and max_daily_losses > 0:
         # v1.15: after N stop-outs the day is done. In the replay one day (9 signals, 1 winner, -166 pts) wiped out 2.6x the whole

@@ -108,6 +108,16 @@ def _envf(name, default):
 # gain peaked at 32-33 in all four data sets. Scalp mode relaxes only the MOMENTUM side, and only when the price trend is confirmed.
 # Override any edge from the environment: RSI_CE_MIN, RSI_CE_MAX, RSI_PE_MIN, RSI_PE_MAX (and *_SCALP variants for the relaxed band).
 RSI_SLOPE = _os.getenv("RSI_SLOPE", "1") != "0"     # CE needs RSI rising on the last closed bar, PE needs it falling
+# v1.19: RSI is a LAGGING, mean-reverting oscillator - in a real trend it sits above 68 (below 32) for most of the move, so the
+# "overextended" ceiling kept the terminal out of exactly the moves worth taking (92/100 score, UPTREND, decision WAIT).
+# A 300-day bar-by-bar gate study on simulated trend / chop days (leave-one-gate-out, see README v1.19) found this ceiling was the
+# single biggest blocker: removing it cut missed trend days from 150 to 89 (standard) and 114 to 55 (scalp).
+# The ceiling is therefore kept at 68 / 32 in ordinary conditions but moves out to 72 / 28 when PRICE STRUCTURE itself confirms the
+# trend in the signal's direction (higher highs + EMA 9/21 + range break). A deliberately modest step: your real-data replays showed
+# climactic entries (RSI in the 20s / high 70s) lose, so those stay blocked. 72/28 recovered ~40% more trend-day P/L than 68/32 in the
+# study with no extra chop-day loss. Override: RSI_CE_MAX_TREND, RSI_PE_MIN_TREND (68 / 32 restores v1.18). Verify on your own data with /diagnostics.
+RSI_CE_MAX_TREND = _envf("RSI_CE_MAX_TREND", 72)
+RSI_PE_MIN_TREND = _envf("RSI_PE_MIN_TREND", 28)
 RSI_BANDS = {
     "strict": {"CE": (_envf("RSI_CE_MIN", 100 - RSI_MOMENTUM if RSI_MOMENTUM else 0), _envf("RSI_CE_MAX", 68)),
                "PE": (_envf("RSI_PE_MIN", 32), _envf("RSI_PE_MAX", RSI_MOMENTUM if RSI_MOMENTUM else 100))},
@@ -572,6 +582,10 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         rsi_wide = bool(relax and trend_agree)
         band_lo, band_hi = rsi_band(side, rsi_wide)           # this side's own limits
         strict_lo, strict_hi = rsi_band(side, False)
+        # exhaustion edge: CE ceiling = band_hi, PE floor = band_lo. Widened (never narrowed) while price structure confirms the trend.
+        ex_hi, ex_lo = band_hi, band_lo
+        if trend_agree:
+            ex_hi, ex_lo = max(band_hi, RSI_CE_MAX_TREND), min(band_lo, RSI_PE_MIN_TREND)
         score_min = max(50, min(70, int(score_min)))
         gates = [
             {"label": f"Score ≥ {score_min}", "pass": dom >= score_min, "detail": f"{dom}/100"},
@@ -581,9 +595,11 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
              "detail": by_key["supertrend"]["detail"] + (lag_note if st_ok and not by_key["supertrend"][want] else "")},
             {"label": htf_label, "pass": bool(htf_ok), "detail": by_key["htf"]["detail"]},
             {"label": "Not sideways / not in a range", "pass": not sideways, "detail": regime_note},
-            {"label": "Momentum not overextended (" + ("RSI < %g for CE" % band_hi if side == "CE" else "RSI > %g for PE" % band_lo) + ")",
-             "pass": rsi is None or (rsi < band_hi + 1e-9 if side == "CE" else rsi > band_lo - 1e-9),
-             "detail": (f"RSI {rsi:.1f}" if rsi is not None else "n/a") + (" · stretched — most of the move is already done" if rsi is not None and (rsi >= band_hi if side == "CE" else rsi <= band_lo) else "")},
+            {"label": "Momentum not overextended (" + ("RSI < %g for CE" % ex_hi if side == "CE" else "RSI > %g for PE" % ex_lo) + ")",
+             "pass": rsi is None or (rsi < ex_hi + 1e-9 if side == "CE" else rsi > ex_lo - 1e-9),
+             "detail": (f"RSI {rsi:.1f}" if rsi is not None else "n/a")
+                       + (f" · limit widened to {ex_hi if side == 'CE' else ex_lo:g} because price structure confirms the trend" if trend_agree and (ex_hi, ex_lo) != (band_hi, band_lo) else "")
+                       + (" · stretched — most of the move is already done" if rsi is not None and (rsi >= ex_hi if side == "CE" else rsi <= ex_lo) else "")},
         ]
         if rsi is not None:
             if side == "CE":

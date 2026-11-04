@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.18.14">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.18.14">
+  <link rel="stylesheet" href="/static/style.css?v=1.19.0">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.19.0">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -25,11 +25,12 @@
     <label>Timeframe<select id="interval"><option value="5">5 minutes</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></label>
     <label>Signal mode<select id="signalMode"><option value="scalp">Scalp · 20–40 pt moves</option><option value="standard">Standard · strict</option></select></label>
     <label>Minimum score<select id="scoreMin"><option value="70" selected>70 · Strict</option><option value="65">65 · Test</option><option value="60">60 · Relaxed test</option></select></label>
+    <label>Follow signal contract<select id="autoFollow" title="When a WATCH / CONFIRMED CE or PE appears, the chart moves to the option 2 strikes out of the money and stays on it"><option value="1" selected>Auto · chart follows the signal</option><option value="0">Off · I choose the contract</option></select></label>
     <label>Chart view<select id="chartView"><option value="index">Underlying index</option><option value="option">Selected option premium</option></select></label>
     <label>Auto refresh<select id="refreshEvery"><option value="2" selected>2 s</option><option value="3">3 s</option><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></label>
     <label>Reconfirm hold<select id="reconfirmSec" title="A new CE/PE setup stays PENDING until it has held this long with price not moving against it"><option value="0">Off</option><option value="30">30 s</option><option value="60" selected>60 s</option><option value="90">90 s</option><option value="120">2 min</option><option value="180">3 min</option><option value="300">5 min</option></select></label>
     <label>Alert sound<select id="alertSound"><option value="1" selected>On</option><option value="0">Off</option></select></label>
-    <button id="enablePush" class="secondary" type="button">Enable push alerts</button><label>Notify me for<select id="pushType"><option value="all">All signal changes</option><option value="confirmed">Confirmed buy signals only</option></select></label><a class="button secondary" href="/notifications">Notification history</a>
+    <button id="enablePush" class="secondary" type="button">Enable push alerts</button><a class="button secondary" href="/notifications">Notification history</a>
     <button id="testAlert" class="secondary" title="Plays the beep, asks for browser notifications and sends a test message to Telegram / ntfy / email if configured">Test alert</button>
     <button id="refreshBtn">Refresh data</button>
     <span id="lastUpdated" class="sub">Waiting for data</span>
@@ -41,6 +42,20 @@
     <div class="stat panel"><div class="label">Directional score</div><div id="score" class="value">—</div><div class="sub">0–100 · not win probability</div></div>
     <div class="stat panel"><div class="label">Market regime</div><div id="regime" class="value">—</div><div class="sub" id="regimeSub">Trend / sideways filter</div></div>
     <div class="stat panel"><div class="label">Decision</div><div id="decision" class="value compact">WAIT</div><div id="decisionSub" class="sub">Bias only; confirm retest</div></div>
+  </section>
+
+  <section class="panel" id="optionPlanBox" hidden>
+    <div class="section-head"><div><h2 id="opTitle">Option leg</h2><p id="opRule" class="sub"></p></div><span id="opStage" class="pill muted">WATCH</span></div>
+    <div class="op-grid">
+      <div><span>Buy price</span><b id="opEntry">—</b></div>
+      <div><span>Stop-loss</span><b id="opSl">—</b></div>
+      <div><span>Target</span><b id="opTarget">—</b></div>
+      <div><span>Reward : risk</span><b id="opRr">—</b></div>
+      <div><span>Index entry / stop / target</span><b id="opIdx">—</b></div>
+      <div><span>Risk / reward per lot</span><b id="opRs">—</b></div>
+    </div>
+    <p class="sub" id="opNote"></p>
+    <ul class="gate-list" id="opChecks"></ul>
   </section>
 
   <section class="layout">
@@ -233,6 +248,6 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/boot.js?v=1.18.14"></script><script src="/static/sync.js?v=1.18.14" data-next="/static/app.js?v=1.18.14"></script>
-<script src="/static/mobile.js?v=1.18.14" defer></script>
+<script src="/static/boot.js?v=1.19.0"></script><script src="/static/sync.js?v=1.19.0" data-next="/static/app.js?v=1.19.0"></script>
+<script src="/static/mobile.js?v=1.19.0" defer></script>
 </body></html>

@@ -74,7 +74,6 @@ body{-webkit-tap-highlight-color:transparent}
   .m-sheet button.m-row{width:100%;background:none;border:0;border-bottom:1px solid #233247;border-radius:0;text-align:left;font-weight:500;font-size:15px}
   .m-switch{appearance:none;-webkit-appearance:none;display:block;box-sizing:border-box;width:46px;height:28px;min-height:0;padding:0;margin:0;border-radius:999px;background:#354960;border:0;position:relative;flex:none;transition:background .15s}
   .m-switch::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:transform .15s}
-  .m-select{flex:none;max-width:48%;min-height:36px;background:#0f1a2b;color:var(--text);border:1px solid #354960;border-radius:8px;padding:4px 8px;font-size:14px}
   .m-switch:checked{background:#1f9d6e}
   .m-switch:checked::after{transform:translateX(18px)}
 
@@ -106,11 +105,29 @@ body{-webkit-tap-highlight-color:transparent}
   /* Tables: compact so most columns fit; whatever still doesn't fit scrolls INSIDE its own box (never the page),
      with the first column pinned so you always know which row you are reading. */
   .table-wrap{overflow-x:auto;max-width:100%;border-radius:10px;position:relative;scrollbar-width:thin}
-  .table-wrap table{font-size:12px;width:100%}
-  .table-wrap th,.table-wrap td{padding:7px 6px;white-space:normal;overflow-wrap:anywhere;vertical-align:top}
+  /* v1.19: cells used to wrap ANYWHERE (overflow-wrap:anywhere), which broke every number and word into single letters
+     ("Si/g/n/al/s", "Me/diu/m", "23,/943/.68"). Cells now keep their text whole and the table scrolls sideways inside its box;
+     only the long-text column (class wrapcol, or the last column of the S/R and checks tables) wraps, at word boundaries. */
+  .table-wrap table{font-size:12px;width:max-content;min-width:100%}
+  .table-wrap th,.table-wrap td{padding:7px 8px;white-space:nowrap;overflow-wrap:normal;word-break:normal;vertical-align:top}
   .table-wrap th{font-size:10.5px;letter-spacing:.2px}
   .table-wrap td:first-child,.table-wrap th:first-child{position:sticky;left:0;z-index:1;background:var(--panel)}
-  .sr-table td:last-child,.sr-table th:last-child{min-width:0}
+  .sr-table td:last-child,.sr-table th:last-child{white-space:normal;min-width:150px;max-width:260px;text-align:left}
+  .table-wrap .wrapcol{white-space:normal;min-width:150px;max-width:260px}
+
+  /* Signal record + results tables become one card per row on a phone (label on the left, value on the right) */
+  .stack-wrap{overflow:visible!important;max-height:none!important}
+  .stack-table,.stack-table tbody{display:block;width:100%!important;min-width:0!important}
+  .stack-table thead{display:none}
+  .stack-table tr{display:block;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:6px 12px;margin:0 0 10px}
+  .stack-table td{display:flex;justify-content:space-between;align-items:baseline;gap:14px;border-bottom:1px solid #233247;padding:7px 0!important;white-space:normal!important;text-align:right!important;position:static!important;background:transparent!important}
+  .stack-table td:last-child{border-bottom:0}
+  .stack-table td::before{content:attr(data-label);color:var(--muted);font-size:11px;text-align:left;flex:0 0 42%;max-width:42%}
+  .stack-table td.rec-head{display:block;text-align:left!important;font-size:14px;font-weight:800;padding:8px 0!important}
+  .stack-table td.rec-head::before{content:none}
+  .stack-table td.empty{display:block;text-align:center!important}
+  .stack-table td.empty::before{content:none}
+  .op-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 
   /* account + login */
   .account-main{padding-bottom:20px}
