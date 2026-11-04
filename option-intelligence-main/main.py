@@ -147,7 +147,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.19.6"
+APP_VERSION = "1.19.7"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1272,8 +1272,8 @@ async def live_derivatives(symbol: str = "NIFTY", expiry_date: str = "current_we
     }
 
 
-WS_TICK_SEC = float(os.getenv("WS_TICK_SEC", "0.25"))      # v1.19.6: index price pushed up to 4x a second (only when it moves)
-WS_PUSH_SEC = float(os.getenv("WS_PUSH_SEC", "1.0"))       # forming candles + analysis pushed about once a second while open
+WS_TICK_SEC = float(os.getenv("WS_TICK_SEC", "0.1"))       # v1.19.7: index + option prices checked 10x a second, pushed when they move
+WS_PUSH_SEC = float(os.getenv("WS_PUSH_SEC", "0.1"))       # v1.19.7: candles + analysis checked 10x a second, pushed when newer
 
 
 def _ws_sub(msg, cur):
@@ -1317,7 +1317,7 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
     index_key = INDEX_KEYS[sym]
     send_lock = asyncio.Lock()
     sub = {"interval": None, "mode": "standard", "score_min": 70, "reconfirm": -1, "view": "index"}
-    sent = {"an": None, "bars": None, "idx": None, "ticks_at": 0.0, "push_at": 0.0}
+    sent = {"an": None, "bars": None, "bars_src": None, "idx": None, "opt": {}, "ticks_at": 0.0, "push_at": 0.0}
     pump_task = None
 
     async def send(obj):
@@ -1341,16 +1341,25 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
             return
         snap = dict(sub)
         try:
-            if snap["view"] == "index":
+            # v1.19.7: checked every 0.1 s, so only do work when the server-side caches actually hold something newer.
+            ck = CANDLE_CACHE.get((index_key, iv, 10))
+            bars_due = sent["bars"] is None or not ck or ck[0] != sent["bars_src"] or time.time() - ck[0] >= CANDLE_CACHE_TTL
+            if snap["view"] == "index" and bars_due:
                 c = await candles(symbol=sym, interval=iv, days=10)
+                ck = CANDLE_CACHE.get((index_key, iv, 10))
+                sent["bars_src"] = ck[0] if ck else None
                 tail = (c.get("candles") or [])[-3:]
                 sig = json.dumps(tail, sort_keys=True, default=str)
                 if tail and sig != sent["bars"] and snap == sub:
                     sent["bars"] = sig
                     await send({"type": "bars", "symbol": sym, "interval": iv, "candles": tail, "feed": c.get("feed"),
                                 "volume_source": c.get("volume_source"), "timestamp": utc_now_iso()})
+            akey = (sym, iv, snap["mode"], snap["score_min"], snap["reconfirm"])
+            hit = _AN_CACHE.get(akey)
+            if hit and hit[0] == sent["an"] and (time.time() - hit[0] < AN_FRESH or akey in _AN_TASKS):
+                return                                      # nothing newer yet, and a recompute is not due / already running
             a = await analysis(symbol=sym, interval=iv, mode=snap["mode"], score_min=snap["score_min"], reconfirm=snap["reconfirm"])
-            hit = _AN_CACHE.get((sym, iv, snap["mode"], snap["score_min"], snap["reconfirm"]))
+            hit = _AN_CACHE.get(akey)
             stamp = hit[0] if hit else (a.get("timing") or {}).get("generated_at")
             if stamp != sent["an"] and snap == sub:
                 sent["an"] = stamp
@@ -1379,7 +1388,7 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                 state = STREAMS.get(sym)
                 keys = [k for k in (state.get("keys", []) if state else []) if k != index_key]
                 want_all = now - sent["ticks_at"] >= 1.0
-                recent = [v for v in (_tick_view(k, now) for k in keys) if v] if want_all else []
+                recent = [v for v in (_tick_view(k, now) for k in keys) if v]
                 idx = _tick_view(index_key, now)
             index_tick = None
             if idx and idx.get("ltp") is not None:
@@ -1392,9 +1401,17 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                 await send({"type": "ticks", "symbol": sym, "timestamp": utc_now_iso(), "stream": stream,
                             "error": stream_error, "index": index_tick, "ticks": recent})
                 sent["idx"] = index_tick and index_tick["ltp"]
-            elif index_tick and index_tick["fresh"] and index_tick["ltp"] != sent["idx"]:
-                sent["idx"] = index_tick["ltp"]
-                await send({"type": "index", "symbol": sym, "index": index_tick})
+                sent["opt"] = {x.get("instrument_key"): x.get("ltp") for x in recent}
+            else:
+                if index_tick and index_tick["fresh"] and index_tick["ltp"] != sent["idx"]:
+                    sent["idx"] = index_tick["ltp"]
+                    await send({"type": "index", "symbol": sym, "index": index_tick})
+                # v1.19.7: option premiums that moved since the last push (the selected contract's candle moves 10x a second)
+                moved = [x for x in recent if x.get("fresh") and sent["opt"].get(x.get("instrument_key")) != x.get("ltp")]
+                if moved:
+                    for x in moved:
+                        sent["opt"][x.get("instrument_key")] = x.get("ltp")
+                    await send({"type": "opt", "symbol": sym, "ticks": moved})
             every = WS_PUSH_SEC if market["open"] else 15.0
             if (pump_task is None or pump_task.done()) and now - sent["push_at"] >= every:
                 if pump_task is not None and pump_task.done() and not pump_task.cancelled() and pump_task.exception():

@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.19.6";
+const FRONTEND_VERSION="1.19.7";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -946,7 +946,7 @@ function mergeLiveBars(m){
   }
   if(!changed)return;
   const now=Date.now();
-  if(appended||now-lastBarsRender>2000){lastBarsRender=now;renderCandles(currentCandles)}
+  if(appended||now-lastBarsRender>1000){lastBarsRender=now;renderCandles(currentCandles)}
   else{const b=currentCandles[currentCandles.length-1];try{candleSeries.update({time:toChartTime(b.time),open:+b.open,high:+b.high,low:+b.low,close:+b.close})}catch{}}
 }
 function connectLiveSocket(){
@@ -963,6 +963,7 @@ function connectLiveSocket(){
     try{
       const m=JSON.parse(ev.data);
       if(m.type==="index"){applyIndexTick(m.index);return}
+      if(m.type==="opt"){(m.ticks||[]).forEach(t=>{t={...t,fresh:!!t.fresh};if(t.instrument_key)liveTickMap[t.instrument_key]=t;if(paperSelected&&t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});return}
       if(m.type==="bars"){if(m.interval===getInterval()){wsBarsAt=Date.now();mergeLiveBars(m)}return}
       if(m.type==="analysis"){onLiveAnalysis(m);return}
       const ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));

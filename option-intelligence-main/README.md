@@ -1,5 +1,11 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.19.7 - 0.1 s live refresh
+
+* The live socket now checks every **0.1 s** (`WS_TICK_SEC=0.1`, `WS_PUSH_SEC=0.1`): the index price, the forming candle and the selected option's premium move up to 10 times a second (sent only when the price changed); option premiums that moved are pushed as `opt` messages instead of waiting for the 1 s full tick list.
+* Candles and analysis are checked every 0.1 s too, but are pushed only when the server holds a newer result. They are rebuilt from Upstox's REST candles (cache 3 s) and the shared analysis (about every 2 s) - polling Upstox 10x a second per page would hit its rate limits and get the token throttled, so those two stay as they are.
+* The "Auto refresh" selector (2 s minimum) is now only the fallback when the live socket is down.
+
 ## v1.19.6 - real-time push over the live socket, diagnostics corrections
 
 **Why it felt slow:** only option ticks came over the WebSocket (every 0.5 s). The chart re-downloaded **10 days of candles** and the score / decision / buy plan were fetched over REST every 2-4 s, one after the other - on a phone most of that time was spent downloading the same history again.
