@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.19.8";
+const FRONTEND_VERSION="1.19.9";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -584,7 +584,8 @@ async function refresh(){
     renderCandles(c.candles);
     if(lastVolumeSource)$("chartNote").textContent+=` Volume and VWAP weights come from ${lastVolumeSource} (the index itself has no volume).`;
     const f=c.feed;
-    $("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()}`+(f&&f.price_source&&f.price_source!=="CLOSED"?` · price: ${f.price_source==="WEBSOCKET"?"live tick":f.price_source==="REST_QUOTE"?"REST quote":"candles only"}${f.bars_behind>0?` · candle feed ${f.bars_behind} bar${f.bars_behind>1?"s":""} behind`:""}`:"");
+    if(!marketOpen)setUpdated(`Market closed · last session data (nothing changes until 09:15) · checked ${new Date().toLocaleTimeString()}`);
+    else if(Date.now()-liveLabelAt>3000)$("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()}`+(f&&f.price_source&&f.price_source!=="CLOSED"?` · price: ${f.price_source==="WEBSOCKET"?"live tick":f.price_source==="REST_QUOTE"?"REST quote":"candles only"}${f.bars_behind>0?` · candle feed ${f.bars_behind} bar${f.bars_behind>1?"s":""} behind`:""}`:"");
     runAnalysis(manual);
   }catch(e){toast("Data load failed: "+e.message);$("analysisNote").textContent=e.message}
   finally{$("refreshBtn").disabled=false;$("refreshBtn").textContent="Refresh data"}
@@ -802,6 +803,7 @@ function startAutoRefresh(){
     sendLiveSub();
     // v1.19.6: while the live socket is pushing candles + analysis, the full REST reload only runs every 30 s as a safety net.
     if(livePushFresh()&&Date.now()-lastFullRefresh<30000)return;
+    if(!marketOpen&&Date.now()-lastFullRefresh<30000)return;     // v1.19.9: market closed - prices cannot change, reload every 30 s only
     refreshBusy=true;refreshBusySince=Date.now();
     try{await refresh()}catch(e){console.warn("Auto-refresh failed:",e)}finally{refreshBusy=false}
   },sec*1000);
@@ -909,6 +911,16 @@ setInterval(async()=>{
   catch{}finally{restPriceBusy=false}
 },2000);
 // ---- v1.19.6 real-time push ------------------------------------------------------------------------------------------------
+// v1.19.9: the "Updated" line shows the time of the last LIVE update (to 0.1 s), so the 0.1 s refresh is visible.
+let liveLabelAt=0,liveLabelPaint=0,liveAnAge=null,liveAnAt=0;
+function setUpdated(t){const el=$("lastUpdated");if(el)el.textContent=t}
+function liveStamp(){
+  if(!marketOpen)return;
+  const now=Date.now();liveLabelAt=now;if(now-liveLabelPaint<100)return;liveLabelPaint=now;
+  const d=new Date(),ts=`${d.toLocaleTimeString("en-GB",{hour12:false})}.${Math.floor(d.getMilliseconds()/100)}`;
+  const an=liveAnAt?` · analysis ${fmt((liveAnAge||0)+(now-liveAnAt)/1000,1)} s old`:"";
+  setUpdated(`● Live ${ts} · every ${liveRate()} s${an}`);
+}
 function liveRate(){const v=Number($("refreshEvery")?.value);return Number.isFinite(v)&&v>0?Math.min(2,Math.max(0.1,v)):0.1}
 function liveSubObj(){return{type:"sub",rate:liveRate(),interval:getInterval(),mode:getMode(),score_min:getScoreMin(),reconfirm:getReconfirm(),view:$("chartView").value==="option"?"option":"index"}}
 function liveSocketOpen(){try{return !!liveSocket&&liveSocket.readyState===WebSocket.OPEN}catch{return false}}   // TDZ-safe: may run before the socket code below is initialised
@@ -932,7 +944,7 @@ function onLiveAnalysis(m){
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
     $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";renderSignal();
   }else applyAnalysis(a);
-  const lu=$("lastUpdated");if(lu&&o.view!=="option")lu.textContent=`Live push ${new Date().toLocaleTimeString()} · analysis ${a.cache_age_s!=null?fmt(a.cache_age_s,1)+" s old":"new"}`;
+  liveAnAge=a.cache_age_s!=null?Number(a.cache_age_s):0;liveAnAt=Date.now();liveStamp();
 }
 // The server sends the last 3 candles of the chart interval whenever they change: replace / append them in place, so the chart
 // (incl. volume, EMA, VWAP) moves without re-downloading 10 days of candles.
@@ -964,9 +976,9 @@ function connectLiveSocket(){
     if(gen!==liveSocketGen)return;
     try{
       const m=JSON.parse(ev.data);
-      if(m.type==="index"){applyIndexTick(m.index);return}
-      if(m.type==="opt"){(m.ticks||[]).forEach(t=>{t={...t,fresh:!!t.fresh};if(t.instrument_key)liveTickMap[t.instrument_key]=t;if(paperSelected&&t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});return}
-      if(m.type==="bars"){if(m.interval===getInterval()){wsBarsAt=Date.now();mergeLiveBars(m)}return}
+      if(m.type==="index"){applyIndexTick(m.index);liveStamp();return}
+      if(m.type==="opt"){(m.ticks||[]).forEach(t=>{t={...t,fresh:!!t.fresh};if(t.instrument_key)liveTickMap[t.instrument_key]=t;if(paperSelected&&t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});liveStamp();return}
+      if(m.type==="bars"){if(m.interval===getInterval()){wsBarsAt=Date.now();mergeLiveBars(m);liveStamp()}return}
       if(m.type==="analysis"){onLiveAnalysis(m);return}
       const ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));
       renderLiveTicks(ticks);

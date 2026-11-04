@@ -1,5 +1,10 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.19.9 - the "Updated" line shows live updates
+
+* While the market is open, the line under Refresh data now shows the time of the last live update to 0.1 s (e.g. "● Live 11:02:15.3 · every 0.1 s · analysis 1.2 s old"). Before, it only changed when the 2 s REST reload or a new analysis arrived, so the 0.1 s feed looked like 2 s.
+* After 15:30 it says "Market closed · last session data" and the reload runs every 30 s: no ticks arrive when the exchange is closed.
+
 ## v1.19.8 - "Auto refresh" goes down to 0.1 s
 
 * The Auto refresh selector now offers 0.1 s (default), 0.25 s, 0.5 s and 1 s (live), plus 2-60 s. The live choice sets how often the live socket updates this page (price, forming candle, option premium). The full REST reload stays at 2 s minimum and runs only as a fallback. Saved older choices (2 s) are reset to 0.1 s once.
