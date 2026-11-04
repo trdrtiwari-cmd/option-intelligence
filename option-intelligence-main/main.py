@@ -21,6 +21,7 @@ import signal_fusion as sf
 import signal_exits as sx
 import notifier
 import option_plan as op
+import signal_board as sb
 
 # Resolve the project directory before any path-backed configuration is initialized.
 BASE_DIR = Path(__file__).resolve().parent
@@ -146,7 +147,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.19.4"
+APP_VERSION = "1.19.5"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1509,6 +1510,7 @@ def _float_or_none(value):
         return None
 
 init_signal_log()
+sb.init(SIGNAL_LOG_DB)          # v1.19.5 signal board (every option signal, same file)
 
 
 def _live_index_price(sym):
@@ -1677,35 +1679,43 @@ def _signal_rows_all():
 
 def mirror_signal_log():
     import hashlib
-    months = {}
-    for r in _signal_rows_all():
-        r.pop("id", None)
-        months.setdefault(str(r.get("session_date") or "")[:7], []).append(r)
-    for month, rows in months.items():
-        blob = json.dumps(rows, separators=(",", ":"), default=str)
-        h = hashlib.sha1(blob.encode()).hexdigest()
-        if _SL_MIRROR_HASH.get(month) != h:
-            acc.meta_set("signal_log:" + month, blob)
-            _SL_MIRROR_HASH[month] = h
+    for prefix, rows_all in (("signal_log:", _signal_rows_all()), ("signal_board:", _board_rows_all())):
+        months = {}
+        for r in rows_all:
+            r.pop("id", None)
+            months.setdefault(str(r.get("session_date") or "")[:7], []).append(r)
+        for month, rows in months.items():
+            blob = json.dumps(rows, separators=(",", ":"), default=str)
+            h = hashlib.sha1(blob.encode()).hexdigest()
+            if _SL_MIRROR_HASH.get(prefix + month) != h:
+                acc.meta_set(prefix + month, blob)
+                _SL_MIRROR_HASH[prefix + month] = h
+
+
+def _board_rows_all():
+    with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(r) for r in db.execute("SELECT * FROM option_signals ORDER BY id").fetchall()]
 
 
 def restore_signal_log():
     """Re-insert rows missing from the local file (after a restart wiped it). Existing rows are never overwritten."""
     restored = 0
-    for item in acc.meta_list("signal_log:"):
-        try:
-            rows = json.loads(item["value"])
-        except ValueError:
-            continue
-        with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
-            have = {r[1] for r in db.execute("PRAGMA table_info(signal_log)").fetchall()}
-            for r in rows:
-                cols = [c for c in r if c in have]
-                cur = db.execute(f"INSERT OR IGNORE INTO signal_log ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", [r[c] for c in cols])
-                restored += cur.rowcount or 0
-            db.commit()
-        import hashlib
-        _SL_MIRROR_HASH[item["key"].split(":", 1)[1]] = hashlib.sha1(item["value"].encode()).hexdigest()
+    import hashlib
+    for prefix, table in (("signal_log:", "signal_log"), ("signal_board:", "option_signals")):
+        for item in acc.meta_list(prefix):
+            try:
+                rows = json.loads(item["value"])
+            except ValueError:
+                continue
+            with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+                have = {r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+                for r in rows:
+                    cols = [c for c in r if c in have]
+                    cur = db.execute(f"INSERT OR IGNORE INTO {table} ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", [r[c] for c in cols])
+                    restored += cur.rowcount or 0
+                db.commit()
+            _SL_MIRROR_HASH[prefix + item["key"].split(":", 1)[1]] = hashlib.sha1(item["value"].encode()).hexdigest()
     return restored
 
 
@@ -1757,6 +1767,41 @@ async def _end_of_day_summary():
 _EXIT_WATCHER_TASK = None
 
 
+_BOARD_AT = [0.0]
+
+
+async def board_outcomes(limit=8):
+    """Fill in what each board signal's option (and the index) did in the 60 minutes after it. Runs every 2 minutes."""
+    rows = await asyncio.to_thread(sb.pending, SIGNAL_LOG_DB, datetime.now(IST), limit, SIGNAL_LOG_LOCK)
+    if not rows:
+        return 0
+    idx_cache, done = {}, 0
+    today = ist_now().date()
+    for r in rows:
+        try:
+            d = date.fromisoformat(str(r["session_date"])[:10])
+        except ValueError:
+            d = today
+        days = max(1, min(10, (today - d).days + 1))
+        try:
+            opt = normalize_candles(await fetch_candles(r["option_key"], 1, days)) if r.get("option_key") else []
+            key = (r["symbol"], days)
+            if key not in idx_cache and r["symbol"] in INDEX_KEYS:
+                idx_cache[key] = normalize_candles(await fetch_candles(INDEX_KEYS[r["symbol"]], 1, days))
+            fields = sb.outcome(r, opt, idx_cache.get(key, []), IST, sx._first_exit)
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+            if (today - d).days < 5:
+                continue                     # try again later
+            fields = {"outcome_at": datetime.now(IST).isoformat(timespec="seconds"), "outcome_note": f"candles unavailable: {str(exc.detail)[:80]}"}
+        await asyncio.to_thread(sb.save_outcome, SIGNAL_LOG_DB, r["id"], fields, SIGNAL_LOG_LOCK)
+        done += 1
+    if done:
+        _SIGNAL_LOG_DIRTY.set()
+    return done
+
+
 async def _signal_exit_watcher():
     """Background loop: checks open logged trades against the live index price every 3 s while the market is open
     (every 60 s otherwise, so trades from today are squared off at the close and old ones are marked expired).
@@ -1775,6 +1820,12 @@ async def _signal_exit_watcher():
                 except Exception as exc: logger.warning("Signal log mirror failed: %s", str(exc)[:140]); _SIGNAL_LOG_DIRTY.set()
             try: await _end_of_day_summary()
             except Exception as exc: logger.debug("EOD summary: %s", str(exc)[:140])
+            if runtime_token and time.time() - _BOARD_AT[0] > 120:
+                _BOARD_AT[0] = time.time()
+                try:
+                    await board_outcomes()
+                except Exception as exc:
+                    logger.info("Signal board outcomes: %s", str(getattr(exc, "detail", exc))[:140])
             if open_by_symbol and runtime_token:
                 for sym in list(open_by_symbol):
                     if sym not in INDEX_KEYS:
@@ -2341,7 +2392,8 @@ async def signal_log_config():
             "sl_atr": c["sl_atr"], "target_atr": c["target_atr"],
             "default_sl_atr": t.get("atr_sl"), "default_target_atr": t.get("atr_t2"), "min_sl_points": t.get("atr_min_sl_pts"),
             "custom": bool(c["sl_atr"] and c["target_atr"]),
-            "exit_plan": OPTION_OVERRIDES.get("exit_plan") or os.getenv("EXIT_PLAN", "balanced"),
+            "exit_plan": OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
+            "min_sl_atr": op.MIN_SL_ATR, "entry_windows": sf.entry_windows_text(),
             "exit_plans": {k: v["label"] for k, v in op.EXIT_PLANS.items()},
             "option": {"steps": oc["steps"], "moneyness": oc["moneyness"], "lots": oc["lots"], "charges_rs": oc["charges_rs"], "min_rr": oc["min_rr"],
                        "custom": bool(OPTION_OVERRIDES)}}
@@ -2366,8 +2418,8 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
     if payload.sl_atr is not None or payload.target_atr is not None:
         if payload.sl_atr is None or payload.target_atr is None:
             raise HTTPException(400, "Give both the stop and the target multiple (or neither, to use the default plan)")
-        if not 0.2 <= payload.sl_atr <= 5 or not 0.3 <= payload.target_atr <= 10:
-            raise HTTPException(400, "Stop must be 0.2-5 ATR and target 0.3-10 ATR")
+        if not op.MIN_SL_ATR <= payload.sl_atr <= 5 or not 0.3 <= payload.target_atr <= 10:
+            raise HTTPException(400, f"Stop must be {op.MIN_SL_ATR:g}-5 ATR (minimum rule) and target 0.3-10 ATR")
         new.update(sl_atr=payload.sl_atr, target_atr=payload.target_atr)
     if payload.cost_points is not None:
         if not 0 <= payload.cost_points <= 200:
@@ -2395,7 +2447,7 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         new["opt_min_rr"] = float(payload.opt_min_rr)
     if payload.opt_exit_plan:
         if payload.opt_exit_plan not in op.EXIT_PLANS:
-            raise HTTPException(400, "Exit plan must be balanced or winrate")
+            raise HTTPException(400, "Exit plan must be one of: " + ", ".join(op.EXIT_PLANS))
         new["opt_exit_plan"] = payload.opt_exit_plan
     sx.set_overrides(new)
     _set_option_overrides(new)
@@ -2416,6 +2468,26 @@ async def signal_summary(group: str = "day", start: str = "", end: str = "", sym
     out["cost_points_per_trade"] = sx.config()["cost"]
     out["note"] = "Index points, after the per-trade cost allowance. Open trades are excluded until they exit; EXPIRED trades (server asleep) carry no P/L."
     return out
+
+@app.get("/api/signal-board")
+async def signal_board(start: str = "", end: str = "", symbol: str = "", stage: str = "", limit: int = 5000):
+    """v1.19.5: every option signal (WATCH, SETUP, BUY, NO BUY, FAILED) with the option's result over the following hour."""
+    if stage and stage.upper() not in sb.STAGES:
+        raise HTTPException(400, "stage must be one of: " + ", ".join(sb.STAGES))
+    rows = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, start, end, symbol if symbol.upper() in INDEX_KEYS else "", stage, limit, SIGNAL_LOG_LOCK)
+    return {"rows": rows, "count": len(rows), "summary": sb.summary(rows),
+            "note": "Recorded automatically during market hours. 60-minute results appear about an hour after each signal (or after the close)."}
+
+
+@app.get("/api/signal-board/export.csv")
+async def signal_board_csv(start: str = "", end: str = "", symbol: str = "", stage: str = ""):
+    data = await signal_board(start, end, symbol, stage, 20000)
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=sb.FIELDS, extrasaction="ignore")
+    writer.writeheader(); writer.writerows(data["rows"])
+    payload = io.BytesIO(output.getvalue().encode("utf-8-sig")); payload.seek(0)
+    return StreamingResponse(payload, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=option_intelligence_signal_board.csv"})
+
 
 @app.get("/signals")
 async def signal_log_page():
@@ -2472,6 +2544,12 @@ async def export_signal_log_xlsx(start: str = "", end: str = "", symbol: str = "
             cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D"); cell.alignment = Alignment(wrap_text=True)
         for cell in sheet[sheet.max_row]: cell.font = Font(bold=True)
         sheet.freeze_panes = "A2"
+    board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, start, end, symbol if symbol.upper() in INDEX_KEYS else "", "", 20000, SIGNAL_LOG_LOCK)
+    bs = wb.create_sheet("Signal Board"); bs.append(sb.FIELDS)
+    for row in board: bs.append([row.get(k) for k in sb.FIELDS])
+    for cell in bs[1]:
+        cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D"); cell.alignment = Alignment(wrap_text=True)
+    bs.freeze_panes = "A2"
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
     return StreamingResponse(bio, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition":"attachment; filename=option_intelligence_signals.xlsx"})
 
@@ -2653,6 +2731,13 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
             await _route_signal_alerts(sym, interval, mode, a, fused, market["open"])
         except Exception as exc:
             logger.warning("Alert routing failed: %s", str(exc)[:160])
+        if sym in INDEX_KEYS and in_session():           # v1.19.5: every option signal goes on the signal board automatically
+            try:
+                brow = sb.make_row(datetime.now(IST), sym, interval, mode, a, final, fused.get("reconfirm"), pick, fused.get("timing"))
+                if brow and await asyncio.to_thread(sb.insert, SIGNAL_LOG_DB, brow, SIGNAL_LOG_LOCK):
+                    _SIGNAL_LOG_DIRTY.set()
+            except Exception as exc:
+                logger.warning("Signal board write failed: %s", str(exc)[:160])
         a["gates"] = (a.get("gates") or []) + fused["gates"]
         a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],
                   "signal_technical": a.get("signal"), "decision_technical": a.get("decision"),
@@ -2711,14 +2796,10 @@ async def _option_pick(sym, side):
 async def _buy_plan(sym, interval, mode, score_min, a, raw_candles, pick):
     side = (a.get("final") or {}).get("side") or a.get("side")
     t, sc = dd.THRESHOLDS, sx.config()
-    sl_atr = sc["sl_atr"] or t["atr_sl"]
-    tgt_atr = sc["target_atr"] or {"T1": t["atr_t1"], "T2": t["atr_t2"], "T3": t["atr_t3"]}.get(sc["target"], t["atr_t2"])
-    min_sl, ocfg = t["atr_min_sl_pts"], _opt_cfg()
-    plan_name = OPTION_OVERRIDES.get("exit_plan") or os.getenv("EXIT_PLAN", "balanced")
-    wp = op.EXIT_PLANS.get(plan_name) if plan_name == "winrate" else None
-    if wp:                                       # v1.19.1 high win-rate exit plan: small target, wider stop
-        sl_atr, tgt_atr, min_sl = wp["sl_atr"], wp["target_atr"], wp["min_sl_pts"]
-        ocfg.update(min_target_pts=wp["min_target_pts"], min_rr=wp["min_rr"], min_target_atr=wp["min_target_atr"], min_premium_rr=wp["min_premium_rr"])
+    # v1.19.5: stop never closer than 1.5 ATR (min 20 pts); target from the exit plan (default 1.5 ATR) or the custom multiple
+    sl_atr, min_sl, tgt_atr, plan_key = op.plan_levels(OPTION_OVERRIDES.get("exit_plan"), sc["sl_atr"], sc["target_atr"])
+    ocfg = _opt_cfg()
+    ocfg["min_target_atr"] = min(ocfg["min_target_atr"], tgt_atr)
     entry = _live_index_price(sym) or _float_or_none(a.get("last_close"))
     try:
         sr = op.sr_levels(normalize_candles(raw_candles), a.get("atr"), interval, sym)
@@ -2733,7 +2814,7 @@ async def _buy_plan(sym, interval, mode, score_min, a, raw_candles, pick):
         except Exception as exc:
             logger.info("Premium trend unavailable: %s", str(getattr(exc, "detail", exc))[:120])
     plan = op.profit_plan(side, entry, a.get("atr"), sr, pick, ptrend, sl_atr, min_sl, tgt_atr, ocfg)
-    plan["exit_plan"] = "winrate" if wp else "balanced"
+    plan["exit_plan"] = plan_key
     plan["sr"] = {"resistances": (sr or {}).get("resistances", [])[:3], "supports": (sr or {}).get("supports", [])[:3]}
     return plan
 

@@ -29,6 +29,37 @@ def _env_minutes(name, default):
 # 14 days of replayed signals (v1.11 diagnostics): entries before 12:00 made money, entries after 13:30 lost in both modes.
 # Override with ENTRY_CUTOFF=15:00 (or any HH:MM) in the environment if your own diagnostics say otherwise.
 ENTRY_CUTOFF_MIN = _env_minutes("ENTRY_CUTOFF", 13 * 60 + 30)
+
+
+def _parse_windows(text):
+    out = []
+    for part in (text or "").split(","):
+        try:
+            a, b = part.strip().split("-")
+            ha, ma = a.split(":"); hb, mb = b.split(":")
+            out.append((int(ha) * 60 + int(ma), int(hb) * 60 + int(mb)))
+        except ValueError:
+            continue
+    return out
+
+
+# v1.19.5: entries only in the two parts of the session that paid in EVERY replay file (5 Oct - 4 Nov 2026, NIFTY 5m):
+#   09:45-12:00  scalp 27 trades 70 % winners +11.2 pts | standard 17 trades 65 % +8.0
+#   14:30-15:00  scalp  7 trades 71 % +11.7            | standard  5 trades 80 % +16.0
+# and none in the two that lost in every file:
+#   12:00-13:30  scalp 53 % +2.5 (second half 44 %, -1.8) | standard 42 % -3.2 (second half 29 %, -9.7)
+#   13:30-14:30  scalp 36 % -5.8                          | standard 31 % -8.4
+# ENTRY_WINDOWS="09:45-12:00,14:30-15:00" in the environment changes them (old single cutoff: ENTRY_CUTOFF still works if ENTRY_WINDOWS is unset).
+ENTRY_WINDOWS = _parse_windows(os.getenv("ENTRY_WINDOWS", "")) or (
+    [(ENTRY_START_MIN, ENTRY_CUTOFF_MIN)] if os.getenv("ENTRY_CUTOFF", "").strip() else [(9 * 60 + 45, 12 * 60), (14 * 60 + 30, 15 * 60)])
+
+
+def in_entry_window(minute):
+    return any(a <= minute < b for a, b in ENTRY_WINDOWS)
+
+
+def entry_windows_text():
+    return ", ".join(f"{a // 60:02d}:{a % 60:02d}–{b // 60:02d}:{b % 60:02d}" for a, b in ENTRY_WINDOWS)
 AGREE_LEVELS = ("CONFIRMED", "BIAS")
 try:
     SCORE_CAP = int(os.getenv("SCORE_CAP", "0") or 0)      # 0 = no upper score limit (v1.19); e.g. 90 restores the old cap
@@ -214,8 +245,8 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
             detail = f"Dashboard: {summary['action']} (score {summary['score']:+.0f}) — not aligned with {side} yet"
         gates.append({"label": "Data Check dashboard agrees (≥ BIAS, same side)", "pass": agrees, "detail": detail})
         minute = now_dt.hour * 60 + now_dt.minute
-        in_window = bool(market_open) and ENTRY_START_MIN <= minute < ENTRY_CUTOFF_MIN
-        gates.append({"label": f"Entry time window {ENTRY_START_MIN // 60:02d}:{ENTRY_START_MIN % 60:02d}–{ENTRY_CUTOFF_MIN // 60:02d}:{ENTRY_CUTOFF_MIN % 60:02d} IST",
+        in_window = bool(market_open) and in_entry_window(minute)
+        gates.append({"label": f"Entry time window {entry_windows_text()} IST",
                       "pass": in_window,
                       "detail": f"Now {now_dt.strftime('%H:%M')} IST" + ("" if market_open else " · market closed") +
                                 ("" if in_window or not market_open else " — outside the entry window")})

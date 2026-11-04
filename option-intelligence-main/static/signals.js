@@ -96,11 +96,38 @@ async function load() {
     if (!r.ok) throw Error(await r.text());
     rows = (await r.json()).rows || [];
     $('count').textContent = `${rows.length} records`;
-    render(); loadSummary();
+    render(); loadSummary(); loadBoard();
     loadPrices().then(render);
   } catch (e) {
     $('rows').innerHTML = `<tr><td colspan="11" class="empty">Could not load log: ${esc(e.message)}</td></tr>`;
   }
+}
+
+// ---- v1.19.5 signal board: every option signal with what the option did next
+async function loadBoard() {
+  try {
+    const p = filters(); p.set('stage', $('boardStage').value); p.delete('limit');
+    const r = await fetch('/api/signal-board?' + p, {credentials: 'same-origin'});
+    if (!r.ok) throw Error(await r.text());
+    const d = await r.json();
+    const pc = v => num(v) === null ? '—' : (v > 0 ? '+' : '') + fmt(v, 1) + '%';
+    $('boardSum').innerHTML = d.summary.filter(s => s.count).map(s =>
+      `<tr><td><b>${esc(s.stage)}</b></td><td>${s.count}</td><td>${s.with_outcome}</td><td>${s.pct_up20 === null ? '—' : s.pct_up20 + '%'}</td>` +
+      `<td>${pc(s.avg_best_pct)} / ${pc(s.avg_worst_pct)}</td><td>${s.test_target} / ${s.test_stop} / ${s.test_open}</td>` +
+      `<td>${s.test_win_rate === null ? '—' : s.test_win_rate + '%'}</td><td style="${tone(s.test_avg_points)}">${num(s.test_avg_points) === null ? '—' : signed(s.test_avg_points, 1)}</td></tr>`).join('')
+      || '<tr><td colspan="8" class="empty">No option signals recorded for these filters yet.</td></tr>';
+    const stColor = {BUY: 'var(--green)', 'NO BUY': 'var(--yellow)', FAILED: 'var(--red)', SETUP: 'var(--blue)'};
+    $('boardRows').innerHTML = d.rows.length ? d.rows.map(r => {
+      const done = !!r.outcome_at, prem = num(r.opt_entry) ?? num(r.option_ltp);
+      const chg = v => num(v) === null || !prem ? '' : ` (${pc((v - prem) / prem * 100)})`;
+      return `<tr><td><span class="sig-opt" style="color:${stColor[r.stage] || ''}">${esc(r.stage)} · ${esc(r.option_name || '')}</span>${sub(esc(timeOnly(r.created_at).slice(0, 16)) + ' · ' + esc(r.interval) + 'm ' + esc(r.mode) + (r.option_label ? ' · ' + esc(r.option_label) : ''))}</td>` +
+        `<td>${prem === null ? '—' : fmt(prem)}</td><td>${fmt(r.index_price)}${sub(r.score ? 'score ' + esc(r.score) + ' · ' + esc(r.regime || '') : '')}</td>` +
+        `<td>${num(r.opt_sl) === null ? '—' : fmt(r.opt_sl) + ' / ' + fmt(r.opt_target)}${sub(num(r.idx_sl) === null ? 'no plan (test uses 1.5 / 1.5 ATR)' : 'index ' + fmt(r.idx_sl) + ' / ' + fmt(r.idx_target))}</td>` +
+        `<td>${done ? (num(r.opt_30) === null ? '—' : fmt(r.opt_30)) + ' / ' + (num(r.opt_60) === null ? '—' : fmt(r.opt_60) + chg(r.opt_60)) : '<span class="sub">after 60 min</span>'}</td>` +
+        `<td>${done && num(r.best_pct_60) !== null ? `<span style="color:var(--green)">${pc(r.best_pct_60)}</span> / <span style="color:var(--red)">${pc(r.worst_pct_60)}</span>` : (done ? esc(r.outcome_note || '—') : '<span class="sub">pending</span>')}</td>` +
+        `<td style="${tone(r.test_points)}">${r.test_result ? esc(r.test_result) + ' ' + signed(r.test_points, 1) : '—'}</td><td class="wrap">${esc(r.reason || '')}</td></tr>`;
+    }).join('') : '<tr><td colspan="8" class="empty">No option signals recorded for these filters yet. They are added automatically during market hours.</td></tr>';
+  } catch (e) { $('boardRows').innerHTML = `<tr><td colspan="8" class="empty">Could not load the signal board: ${esc(e.message)}</td></tr>`; }
 }
 
 async function loadConfig() {
@@ -108,12 +135,12 @@ async function loadConfig() {
   $('slAtr').value = cfg.sl_atr ?? ''; $('tgtAtr').value = cfg.target_atr ?? ''; $('costPts').value = cfg.cost_points ?? '';
   $('atrLine').textContent = cfg.custom
     ? `Custom plan active: stop ${cfg.sl_atr}× ATR, target ${cfg.target_atr}× ATR.`
-    : `Default plan active: stop ${cfg.default_sl_atr}× ATR (minimum ${cfg.min_sl_points} pts), target ${cfg.target} (${cfg.default_target_atr}× ATR for T2).`;
+    : `Default plan active: stop ${cfg.min_sl_atr ?? 1.5}× ATR (minimum ${cfg.min_sl_points} pts), target from the exit plan below.`;
   const o = cfg.option || {};
   if ($('optSteps')) {
     $('optSteps').value = String(o.steps ?? 2); $('optMoney').value = o.moneyness || 'ITM'; $('optLots').value = o.lots ?? 1;
-    $('optCharges').value = o.charges_rs ?? 60; $('optRr').value = o.min_rr ?? 1.5; $('optExit').value = cfg.exit_plan || 'balanced';
-    $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · ${cfg.exit_plan === 'winrate' ? 'exit plan: HIGH WIN-RATE (small target, wider stop).' : `a BUY needs reward : risk ≥ ${o.min_rr ?? 1.5}.`}`;
+    $('optCharges').value = o.charges_rs ?? 60; $('optRr').value = o.min_rr ?? 1.5; $('optExit').value = cfg.exit_plan || 't1.5';
+    $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · stop at least ${cfg.min_sl_atr ?? 1.5} ATR (${cfg.min_sl_points ?? 20} pts) · entries ${cfg.entry_windows || ''} IST.`;
   }
 }
 
@@ -183,6 +210,8 @@ $('grpMonth').onclick = () => { group = 'month'; loadSummary(); };
 $('saveAtr').onclick = () => saveAtr(false);
 $('resetAtr').onclick = () => saveAtr(true);
 $('settleNow').onclick = settleNow;
+$('boardStage').onchange = loadBoard;
+$('boardCsv').onclick = () => { const p = filters(); p.set('stage', $('boardStage').value); p.delete('limit'); location.href = '/api/signal-board/export.csv?' + p; };
 if ($('saveOpt')) $('saveOpt').onclick = async () => { $('optMsg').textContent = 'Saving…'; await saveAtr('opt'); $('optMsg').textContent = $('atrMsg').textContent; };
 $('exportXlsx').onclick = () => exportFile('xlsx');
 $('exportCsv').onclick = () => exportFile('csv');

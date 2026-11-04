@@ -41,31 +41,40 @@ def _num(v):
 DEFAULTS = {
     "steps": int(_envf("OPTION_STRIKE_STEPS", 2)),            # strikes away from ATM
     "moneyness": (os.getenv("OPTION_MONEYNESS", "ITM").strip().upper() or "ITM"),   # ITM = CE below ATM / PE above ATM (default); OTM = the other way
-    "min_rr": _envf("OPTION_MIN_RR", 1.5),                    # index reward : risk
-    "min_target_atr": _envf("OPTION_MIN_TARGET_ATR", 1.2),    # target must be at least this far (ATR)
+    "min_rr": _envf("OPTION_MIN_RR", 1.0),                    # index reward : risk (1 : 1 with the 1.5 ATR stop / 1.5 ATR target plan)
+    "min_target_atr": _envf("OPTION_MIN_TARGET_ATR", 1.2),    # target must be at least this far (ATR); never more than the plan's own target
     "sr_buffer_atr": _envf("OPTION_SR_BUFFER_ATR", 0.15),     # stop the target this far before the level
     "sr_ignore_atr": _envf("OPTION_SR_IGNORE_ATR", 0.3),      # a level closer than this is being broken now - look past it
     "max_spread_pct": _envf("OPTION_MAX_SPREAD_PCT", 3.0),
     "charges_rs": _envf("OPTION_CHARGES_RS", 60.0),           # brokerage + STT + exchange + GST + stamp, one round trip, per order
     "lots": max(1, int(_envf("OPTION_LOTS", 1))),
     "min_profit_x_charges": _envf("OPTION_MIN_PROFIT_X_CHARGES", 2.0),
-    "min_premium_rr": _envf("OPTION_MIN_PREMIUM_RR", 1.2),
+    "min_premium_rr": _envf("OPTION_MIN_PREMIUM_RR", 0.8),
     "max_premium_sl_pct": _envf("OPTION_MAX_PREMIUM_SL_PCT", 25.0),
     "hold_minutes": _envf("OPTION_HOLD_MINUTES", 45.0),       # expected holding time, for theta decay
     "min_target_pts": 0.0,
 }
 
-# v1.19.1 exit plans. "balanced" = the replay-calibrated 0.75 ATR stop / 3 ATR target (fewer winners, bigger ones).
-# "winrate" = small target, wider stop: more trades end as winners (the Oct-Nov standard-mode replays had 72-83 % winners at
-# 15-pt targets with 20-30 pt stops) but each winner is small, so after costs the average is close to zero. Use it only when the
-# Diagnostics "Win-rate finder" shows it held in BOTH halves of your own recent data.
+# v1.19.5 exit plans. The stop is never closer than MIN_SL_ATR (1.5 ATR, at least 20 index points) - the owner's rule: entries got
+# stopped by normal noise (median adverse move after a signal was 45-55 pts, about 1.8 ATR). The target is chosen per plan.
+# In the Oct-Nov replays, on the signals the new time windows let through, a 1.5 ATR target was reached far more often within the
+# session than 2-3 ATR targets (which mostly ended as time exits), so 1.5 ATR (1 : 1) is the default.
+MIN_SL_ATR = _envf("MIN_SL_ATR", 1.5)
+MIN_SL_PTS = _envf("MIN_SL_PTS", 20)
 EXIT_PLANS = {
-    "balanced": {"label": "Balanced (0.75 ATR stop / 3 ATR target)"},
-    "winrate": {"label": "High win-rate (target 0.6 ATR, min 15 pts / stop 1 ATR, min 20 pts)",
-                "target_atr": _envf("WINRATE_TARGET_ATR", 0.6), "min_target_pts": _envf("WINRATE_MIN_TARGET_PTS", 15),
-                "sl_atr": _envf("WINRATE_SL_ATR", 1.0), "min_sl_pts": _envf("WINRATE_MIN_SL_PTS", 20),
-                "min_rr": 0.4, "min_target_atr": 0.4, "min_premium_rr": 0.4},
+    "t1.5": {"label": "Stop 1.5 ATR · target 1.5 ATR (1 : 1)", "target_atr": 1.5},
+    "t2": {"label": "Stop 1.5 ATR · target 2 ATR (1 : 1.33)", "target_atr": 2.0},
+    "t3": {"label": "Stop 1.5 ATR · target 3 ATR (1 : 2)", "target_atr": 3.0},
 }
+DEFAULT_EXIT_PLAN = os.getenv("EXIT_PLAN", "t1.5") if os.getenv("EXIT_PLAN", "t1.5") in EXIT_PLANS else "t1.5"
+
+
+def plan_levels(plan_name=None, custom_sl_atr=None, custom_target_atr=None):
+    """(sl_atr, min_sl_pts, target_atr, plan_key) for the chosen exit plan. A custom stop from the Signals page is floored at MIN_SL_ATR."""
+    key = plan_name if plan_name in EXIT_PLANS else DEFAULT_EXIT_PLAN
+    sl = max(MIN_SL_ATR, float(custom_sl_atr)) if custom_sl_atr else MIN_SL_ATR
+    tgt = float(custom_target_atr) if custom_target_atr else EXIT_PLANS[key]["target_atr"]
+    return sl, MIN_SL_PTS, tgt, key
 
 
 def strike_step(symbol, strikes=None):
@@ -223,7 +232,7 @@ def profit_plan(side, entry, atr, sr=None, pick=None, premium_trend=None, sl_atr
             target_pts = capped
             basis = f"just before {'R' if side == 'CE' else 'S'} {lv['price']:,.2f} ({lv['strength']}, {lv.get('basis') or 'zone'})"
         break
-    min_target = max(c["min_rr"] * risk, c["min_target_atr"] * atr, min(c.get("min_target_pts") or 0.0, base))
+    min_target = min(base, max(c["min_rr"] * risk, c["min_target_atr"] * atr, c.get("min_target_pts") or 0.0))
     rr = target_pts / risk if risk else 0
     checks.append({"label": f"Room to the target (≥ {c['min_rr']:g} × risk and ≥ {c['min_target_atr']:g} ATR)", "pass": target_pts >= min_target - 1e-9,
                    "detail": f"target {target_pts:+.1f} pts ({basis}) vs stop {risk:.1f} pts · reward:risk {rr:.2f}"

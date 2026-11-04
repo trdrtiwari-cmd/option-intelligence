@@ -28,11 +28,11 @@ THRESHOLDS = {
     # is clearly worse than 15-20, hence the 15-pt floor. A 3 ATR target is flat against 4-5 ATR (scalp slightly prefers 4-5, standard 3).
     # Early break-even / trailing / scale-out variants lost to simply holding to the target in every replay (see management notes).
     "atr_period": 14,
-    "atr_sl": 0.75,        # stop-loss distance in ATR
+    "atr_sl": 1.5,         # stop-loss distance in ATR (v1.19.5: owner's minimum 1.5 ATR; was 0.75)
     "atr_t1": 1.5,         # target 1: partial-profit reference (the auto-exit target is T2)
     "atr_t2": 3.0,         # target 2: main target
     "atr_t3": 4.5,         # target 3: runner (trail behind it)
-    "atr_min_sl_pts": 15.0,  # never place the stop closer than this (a 10-pt stop averaged 3-5 pts less per trade than 15-20)
+    "atr_min_sl_pts": 20.0,  # never place the stop closer than this (a 10-pt stop averaged 3-5 pts less per trade than 15-20)
     "option_delta": 0.5,   # ATM option delta used to translate index points into premium
     "max_premium_sl_pct": 25.0,  # premium stop never wider than this % of entry premium
 }
@@ -624,10 +624,9 @@ def trade_levels(final, blocks, atr=None, price=None):
     out = {"side": side, "atr": round(atr, 2), "atr_period": t["atr_period"], "entry_index": round(price, 2),
            "sl_points": round(sl_pts, 1), "sl_atr_multiple": round(sl_pts / atr, 2), "sl_index": round(price - d * sl_pts, 2),
            "targets": targets, "level": (final or {}).get("level"),
-           "management": ["Main target is T2 (3 ATR). In the replay, holding the full position to T2 beat every trailing / break-even / scale-out variant tested.",
-                          "Do not move the stop to cost early: in all four recent replays every trailing / break-even / scale-out variant averaged less than simply holding to the target (e.g. +0.7 to +5.5 vs +9.7 for a fixed 60-pt target on the scalp signals).",
-                          "Optional: once T2 is hit, trail the stop 1 ATR behind price toward T3.",
-                          "Never widen the stop. The stop is tight (0.75 ATR, about 20 pts): expect roughly 4 losers in 10, with winners about 3-4x larger than losers. Size for the stop distance, and judge the system over 20+ trades, not one."]}
+           "management": ["The logged BUY signals use a 1.5 ATR stop (at least 20 pts) and, by default, a 1.5 ATR target (1 : 1); the target is pulled in before a strong support / resistance zone.",
+                          "Never widen the stop. Size the position for the stop distance (1.5 ATR is roughly 30-45 NIFTY points), and judge the system over 20+ trades, not one.",
+                          "T1 / T2 / T3 below are reference levels at 1.5 / 3 / 4.5 ATR."]}
     # approximate option premium plan from the ATM leg of this side
     prem = (blocks or {}).get("premium") or {}
     ltp = num(prem.get("ce_ltp" if side == "CE" else "pe_ltp"))

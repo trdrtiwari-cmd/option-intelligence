@@ -26,10 +26,11 @@ import signal_fusion as _sf
 
 TARGET_GRID = (15, 20, 25, 30, 40, 60)
 STOP_GRID = (10, 15, 20, 25, 30, 40)
-ATR_TARGETS = (1.5, 2.0, 3.0, 4.0, 5.0)     # ATR-multiple exits (what the Data Check dashboard now uses)
-ATR_STOPS = (0.5, 0.75, 1.0, 1.5)
+ATR_TARGETS = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0)     # ATR-multiple exits (what the Data Check dashboard now uses)
+ATR_STOPS = (0.5, 0.75, 1.0, 1.5, 2.0)
 HOUR_BUCKETS = (("09:15–09:45", 555, 585), ("09:45–10:30", 585, 630), ("10:30–12:00", 630, 720),
                 ("12:00–13:30", 720, 810), ("13:30–14:30", 810, 870), ("14:30–15:30", 870, 931))
+SQUAREOFF_MIN = 15 * 60 + 20   # live time exit
 MIN_N = 8          # fewer samples than this are shown but never used to draw a conclusion
 
 
@@ -58,7 +59,7 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
         gates = list(a.get("gates") or [])
         if live_window and side:
             m = close_dt.astimezone(IST).hour * 60 + close_dt.astimezone(IST).minute
-            ok = _sf.ENTRY_START_MIN <= m < _sf.ENTRY_CUTOFF_MIN
+            ok = _sf.in_entry_window(m)
             gates.append({"label": "Entry time window (live app)", "pass": ok, "detail": ""})
             if not ok and a["signal"].startswith("CONFIRMED"):
                 a = dict(a, signal="WATCH_" + side)
@@ -103,7 +104,8 @@ def _path(cs, ev, interval, horizon):
         return None, None
     path = []
     for j in range(i + 1, min(len(cs), i + 1 + horizon)):
-        if cs[j]["_dt"].astimezone(IST).date() != day:
+        jt = cs[j]["_dt"].astimezone(IST)
+        if jt.date() != day or jt.hour * 60 + jt.minute >= SQUAREOFF_MIN:     # v1.19.5: the live app squares off at 15:20
             break
         path.append(cs[j])
     return (cs[i + 1]["open"], path) if path else (None, None)
@@ -494,6 +496,27 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
     params = {"symbol": symbol, "interval": interval, "mode": mode, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
               "days": days, "bars_evaluated": len(replayed)}
     rep = build_report(conf_rows, near_rows, params, random_stats)
+    try:                       # v1.19.5: how the live exit plan (stop >= 1.5 ATR, target per plan) did on these signals
+        import option_plan as _op
+        sl_m, _mp, tg_m, plan_key = _op.plan_levels(None)
+        k = f"{tg_m:g}/{sl_m:g}"
+        days_ = sorted({r["day"] for r in conf_rows})
+        cut = days_[len(days_) // 2] if len(days_) >= 4 else None
+        vals = [r["atr_grid"][k] for r in conf_rows if k in r.get("atr_grid", {})]
+        if vals:
+            a_ = stats(vals)
+            halves = ""
+            if cut:
+                h1 = stats([r["atr_grid"][k] for r in conf_rows if r["day"] < cut and k in r.get("atr_grid", {})])
+                h2 = stats([r["atr_grid"][k] for r in conf_rows if r["day"] >= cut and k in r.get("atr_grid", {})])
+                if h1.get("n") and h2.get("n"):
+                    halves = f" First half {h1['win_rate']}% / {h1['avg']:+.1f}, second half {h2['win_rate']}% / {h2['avg']:+.1f}."
+            rep["live_exit"] = {"plan": plan_key, "stop_atr": sl_m, "target_atr": tg_m, **a_}
+            rep["verdict"].insert(0, {"level": "good" if a_["avg"] > 0 else "bad",
+                                      "text": f"Live exit plan (stop {sl_m:g} ATR / target {tg_m:g} ATR, square-off 15:20): {a_['n']} trades, {a_['win_rate']}% winners, "
+                                              f"{a_['avg']:+.1f} pts per trade ({a_['total']:+.0f} total).{halves}"})
+    except Exception:
+        pass
     wf = winrate_finder(conf_rows)
     rep["winrate_finder"] = wf
     if wf.get("split"):

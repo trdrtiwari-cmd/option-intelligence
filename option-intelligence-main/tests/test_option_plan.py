@@ -160,14 +160,18 @@ if __name__ == "__main__":
             fn(); print("ok", name)
 
 
-def test_winrate_exit_plan_small_target_wide_stop():
+def test_stop_is_at_least_1_5_atr_and_plans():
+    assert op.plan_levels(None) == (1.5, 20, 1.5, "t1.5")
+    assert op.plan_levels("t3")[2] == 3.0
+    assert op.plan_levels("t2", custom_sl_atr=0.75)[0] == 1.5            # a custom stop can never go below the 1.5 ATR rule
+    assert op.plan_levels("t2", custom_sl_atr=2.0, custom_target_atr=4)[:3] == (2.0, 20, 4.0)
     pick = op.pick_contract(chain(), 23960, "CE", "NIFTY", lot_size=65)
-    w = op.EXIT_PLANS["winrate"]
-    cfg = {"charges_rs": 60, "min_target_pts": w["min_target_pts"], "min_rr": w["min_rr"], "min_target_atr": w["min_target_atr"], "min_premium_rr": w["min_premium_rr"]}
-    plan = op.profit_plan("CE", 23960, 18.4, None, pick, None, sl_atr=w["sl_atr"], min_sl_pts=w["min_sl_pts"], target_atr=w["target_atr"], cfg=cfg)
+    plan = op.profit_plan("CE", 23960, 18.4, None, pick, None, sl_atr=1.5, min_sl_pts=20, target_atr=1.5, cfg={"charges_rs": 60, "min_target_atr": 1.2})
     ix = plan["index"]
-    assert ix["risk_pts"] == 20 and abs(ix["reward_pts"] - 15) < 0.01, ix     # 0.6 ATR = 11 pts -> 15-pt minimum; 1 ATR = 18.4 -> 20-pt minimum
-    assert plan["ok"], plan["checks"]
+    assert abs(ix["risk_pts"] - 27.6) < 0.01 and abs(ix["reward_pts"] - 27.6) < 0.01 and plan["ok"], plan["checks"]
+    # resistance closer than the 1:1 target -> no buy
+    sr = {"resistances": [{"price": 23975, "strength": "Strong", "basis": "PDH"}]}
+    assert not op.profit_plan("CE", 23960, 18.4, sr, pick, None, sl_atr=1.5, min_sl_pts=20, target_atr=1.5, cfg={"charges_rs": 60})["ok"]
 
 
 def test_winrate_finder_needs_both_halves():

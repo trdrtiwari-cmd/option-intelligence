@@ -141,14 +141,14 @@ def test_final_signal():
 def test_atr_trade_levels():
     blocks = {"zone": {"price": 25000.0, "atr": 20.0}, "premium": {"ce_ltp": 100.0, "pe_ltp": 90.0}}
     ce = dd.trade_levels({"side": "CE", "level": "CONFIRMED"}, blocks)
-    assert ce["sl_index"] == 24985.0 and ce["sl_points"] == 15.0     # 0.75 ATR stop, 15-pt floor (v1.16)
+    assert ce["sl_index"] == 24970.0 and ce["sl_points"] == 30.0     # 1.5 ATR stop, 20-pt floor (v1.19.5)
     assert [t["index"] for t in ce["targets"]] == [25030.0, 25060.0, 25090.0]
-    assert ce["targets"][1]["rr"] == 4.0
-    assert ce["option"]["sl"] == 92.5 and ce["option"]["targets"][1]["premium"] == 130.0
+    assert ce["targets"][1]["rr"] == 2.0
+    assert ce["option"]["sl"] == 85.0 and ce["option"]["targets"][1]["premium"] == 130.0
     pe = dd.trade_levels({"side": "PE", "level": "BIAS"}, blocks)
-    assert pe["sl_index"] == 25015.0 and pe["targets"][0]["index"] == 24970.0
+    assert pe["sl_index"] == 25030.0 and pe["targets"][0]["index"] == 24970.0
     # tiny ATR -> stop never closer than the noise floor; no side / no ATR -> no plan
-    assert dd.trade_levels({"side": "CE"}, {"zone": {"price": 25000, "atr": 3}})["sl_points"] == 15.0
+    assert dd.trade_levels({"side": "CE"}, {"zone": {"price": 25000, "atr": 3}})["sl_points"] == 20.0
     assert dd.trade_levels({"side": None}, blocks) is None
     assert dd.trade_levels({"side": "CE"}, {"zone": {"price": 25000}}) is None
     # premium stop is capped at a % of premium

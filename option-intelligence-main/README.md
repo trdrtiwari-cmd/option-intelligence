@@ -1,5 +1,17 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.19.5 - fixes from the 5 diagnostics files, 1.5 ATR stop, signal board
+
+**What the data showed (5 Oct - 4 Nov 2026, NIFTY 5m, scalp + standard, 30/20 exit, 4 pts cost):**
+* **Time of day is the biggest, most consistent factor.** 09:45-12:00 and 14:30-15:00 paid in every file; 12:00-13:30 and 13:30-14:30 lost in every file (13:30-14:30: 31-36 % winners). The latest standard run (21 Oct - 4 Nov) confirms it: the 9 setups blocked ONLY by the old 13:30 cutoff won 78 % (+14.9 pts), while the 12:00-13:30 entries won 33 %.
+* With the new entry windows **plus** the v1.19.1 fresh-breakout block, the replayed signals were: scalp 23 trades, 74 % winners, +13.0 pts (first half 88 %, second half 67 %); standard 15 trades, 80 % winners, +16.0 pts (86 % / 75 %). Old rules: scalp 55 % / +3.4, standard 51 % / +1.4. Caveat: the 14:30-15:00 window only had signals in the second half (12 trades); judge it again after 2-3 more weeks.
+* Signals vs random entries: still only +2 pts per trade better in the latest file (11 trades) - too few trades to call it an edge yet.
+
+**Changes:**
+* **Entry windows 09:45-12:00 and 14:30-15:00 IST** (`ENTRY_WINDOWS`). Diagnostics use the same windows and now end every replayed trade at the 15:20 square-off, as the live app does.
+* **Stop-loss at least 1.5 ATR (min 20 pts)** for every BUY, as requested (`MIN_SL_ATR`, `MIN_SL_PTS`). Target by exit plan (Signals page): **1.5 ATR (1 : 1, default)**, 2 ATR or 3 ATR; it is still pulled in before a strong S/R zone, and the BUY is refused when that leaves less than 1 : 1. A custom stop on the Signals page cannot go below 1.5 ATR. Note: in the replays a 1.5 ATR stop with a 2-3 ATR target was among the weakest ATR combinations (prices that went 1.5 ATR against the signal mostly kept going); with a 1.5 ATR target it was among the better ones. Diagnostics' ATR grid now includes 1 ATR targets and 2 ATR stops so you can check your plan cell directly.
+* **Signal board** (Signals page): every option signal is recorded automatically - WATCH, SETUP (reconfirming), BUY, NO BUY (with the reason) and FAILED - with the option, its premium and the index at that moment. An hour later the board adds the premium after 30 / 60 min, the best / worst premium in that hour, and the result of a test trade with the plan's stop / target (1.5 / 1.5 ATR when the signal had no plan). Summary per stage, CSV export, and a "Signal Board" sheet in the Excel export. Kept in the accounts database like the signal log.
+
 ## v1.19.4 - trendlines drawn correctly
 
 * v1.19.3 could join the morning top to the afternoon highs straight across a 200-point V, and let a support line cut through candles. Trendlines are now **tangent lines**: the support line is an edge of the lower hull of the lows (no low is below it), the resistance line an edge of the upper hull of the highs (no high is above it).
