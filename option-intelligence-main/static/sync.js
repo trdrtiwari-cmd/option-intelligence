@@ -14,7 +14,7 @@
     "option-intelligence-paper-capital-v1": "paper-capital",
     "option-intelligence-paper-guard-v1": "paper-guard",
     "oi-signal-mode": "pref-signal-mode",
-    "oi-refresh-sec": "pref-refresh-sec",
+    "oi-refresh-v2": "pref-refresh-v2",
     "oi-dc-refresh": "pref-dash-refresh",
     // v1.17: every other setting is now saved to the account too
     "oi-score-min": "pref-score-min",

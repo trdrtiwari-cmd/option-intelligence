@@ -147,7 +147,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.19.7"
+APP_VERSION = "1.19.8"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1292,6 +1292,10 @@ def _ws_sub(msg, cur):
         if rc == -1 or 0 <= rc <= 600:
             out["reconfirm"] = rc
         out["view"] = "option" if msg.get("view") == "option" else "index"
+        if msg.get("rate") is not None:
+            r = float(msg["rate"])
+            if r == r:                                      # not NaN
+                out["rate"] = min(2.0, max(0.1, r))         # v1.19.8: the page's "Auto refresh" choice, 0.1-2 s
     except (TypeError, ValueError):
         pass
     return out
@@ -1412,13 +1416,13 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                     for x in moved:
                         sent["opt"][x.get("instrument_key")] = x.get("ltp")
                     await send({"type": "opt", "symbol": sym, "ticks": moved})
-            every = WS_PUSH_SEC if market["open"] else 15.0
+            every = max(WS_PUSH_SEC, sub.get("rate") or 0) if market["open"] else 15.0
             if (pump_task is None or pump_task.done()) and now - sent["push_at"] >= every:
                 if pump_task is not None and pump_task.done() and not pump_task.cancelled() and pump_task.exception():
                     break                                   # the send inside the push failed: the socket is gone
                 sent["push_at"] = now
                 pump_task = asyncio.create_task(pump())
-            await asyncio.sleep(WS_TICK_SEC)
+            await asyncio.sleep(sub.get("rate") or WS_TICK_SEC)
     except WebSocketDisconnect:
         return
     except Exception as exc:

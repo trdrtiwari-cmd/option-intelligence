@@ -28,7 +28,7 @@
   // Controls whose value the page script already stores itself in its own (synced) localStorage key. They are not saved
   // here; we only re-apply them when another device changes them.
   const LEGACY = {
-    terminal: { signalMode: "oi-signal-mode", scoreMin: "oi-score-min", reconfirmSec: "oi-reconfirm", alertSound: "oi-alert-sound", refreshEvery: "oi-refresh-sec" },
+    terminal: { signalMode: "oi-signal-mode", scoreMin: "oi-score-min", reconfirmSec: "oi-reconfirm", alertSound: "oi-alert-sound", refreshEvery: "oi-refresh-v2" },
     dashboard: { refreshEvery: "oi-dc-refresh" },
     signals: { qty: "oi-sig-qty", delta: "oi-sig-delta" },
   };

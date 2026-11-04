@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.19.7";
+const FRONTEND_VERSION="1.19.8";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -793,7 +793,8 @@ initChart();checkStatus();
 function startAutoRefresh(){
   clearInterval(autoTimer);
   const sec=Math.max(2,Number($("refreshEvery").value)||2);
-  try{localStorage.setItem("oi-refresh-sec",String(sec))}catch{}
+  try{localStorage.setItem("oi-refresh-v2",String($("refreshEvery").value))}catch{}
+  sendLiveSub();     // v1.19.8: the selected rate (0.1 s default) drives the live socket; REST reload below stays >= 2 s
   autoTimer=setInterval(async()=>{
     if(document.visibilityState!=="visible")return;
     if(refreshBusy&&Date.now()-refreshBusySince>30000)refreshBusy=false;        // watchdog
@@ -805,7 +806,7 @@ function startAutoRefresh(){
     try{await refresh()}catch(e){console.warn("Auto-refresh failed:",e)}finally{refreshBusy=false}
   },sec*1000);
 }
-try{const saved=localStorage.getItem("oi-refresh-sec");if(saved&&[...$("refreshEvery").options].some(o=>o.value===saved))$("refreshEvery").value=saved}catch{}
+try{const saved=localStorage.getItem("oi-refresh-v2");if(saved&&[...$("refreshEvery").options].some(o=>o.value===saved))$("refreshEvery").value=saved}catch{}
 $("refreshEvery").addEventListener("change",startAutoRefresh);startAutoRefresh();refresh();
 // Coming back to the app (unlock the phone, switch back from another app, reconnect to the network): throw away anything that
 // was in flight while the tab was frozen, then reload everything at once, instead of waiting for a stuck request.
@@ -908,7 +909,8 @@ setInterval(async()=>{
   catch{}finally{restPriceBusy=false}
 },2000);
 // ---- v1.19.6 real-time push ------------------------------------------------------------------------------------------------
-function liveSubObj(){return{type:"sub",interval:getInterval(),mode:getMode(),score_min:getScoreMin(),reconfirm:getReconfirm(),view:$("chartView").value==="option"?"option":"index"}}
+function liveRate(){const v=Number($("refreshEvery")?.value);return Number.isFinite(v)&&v>0?Math.min(2,Math.max(0.1,v)):0.1}
+function liveSubObj(){return{type:"sub",rate:liveRate(),interval:getInterval(),mode:getMode(),score_min:getScoreMin(),reconfirm:getReconfirm(),view:$("chartView").value==="option"?"option":"index"}}
 function liveSocketOpen(){try{return !!liveSocket&&liveSocket.readyState===WebSocket.OPEN}catch{return false}}   // TDZ-safe: may run before the socket code below is initialised
 function sendLiveSub(){
   if(!liveSocketOpen())return;

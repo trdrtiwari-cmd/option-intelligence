@@ -70,3 +70,12 @@ def test_socket_pushes_bars_and_analysis():
     assert len(b) == 1 and len(b[0]["candles"]) == 3 and b[0]["interval"] == 1        # unchanged candles are not re-sent
     assert len(a) == 1 and a[0]["data"]["score"] == 77 and a[0]["reconfirm"] == 0      # same cached result is pushed once
     assert calls["an"] >= 2                                                             # but it keeps being refreshed
+
+
+def test_sub_rate_is_clamped():
+    if M is None:
+        return
+    cur = {"interval": 5, "mode": "standard", "score_min": 70, "reconfirm": -1, "view": "index"}
+    assert M._ws_sub({"rate": 0.1}, cur)["rate"] == 0.1
+    assert M._ws_sub({"rate": 0.01}, cur)["rate"] == 0.1
+    assert M._ws_sub({"rate": 9}, cur)["rate"] == 2.0

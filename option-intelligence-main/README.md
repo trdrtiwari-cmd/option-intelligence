@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.19.8 - "Auto refresh" goes down to 0.1 s
+
+* The Auto refresh selector now offers 0.1 s (default), 0.25 s, 0.5 s and 1 s (live), plus 2-60 s. The live choice sets how often the live socket updates this page (price, forming candle, option premium). The full REST reload stays at 2 s minimum and runs only as a fallback. Saved older choices (2 s) are reset to 0.1 s once.
+
 ## v1.19.7 - 0.1 s live refresh
 
 * The live socket now checks every **0.1 s** (`WS_TICK_SEC=0.1`, `WS_PUSH_SEC=0.1`): the index price, the forming candle and the selected option's premium move up to 10 times a second (sent only when the price changed); option premiums that moved are pushed as `opt` messages instead of waiting for the 1 s full tick list.
