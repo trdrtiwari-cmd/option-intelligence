@@ -1,9 +1,18 @@
-/* Automatic trendlines (v1.19.3). Pure function, no chart code, so it can be tested with node.
-   Support line   = connects two swing LOWS, every close since the first point stays above it (small tolerance).
-   Resistance line= connects two swing HIGHS, every close since the first point stays below it.
-   Among the valid lines the one with the most touches wins; ties go to the most recent second point, then the longer line.
-   A line is BROKEN when one of the last three bars closed beyond it by more than the tolerance.
-   cs = [{time, open, high, low, close}] ascending (chart time). Returns {support, resistance, atr} - each line or null. */
+/* Automatic trendlines (v1.19.4). Pure function, no chart code, so it can be tested with node.
+
+   v1.19.3 joined any two swing points and allowed wicks to cut through the line, so it could draw a support line through
+   candles and a "resistance" across a 200-point V (from the morning top to the afternoon highs). v1.19.4 uses the classic
+   tangent construction:
+     support    = an edge of the LOWER convex hull of the lows  -> no low between (and after) its two anchors is below it
+     resistance = an edge of the UPPER convex hull of the highs -> no high is above it
+   The hull is built from each swing point in the window, so the line can belong to the latest leg (e.g. the afternoon rally),
+   not only to the day's extreme. An edge is a usable trendline only when
+     - its anchors are >= 6 bars apart,
+     - price never travelled more than 5 ATR away from it between the first anchor and now (otherwise it is a range / V, not a trend),
+     - it is not steeper than 1 ATR per bar, is within 3 ATR of price before the latest bars, and was touched recently.
+   Among usable lines: most touches (bars whose low / high come within 0.15 ATR of the line, counted once per swing), then the most
+   recent second anchor, then the longer line. The last 3 bars may close through the line: that is reported as a BREAK.
+   cs = [{time, open, high, low, close}] ascending. Returns {support, resistance, atr}; each line or null. */
 (function (root) {
   "use strict";
   function atrOf(cs, n) {
@@ -16,6 +25,18 @@
     return a;
   }
 
+  // Lower hull (sup=true) of points (i, low) or upper hull (sup=false) of points (i, high), i from `from` to `to`.
+  function hull(cs, from, to, sup) {
+    const h = [];
+    const y = i => (sup ? cs[i].low : cs[i].high);
+    const cross = (o, a, b) => (a - o) * (y(b) - y(o)) - (y(a) - y(o)) * (b - o);
+    for (let i = from; i <= to; i++) {
+      while (h.length >= 2 && (sup ? cross(h[h.length - 2], h[h.length - 1], i) <= 0 : cross(h[h.length - 2], h[h.length - 1], i) >= 0)) h.pop();
+      h.push(i);
+    }
+    return h;
+  }
+
   function computeTrendlines(cs, opts) {
     opts = opts || {};
     const W = opts.window || 150, L = opts.pivot || 3, out = { support: null, resistance: null, atr: null };
@@ -24,55 +45,68 @@
     const atr = opts.atr || atrOf(cs);
     if (!atr) return out;
     out.atr = atr;
-    const tol = (opts.tolAtr || 0.25) * atr, start = Math.max(L, n - W);
-    const lows = [], highs = [];
-    for (let i = start; i < n - L; i++) {
-      let isH = true, isL = true;
-      for (let k = 1; k <= L; k++) {
-        if (cs[i].high <= cs[i - k].high || cs[i].high < cs[i + k].high) isH = false;
-        if (cs[i].low >= cs[i - k].low || cs[i].low > cs[i + k].low) isL = false;
+    const start = Math.max(L, n - W), last = n - 1, settled = n - 4;     // the last 3 bars may break the line
+    const touchTol = (opts.touchAtr || 0.15) * atr, breakTol = (opts.breakAtr || 0.25) * atr;
+    const maxDev = (opts.maxDevAtr || 5) * atr, maxDist = (opts.maxDistAtr || 3) * atr, minSpan = opts.minSpan || 6;
+
+    function pivots(sup) {
+      const p = [];
+      for (let i = start; i <= settled - L; i++) {
+        let ok = true;
+        for (let k = 1; k <= L && ok; k++) {
+          if (sup ? (cs[i].low > cs[i - k].low || cs[i].low > cs[i + k].low) : (cs[i].high < cs[i - k].high || cs[i].high < cs[i + k].high)) ok = false;
+        }
+        if (ok) p.push(i);
       }
-      if (isH) highs.push({ i, p: cs[i].high });
-      if (isL) lows.push({ i, p: cs[i].low });
+      return p;
     }
 
-    function best(piv, sup) {
+    function best(sup) {
+      const y = i => (sup ? cs[i].low : cs[i].high);
       let pick = null;
-      const recent = piv.slice(-6);
-      for (const b of recent) {
-        for (const a of piv) {
-          if (a.i >= b.i || b.i - a.i < 5) continue;
-          const m = (b.p - a.p) / (b.i - a.i), at = k => a.p + m * (k - a.i);
-          let ok = true;
-          for (let k = a.i; k < n - 3 && ok; k++) {                 // closes must respect the line (the last 3 bars may break it)
-            const d = sup ? cs[k].close - at(k) : at(k) - cs[k].close;
-            if (d < -tol) ok = false;
-            if (k > a.i && k < b.i) {                                // wicks between the two anchors may not slice deep through it
-              const w = sup ? cs[k].low - at(k) : at(k) - cs[k].high;
-              if (w < -2 * tol) ok = false;
-            }
+      const seen = new Set();
+      for (const s of pivots(sup)) {
+        const h = hull(cs, s, settled, sup);
+        for (let e = 0; e + 1 < h.length; e++) {
+          const a = h[e], b = h[e + 1];
+          if (b - a < minSpan || seen.has(a + ":" + b)) continue;
+          seen.add(a + ":" + b);
+          const m = (y(b) - y(a)) / (b - a), at = k => y(a) + m * (k - a);
+          if (Math.abs(m) > atr) continue;                                            // > 1 ATR per bar: a spike, not a trend
+          if (settled - b > Math.max(20, 1.5 * (b - a))) continue;                    // its last touch is too old for the line to still matter
+          let dev = 0, valid = true;
+          for (let k = a; k <= settled && valid; k++) {
+            const g = sup ? cs[k].close - at(k) : at(k) - cs[k].close;
+            if (g < -breakTol) valid = false;                                         // a close through it before the last bars
+            dev = Math.max(dev, g);
           }
-          if (!ok) continue;
-          if (Math.abs(m) * (n - 1 - a.i) > 12 * atr) continue;      // absurdly steep: a spike, not a trend
-          if (Math.abs(cs[n - 4].close - at(n - 4)) > (opts.maxDistAtr || 4) * atr) continue;   // too far from price to matter (checked before a fresh break)
-          const touches = piv.filter(q => q.i >= a.i && Math.abs(q.p - at(q.i)) <= tol).length;
-          const score = touches * 1000 + b.i + (b.i - a.i) / 1000;
+          if (!valid || dev > maxDev) continue;                                       // price left the line: range / V, not a trendline
+          let devAB = 0;
+          for (let k = a; k <= b; k++) devAB = Math.max(devAB, sup ? cs[k].close - at(k) : at(k) - cs[k].close);
+          // too far from price to matter now - unless price is just at the other side of the channel it already swung through
+          if (Math.abs(cs[settled].close - at(settled)) > Math.max(maxDist, devAB * 1.1)) continue;
+          let touches = 0, lastTouch = -99;
+          for (let k = a; k <= settled; k++) {
+            if (Math.abs(y(k) - at(k)) <= touchTol && k - lastTouch >= 3) { touches++; lastTouch = k; }
+          }
+          const score = touches * 100000 + b * 100 + (b - a);
           if (!pick || score > pick.score) pick = { a, b, m, touches, score };
         }
       }
       if (!pick) return null;
-      const { a, m } = pick, last = n - 1, now = a.p + m * (last - a.i);
-      const beyond = k => (sup ? (a.p + m * (k - a.i)) - cs[k].close : cs[k].close - (a.p + m * (k - a.i)));
-      const broken = beyond(last) > tol || ([last - 1, last - 2].some(k => k > a.i && beyond(k) > tol) && beyond(last) > 0);
+      const { a, m } = pick, at = k => y(a) + m * (k - a), now = at(last);
+      const beyond = k => (sup ? at(k) - cs[k].close : cs[k].close - at(k));
+      const broken = beyond(last) > breakTol || ([last - 1, last - 2].some(k => k > a && beyond(k) > breakTol) && beyond(last) > 0);
       const slopeAtr = m / atr;
       return {
-        kind: sup ? "support" : "resistance", from: { time: cs[a.i].time, value: a.p }, to: { time: cs[last].time, value: now },
-        touches: pick.touches, slopePerBar: m, direction: slopeAtr > 0.02 ? "rising" : slopeAtr < -0.02 ? "falling" : "flat",
-        value: now, broken, distance: cs[last].close - now, bars: last - a.i
+        kind: sup ? "support" : "resistance", from: { time: cs[a].time, value: y(a) }, to: { time: cs[last].time, value: now },
+        anchor2: { time: cs[pick.b].time, value: y(pick.b) }, touches: pick.touches, slopePerBar: m,
+        direction: slopeAtr > 0.02 ? "rising" : slopeAtr < -0.02 ? "falling" : "flat",
+        value: now, broken, distance: cs[last].close - now, bars: last - a
       };
     }
-    out.support = best(lows, true);
-    out.resistance = best(highs, false);
+    out.support = best(true);
+    out.resistance = best(false);
     return out;
   }
 

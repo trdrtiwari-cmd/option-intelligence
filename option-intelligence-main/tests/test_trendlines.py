@@ -12,3 +12,7 @@ def test_trendlines_up_down_and_break():
     assert "DOWN resistance" in out and "dir: 'falling'" in out
     assert "BREAK support { dir: 'rising', broken: true }" in out
     assert '"support":null' in out          # too few candles -> no line
+    import json, re
+    day = json.loads(re.search(r"DAY (\{.*\})", out).group(1))
+    assert day["sDir"] == "rising" and day["sFrom"] >= 70          # support starts at the afternoon swing low
+    assert day["rFrom"] is None or day["rFrom"] >= 70               # never from the morning top across the V

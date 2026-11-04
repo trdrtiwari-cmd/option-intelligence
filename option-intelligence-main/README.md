@@ -1,5 +1,11 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.19.4 - trendlines drawn correctly
+
+* v1.19.3 could join the morning top to the afternoon highs straight across a 200-point V, and let a support line cut through candles. Trendlines are now **tangent lines**: the support line is an edge of the lower hull of the lows (no low is below it), the resistance line an edge of the upper hull of the highs (no high is above it).
+* A line must belong to the current move: price may not have travelled more than 5 ATR away from it, its last touch must be recent, it may not be steeper than 1 ATR per bar, and it must be near price (or price is inside the channel it already swung through).
+* On a day like 4 Nov 2026 the support now starts at the afternoon swing low and rises under the rally, and the resistance hugs the rally highs (dashed ✕ once the last candle closes above it).
+
 ## v1.19.3 - automatic trendlines on the chart
 
 * New **Auto trendlines** switch (chart tools, on by default, saved with your settings). Works on the index chart and on the option-premium chart.
