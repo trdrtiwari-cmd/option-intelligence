@@ -1,0 +1,2 @@
+# Render builds from the repository root by default; the app lives in option-intelligence-main/.
+-r option-intelligence-main/requirements.txt
