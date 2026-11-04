@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.0"
+APP_VERSION = "1.20.1"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2027,6 +2027,8 @@ def _apply_monitor_settings(d):
             mon.SETTINGS[k] = bool(d[k])
     if "max_calls" in d:
         mon.SETTINGS["max_calls"] = max(0, min(500, int(d["max_calls"])))
+    if d.get("provider") in mon.PROVIDERS:
+        mon.SETTINGS["provider"] = d["provider"]
     if "review_every_min" in d:
         mon.SETTINGS["review_every_min"] = max(10, min(240, int(d["review_every_min"])))
 
@@ -2072,13 +2074,13 @@ async def _monitor_store(findings, day, sym, explain=True):
 
 
 async def _monitor_note(f, day):
-    if not (mon.SETTINGS["claude"] and mon.api_key()):
+    if not mon.provider():
         return
     if await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK) >= mon.SETTINGS["max_calls"]:
         return
-    text, err = await mon.claude_call(mon.SYSTEM_NOTE, mon.note_prompt(f), mon.SETTINGS["model"], max_tokens=300)
+    text, err, model = await mon.ai_call(mon.SYSTEM_NOTE, mon.note_prompt(f), "note", max_tokens=300)
     if text:
-        await asyncio.to_thread(mon.set_note, SIGNAL_LOG_DB, f["id"], text, mon.SETTINGS["model"], SIGNAL_LOG_LOCK)
+        await asyncio.to_thread(mon.set_note, SIGNAL_LOG_DB, f["id"], text, model, SIGNAL_LOG_LOCK)
     elif err:
         _SMON["error"] = err
 
@@ -2110,15 +2112,15 @@ async def monitor_review(kind="intraday", force=False):
         text, err, model = None, None, None
         all_today = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 200, SIGNAL_LOG_LOCK)
         ctx = mon.review_context(day, sym, log, [e for e in all_today if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep, sugg)
-        if mon.SETTINGS["claude"] and mon.api_key():
+        if mon.provider():
             if force or await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK) < mon.SETTINGS["max_calls"]:
-                model = mon.SETTINGS["review_model"] if kind == "eod" else mon.SETTINGS["model"]
-                text, err = await mon.claude_call(mon.SYSTEM_REVIEW, json.dumps(ctx, default=str, ensure_ascii=False), model, max_tokens=1200, timeout=90.0)
+                text, err, model = await mon.ai_call(mon.SYSTEM_REVIEW, json.dumps(ctx, default=str, ensure_ascii=False), kind, max_tokens=1200, timeout=90.0)
                 if err:
                     _SMON["error"] = err
         if not text:
             model = None
-            text = ("Claude is not connected (set ANTHROPIC_API_KEY on Render) - code findings only." if not mon.api_key()
+            text = ("No AI connected - code findings only. Free option: press 'Download for Claude' and upload the file in your Claude chat."
+                    if not mon.provider()
                     else f"Claude review unavailable: {err or 'daily call limit reached'}") + "\n\n" + "\n".join(
                 f"- [{x['area']}] {x['title']}: {x['evidence']}" + (f" ({x['caution']})" if x.get("caution") else "") for x in sugg)
         rid = await asyncio.to_thread(mon.add_review, SIGNAL_LOG_DB, {"day": day, "symbol": sym, "kind": kind, "model": model, "text": text,
@@ -2190,6 +2192,7 @@ class MonitorSettings(BaseModel):
     push: Optional[bool] = None
     max_calls: Optional[int] = None
     review_every_min: Optional[int] = None
+    provider: Optional[str] = None
 
 
 @app.get("/api/monitor")
@@ -2201,7 +2204,7 @@ async def monitor_get(request: Request, start: str = "", end: str = "", kind: st
     evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, start, end, kind.upper(), min(2000, max(1, limit)), SIGNAL_LOG_LOCK)
     rvs = await asyncio.to_thread(mon.reviews, SIGNAL_LOG_DB, start, end, 20, SIGNAL_LOG_LOCK)
     return {"events": evs, "reviews": rvs, "settings": {k: v for k, v in mon.SETTINGS.items()},
-            "status": {"api_key_set": bool(mon.api_key()), "calls_today": await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK),
+            "status": {"api_key_set": bool(mon.provider()), "ai": mon.ai_label(), "has_claude_key": bool(mon.api_key()), "has_gemini_key": bool(mon.gemini_key()), "calls_today": await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK),
                        "running": _SMON["running"], "state": _SMON["status"], "error": _SMON["error"], "combo": _SMON["rep_combo"] or list(_monitor_combo()),
                        "last_replay": datetime.fromtimestamp(_SMON["replay_at"], IST).isoformat(timespec="seconds") if _SMON["replay_at"] else None,
                        "last_review": datetime.fromtimestamp(_SMON["last_review_at"], IST).isoformat(timespec="seconds") if _SMON["last_review_at"] else None}}
@@ -2213,7 +2216,7 @@ async def monitor_status(request: Request):
     day = ist_now().date().isoformat()
     evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 500, SIGNAL_LOG_LOCK)
     real = [e for e in evs if e["kind"] != "SUGGESTION"]
-    return {"enabled": mon.SETTINGS["enabled"], "claude": bool(mon.api_key()) and mon.SETTINGS["claude"],
+    return {"enabled": mon.SETTINGS["enabled"], "claude": bool(mon.provider()), "ai": mon.ai_label(),
             "high": sum(e["severity"] == "high" for e in real), "medium": sum(e["severity"] == "medium" for e in real),
             "info": sum(e["severity"] == "info" for e in real), "latest": real[0]["title"] if real else None}
 
@@ -2223,9 +2226,41 @@ async def monitor_settings(request: Request, payload: MonitorSettings):
     _require_admin(request)
     d = {k: v for k, v in payload.model_dump().items() if v is not None} if hasattr(payload, "model_dump") else {k: v for k, v in payload.dict().items() if v is not None}
     _apply_monitor_settings(d)
-    cur = {k: mon.SETTINGS[k] for k in ("enabled", "claude", "push", "max_calls", "review_every_min")}
+    cur = {k: mon.SETTINGS[k] for k in ("enabled", "claude", "push", "max_calls", "review_every_min", "provider")}
     await asyncio.to_thread(acc.meta_set, "monitor_settings", json.dumps(cur))
     return {"settings": dict(mon.SETTINGS)}
+
+
+@app.get("/api/monitor/export")
+async def monitor_export(request: Request, day: str = "", fresh: int = 0):
+    """v1.20.1 free review: one JSON file (instructions + the day's trades, losses and causes, missed moves, replay, suggestions)
+    to upload in a Claude chat. Uses the data saved with that day's latest review; builds it now for today (or with fresh=1)."""
+    _need_user(request)
+    day = day or ist_now().date().isoformat()
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "day must be YYYY-MM-DD")
+    ctx = None if (fresh or day == ist_now().date().isoformat()) else await asyncio.to_thread(mon.stored_context, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK)
+    if ctx is None:
+        sym = _monitor_combo()[0]
+        rep = _SMON.get("rep") if _SMON.get("replay_day") == day or day == ist_now().date().isoformat() else None
+        if rep is None and day == ist_now().date().isoformat() and runtime_token and not _SMON["running"]:
+            try:
+                s_, i_, m_, sm_ = _monitor_combo()
+                rep = await _monitor_replay(s_, i_, m_, sm_)
+                _SMON.update(rep=rep, replay_at=time.time(), replay_day=day, rep_combo=[s_, i_, m_, sm_])
+            except Exception as exc:
+                logger.info("Export replay skipped: %s", str(getattr(exc, "detail", exc))[:120])
+        rep = rep or {}
+        log = (await get_signal_log(day, day, "", 10000))["rows"]
+        board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, day, day, "", "", 2000, SIGNAL_LOG_LOCK)
+        evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 300, SIGNAL_LOG_LOCK)
+        ctx = mon.review_context(day, sym, log, [e for e in evs if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep,
+                                 mon.suggestions(rep) if rep else [])
+    blob = json.dumps(mon.chat_bundle(ctx), default=str, ensure_ascii=False, indent=1)
+    return Response(blob, media_type="application/json",
+                    headers={"Content-Disposition": f"attachment; filename=strategy-review-{day}.json", "Cache-Control": "no-store"})
 
 
 @app.post("/api/monitor/review-now")

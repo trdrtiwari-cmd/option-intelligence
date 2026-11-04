@@ -93,8 +93,67 @@ def test_review_without_token_or_key():
         r = asyncio.run(M.monitor_review("manual", force=True))
         assert r["status"] == "done" and r["claude"] is False
         rv = M.mon.reviews(M.SIGNAL_LOG_DB, limit=1)[0]
-        assert "not connected" in rv["text"]
+        assert "No AI connected" in rv["text"]
     finally:
         M.runtime_token = old[0]
         if old[1]:
             os.environ["ANTHROPIC_API_KEY"] = old[1]
+
+
+def test_provider_routing():
+    keep = {k: os.environ.pop(k, None) for k in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY")}
+    old = dict(mon.SETTINGS)
+    try:
+        assert mon.provider() is None and mon.ai_label() is None
+        os.environ["GEMINI_API_KEY"] = "g"
+        assert mon.provider() == "gemini" and mon.model_for("eod") == mon.SETTINGS["gemini_model"]
+        os.environ["ANTHROPIC_API_KEY"] = "a"
+        assert mon.provider() == "claude" and mon.model_for("eod") == mon.SETTINGS["review_model"]
+        mon.SETTINGS["provider"] = "gemini"
+        assert mon.provider() == "gemini"
+        mon.SETTINGS["provider"] = "off"
+        assert mon.provider() is None
+        assert asyncio.run(mon.ai_call("s", "u")) == (None, None, None)
+    finally:
+        mon.SETTINGS.clear(); mon.SETTINGS.update(old)
+        for k, v in keep.items():
+            os.environ.pop(k, None)
+            if v:
+                os.environ[k] = v
+
+
+def test_gemini_request_shape():
+    import types
+    sent = {}
+
+    class R:
+        status_code = 200
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "Because "}, {"text": "midday."}]}}]}
+
+    class C:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            sent.update(url=url, body=json, headers=headers); return R()
+
+    fake = types.ModuleType("httpx"); fake.AsyncClient = C
+    old_mod = sys.modules.get("httpx"); sys.modules["httpx"] = fake
+    os.environ["GEMINI_API_KEY"] = "g-key"
+    try:
+        text, err = asyncio.run(mon.gemini_call("sys", "user", "gemini-flash-lite-latest", 100))
+        assert text == "Because midday." and err is None
+        assert sent["url"].endswith("/models/gemini-flash-lite-latest:generateContent") and sent["headers"]["x-goog-api-key"] == "g-key"
+        assert sent["body"]["systemInstruction"]["parts"][0]["text"] == "sys" and sent["body"]["contents"][0]["parts"][0]["text"] == "user"
+    finally:
+        os.environ.pop("GEMINI_API_KEY", None)
+        if old_mod is not None:
+            sys.modules["httpx"] = old_mod
+        else:
+            sys.modules.pop("httpx", None)
+
+
+def test_chat_bundle():
+    b = mon.chat_bundle({"day": "2026-11-04"})
+    assert b["instructions"] == mon.SYSTEM_REVIEW and b["data"]["day"] == "2026-11-04" and "review this day" in b["how_to_use"]

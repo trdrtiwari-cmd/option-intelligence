@@ -20,13 +20,43 @@ SETTINGS = {
     "review_model": os.getenv("REVIEW_MODEL", "claude-sonnet-5-5"),
     "max_calls": int(os.getenv("MONITOR_MAX_CALLS_PER_DAY", "40")),
     "review_every_min": int(os.getenv("MONITOR_REVIEW_MIN", "30")),
+    # v1.20.1: which AI writes the notes / reviews. auto = Claude if ANTHROPIC_API_KEY is set, else Gemini if GEMINI_API_KEY is set.
+    "provider": os.getenv("MONITOR_PROVIDER", "auto") if os.getenv("MONITOR_PROVIDER", "auto") in ("auto", "claude", "gemini", "off") else "auto",
+    "gemini_model": os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"),
 }
+PROVIDERS = ("auto", "claude", "gemini", "off")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 
 
 def api_key():
     return os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+
+def gemini_key():
+    return os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def provider():
+    """The AI actually in use: 'claude', 'gemini' or None (code findings only)."""
+    p = SETTINGS.get("provider", "auto")
+    if p == "off" or not SETTINGS.get("claude", True):
+        return None
+    if p == "claude":
+        return "claude" if api_key() else None
+    if p == "gemini":
+        return "gemini" if gemini_key() else None
+    return "claude" if api_key() else "gemini" if gemini_key() else None
+
+
+def model_for(kind):
+    prov = provider()
+    if prov == "gemini":
+        return SETTINGS["gemini_model"]
+    if prov == "claude":
+        return SETTINGS["review_model"] if kind == "eod" else SETTINGS["model"]
+    return None
 
 
 # ---------------------------------------------------------------- storage
@@ -416,6 +446,71 @@ async def claude_call(system, user_text, model, max_tokens=700, timeout=40.0):
         return text or None, None if text else "empty reply"
     except Exception as exc:
         return None, f"{type(exc).__name__}: {str(exc)[:160]}"
+
+
+async def gemini_call(system, user_text, model, max_tokens=700, timeout=40.0):
+    """One Gemini generateContent call (Google AI Studio key; the free tier is rate-limited and Google may use the content
+    to improve its products). Returns (text, error)."""
+    key = gemini_key()
+    if not key:
+        return None, "GEMINI_API_KEY not set"
+    try:
+        import httpx
+    except ImportError:
+        return None, "httpx not installed"
+    body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.3}}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(GEMINI_URL.format(model=model), json=body, headers={"x-goog-api-key": key, "content-type": "application/json"})
+        if r.status_code != 200:
+            try:
+                msg = (r.json().get("error") or {}).get("message")
+            except Exception:
+                msg = None
+            hint = " (free-tier limit reached - try later or lower the calls/day)" if r.status_code == 429 else ""
+            return None, f"Gemini API {r.status_code}: {(msg or r.text)[:200]}{hint}"
+        data = r.json()
+        parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return text or None, None if text else "empty reply"
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {str(exc)[:160]}"
+
+
+async def ai_call(system, user_text, kind="note", max_tokens=700, timeout=40.0):
+    """Route to the configured provider. Returns (text, error, model) - model None when nothing was called."""
+    prov, model = provider(), model_for(kind)
+    if prov == "claude":
+        t, e = await claude_call(system, user_text, model, max_tokens, timeout)
+    elif prov == "gemini":
+        t, e = await gemini_call(system, user_text, model, max_tokens, timeout)
+    else:
+        return None, None, None
+    return t, e, (model if t else None)
+
+
+def ai_label():
+    prov = provider()
+    return {"claude": "Claude", "gemini": "Gemini (free tier)"}.get(prov)
+
+
+def stored_context(db_path, day, lock=None):
+    """The review data saved with the latest review of `day` (for the download), or None."""
+    def run():
+        with _conn(db_path) as db:
+            r = db.execute("SELECT context FROM monitor_reviews WHERE day=? AND context IS NOT NULL ORDER BY id DESC LIMIT 1", (day,)).fetchone()
+            return _loads(r[0]) if r else None
+    if lock:
+        with lock:
+            return run()
+    return run()
+
+
+def chat_bundle(ctx):
+    """File to upload into a Claude chat: the instructions plus the day's data, so the subscription does the review at no API cost."""
+    return {"how_to_use": "Upload this file in a Claude chat and write: review this day. Claude follows 'instructions' using only 'data'.",
+            "instructions": SYSTEM_REVIEW, "data": ctx}
 
 
 def note_prompt(ev):

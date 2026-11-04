@@ -1,5 +1,11 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.1 - free ways to get the AI review
+
+* **Download for Claude** (free, uses your Claude chat plan): Signals page → Claude strategy monitor → *Download for Claude*. You get `strategy-review-YYYY-MM-DD.json` with the review instructions and the day's data (trades, losses + causes, missed moves + blocking gates, setups not bought that paid, replay of the last 10 days, code suggestions). Upload it in a Claude chat and write "review this day". Uses the "To date" filter, else today. `GET /api/monitor/export?day=YYYY-MM-DD`.
+* **Gemini free tier** as an optional AI for notes and reviews: get a key in Google AI Studio and set `GEMINI_API_KEY` on Render. `MONITOR_PROVIDER` (or the "AI for notes & reviews" selector): `auto` (Claude key if set, else Gemini), `claude`, `gemini`, `off`. `GEMINI_MODEL` defaults to `gemini-flash-lite-latest`. Free-tier requests are rate-limited and Google may use the content to improve its products; a 429 is reported in the monitor status.
+* **Off - code only** keeps every check and code suggestion at no cost.
+
 ## v1.20.0 - Claude strategy monitor
 
 A new **Claude strategy monitor** panel on the Signals page (and a "Monitor" pill on the terminal). Analysis only: it never places, changes or blocks a trade.

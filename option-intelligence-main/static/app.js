@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.0";
+const FRONTEND_VERSION="1.20.1";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1574,7 +1574,7 @@ async function loadMonitorPill(){
   try{const m=await api("/api/monitor/status");
     if(!m.enabled){el.textContent="Monitor off";el.className="pill muted";return}
     const n=(m.high||0)+(m.medium||0);
-    el.textContent=n?`Monitor: ${n} issue${n>1?"s":""}${m.claude?" · Claude":""}`:`Monitor: OK${m.claude?" · Claude":""}`;
+    el.textContent=n?`Monitor: ${n} issue${n>1?"s":""}${m.ai?" · "+m.ai.split(" ")[0]:""}`:`Monitor: OK${m.ai?" · "+m.ai.split(" ")[0]:""}`;
     el.className="pill "+(m.high?"bad":m.medium?"stale":"ok");el.title=m.latest||"No issues found today";
   }catch{el.textContent="Monitor";el.className="pill muted"}
 }

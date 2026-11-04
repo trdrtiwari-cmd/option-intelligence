@@ -234,7 +234,7 @@ function monDetail(e) {
 function showReview(i) {
   const r = monReviews[i];
   if (!r) { $('monReviewText').textContent = 'No review yet. One runs every 30 minutes from 10:00 and 10 minutes after the close, or press "Run review now".'; return; }
-  $('monReviewHead').textContent = `${r.kind === 'eod' ? 'End-of-day review' : r.kind === 'manual' ? 'Review (run manually)' : 'Intraday review'} · ${timeOnly(r.created_at).slice(0, 16)} · ${r.model ? 'Claude ' + r.model : 'code findings only'}`;
+  $('monReviewHead').textContent = `${r.kind === 'eod' ? 'End-of-day review' : r.kind === 'manual' ? 'Review (run manually)' : 'Intraday review'} · ${timeOnly(r.created_at).slice(0, 16)} · ${r.model ? esc(r.model) : 'code findings only'}`;
   $('monReviewText').textContent = r.text || '';
 }
 async function loadMonitor() {
@@ -243,17 +243,17 @@ async function loadMonitor() {
     const r = await fetch('/api/monitor?' + p, {credentials: 'same-origin'});
     if (!r.ok) throw Error(await r.text());
     const d = await r.json(), st = d.status || {}, cfg = d.settings || {};
-    $('monStatus').innerHTML = `${cfg.enabled ? '● Monitoring' : '○ Monitor off'} · ${st.api_key_set ? 'Claude connected' : '<b>Claude not connected</b> - add ANTHROPIC_API_KEY on Render (code checks still run)'} · `
-      + `${st.calls_today ?? 0} / ${cfg.max_calls} Claude calls today · replay ${esc((st.combo || []).join(' '))}`
+    $('monStatus').innerHTML = `${cfg.enabled ? '● Monitoring' : '○ Monitor off'} · ${st.ai ? esc(st.ai) + ' connected' : '<b>No AI connected</b> - code checks still run; use Download for Claude (free)'} · `
+      + `${st.calls_today ?? 0} / ${cfg.max_calls} AI calls today · replay ${esc((st.combo || []).join(' '))}`
       + (st.last_review ? ` · last review ${esc(timeOnly(st.last_review).slice(11, 16))}` : '') + (st.running ? ' · <b>running…</b>' : '')
       + (st.error ? ` · <span style="color:var(--red)">${esc(st.error)}</span>` : '');
     if (document.activeElement?.closest?.('#monSettings') == null) {
       $('monEnabled').checked = !!cfg.enabled; $('monClaude').checked = !!cfg.claude; $('monPush').checked = !!cfg.push;
-      $('monMax').value = cfg.max_calls; $('monEvery').value = cfg.review_every_min;
+      $('monMax').value = cfg.max_calls; $('monProvider').value = cfg.provider || 'auto'; $('monEvery').value = cfg.review_every_min;
     }
     const keep = $('monReviewPick').value;
     monReviews = d.reviews || [];
-    $('monReviewPick').innerHTML = monReviews.map((x, i) => `<option value="${i}">${esc(timeOnly(x.created_at).slice(0, 16))} · ${esc(x.kind)}${x.model ? '' : ' (no Claude)'}</option>`).join('');
+    $('monReviewPick').innerHTML = monReviews.map((x, i) => `<option value="${i}">${esc(timeOnly(x.created_at).slice(0, 16))} · ${esc(x.kind)}${x.model ? '' : ' (code only)'}</option>`).join('');
     if (keep && monReviews[+keep]) $('monReviewPick').value = keep;
     showReview(+($('monReviewPick').value || 0));
     $('monRows').innerHTML = d.events.length ? d.events.map(e =>
@@ -266,7 +266,7 @@ $('monKind').addEventListener('change', loadMonitor);
 $('monReviewPick').addEventListener('change', e => showReview(+e.target.value));
 $('monSave').onclick = async () => {
   const body = {enabled: $('monEnabled').checked, claude: $('monClaude').checked, push: $('monPush').checked,
-                max_calls: Number($('monMax').value) || 0, review_every_min: Number($('monEvery').value) || 30};
+                max_calls: Number($('monMax').value) || 0, provider: $('monProvider').value, review_every_min: Number($('monEvery').value) || 30};
   const r = await fetch('/api/monitor/settings', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
   $('monSaved').textContent = r.ok ? 'Saved.' : 'Only the owner account can change these.';
   loadMonitor();
@@ -275,4 +275,9 @@ $('monReview').onclick = async () => {
   const r = await fetch('/api/monitor/review-now', {method: 'POST', credentials: 'same-origin'});
   $('monSaved').textContent = r.ok ? 'Review started - it takes up to a minute (replay + Claude).' : 'Only the owner account can run it.';
   setTimeout(loadMonitor, 1500); setTimeout(loadMonitor, 20000); setTimeout(loadMonitor, 60000);
+};
+
+$('monExport').onclick = () => {
+  const day = $('endDate').value || new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
+  location.href = '/api/monitor/export?day=' + encodeURIComponent(day);
 };
