@@ -33,11 +33,49 @@ API_VERSION = "2023-06-01"
 
 
 def api_key():
-    return os.getenv("ANTHROPIC_API_KEY", "").strip()
+    v = os.getenv("ANTHROPIC_API_KEY", "").strip().strip('"').strip("'")
+    if not v:
+        for n in ("CLAUDE_API_KEY", "ANTHROPIC_KEY"):
+            v = os.getenv(n, "").strip().strip('"').strip("'")
+            if v:
+                break
+    if not v:                                       # a Claude key pasted into the Gemini variable
+        g = os.getenv("GEMINI_API_KEY", "").strip()
+        v = g if g.startswith("sk-ant-") else ""
+    return v
+
+
+GEMINI_ENV_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_GENAI_API_KEY")
+CLAUDE_ENV_NAMES = ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "ANTHROPIC_KEY")
+
+
+def _env_any(names):
+    """First non-empty variable among `names` (v1.20.3: also tolerates spaces / lower case / quotes in the Render variable)."""
+    for n in names:
+        v = os.getenv(n, "").strip().strip('"').strip("'")
+        if v:
+            return v, n
+    want = {n.replace("_", "").upper() for n in names}
+    for k, v in os.environ.items():
+        if k.replace("_", "").replace(" ", "").replace("-", "").upper() in want and v.strip():
+            return v.strip().strip('"').strip("'"), k
+    return "", None
 
 
 def gemini_key():
-    return os.getenv("GEMINI_API_KEY", "").strip()
+    v, _ = _env_any(GEMINI_ENV_NAMES)
+    # a Google AI Studio key starts with "AIza"; a Claude key put in the Gemini variable is ignored here (used as Claude below)
+    return "" if v.startswith("sk-ant-") else v
+
+
+def key_report():
+    """What the server actually sees (names only, never the values)."""
+    g, gn = _env_any(GEMINI_ENV_NAMES)
+    c, cn = _env_any(CLAUDE_ENV_NAMES)
+    near = sorted(k for k in os.environ if any(w in k.upper() for w in ("GEMINI", "ANTHROPIC", "CLAUDE", "GOOGLE")))
+    return {"gemini_var": gn, "gemini_looks_valid": g.startswith("AIza") if g else None, "claude_var": cn,
+            "claude_looks_valid": c.startswith("sk-ant-") if c else None, "similar_variables": near[:10],
+            "provider_setting": SETTINGS.get("provider"), "ai_switch_on": SETTINGS.get("claude", True), "in_use": provider()}
 
 
 def provider():

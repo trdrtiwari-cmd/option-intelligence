@@ -243,7 +243,7 @@ async function loadMonitor() {
     const r = await fetch('/api/monitor?' + p, {credentials: 'same-origin'});
     if (!r.ok) throw Error(await r.text());
     const d = await r.json(), st = d.status || {}, cfg = d.settings || {};
-    $('monStatus').innerHTML = `${cfg.enabled ? '● Monitoring' : '○ Monitor off'} · ${st.ai ? esc(st.ai) + ' connected' : '<b>No AI connected</b> - code checks still run; use Download for Claude (free)'} · `
+    $('monStatus').innerHTML = `${cfg.enabled ? '● Monitoring' : '○ Monitor off'} · ${st.ai ? esc(st.ai) + ' connected' : '<b>No AI connected</b>' + aiWhy(st, cfg)} · `
       + `${st.calls_today ?? 0} / ${cfg.max_calls} AI calls today · replay ${esc((st.combo || []).join(' '))}`
       + (st.last_review ? ` · last review ${esc(timeOnly(st.last_review).slice(11, 16))}` : '') + (st.running ? ' · <b>running…</b>' : '')
       + (st.error ? ` · <span style="color:var(--red)">${esc(st.error)}</span>` : '');
@@ -280,4 +280,20 @@ $('monReview').onclick = async () => {
 $('monExport').onclick = () => {
   const day = $('endDate').value || new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
   location.href = '/api/monitor/export?day=' + encodeURIComponent(day);
+};
+
+function aiWhy(st, cfg) {
+  const k = st.keys || {};
+  if (cfg.claude === false) return ' - turn on "AI explanations" and Save';
+  if (cfg.provider === 'off') return ' - "AI for notes & reviews" is Off; choose Auto and Save';
+  if (!k.gemini_var && !k.claude_var) return ' - the server sees no GEMINI_API_KEY' + (k.similar_variables && k.similar_variables.length ? ` (found: ${k.similar_variables.map(esc).join(', ')})` : '') + '. Check the name in Render → Environment, Save Changes, wait for the deploy.';
+  if (cfg.provider === 'claude' && !k.claude_var) return ' - provider is Claude but only a Gemini key is set; choose Auto and Save';
+  return '';
+}
+$('monTest').onclick = async () => {
+  $('monSaved').textContent = 'Testing…';
+  try { const r = await fetch('/api/monitor/test-ai', {method: 'POST', credentials: 'same-origin'}); const d = await r.json();
+    $('monSaved').textContent = (d.ok ? '✓ ' : '✗ ') + (d.message || r.status);
+  } catch (e) { $('monSaved').textContent = '✗ ' + e.message; }
+  loadMonitor();
 };

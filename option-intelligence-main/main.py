@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.2"
+APP_VERSION = "1.20.3"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2204,7 +2204,7 @@ async def monitor_get(request: Request, start: str = "", end: str = "", kind: st
     evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, start, end, kind.upper(), min(2000, max(1, limit)), SIGNAL_LOG_LOCK)
     rvs = await asyncio.to_thread(mon.reviews, SIGNAL_LOG_DB, start, end, 20, SIGNAL_LOG_LOCK)
     return {"events": evs, "reviews": rvs, "settings": {k: v for k, v in mon.SETTINGS.items()},
-            "status": {"api_key_set": bool(mon.provider()), "ai": mon.ai_label(), "has_claude_key": bool(mon.api_key()), "has_gemini_key": bool(mon.gemini_key()), "calls_today": await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK),
+            "status": {"api_key_set": bool(mon.provider()), "ai": mon.ai_label(), "has_claude_key": bool(mon.api_key()), "has_gemini_key": bool(mon.gemini_key()), "keys": mon.key_report(), "calls_today": await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK),
                        "running": _SMON["running"], "state": _SMON["status"], "error": _SMON["error"], "combo": _SMON["rep_combo"] or list(_monitor_combo()),
                        "last_replay": datetime.fromtimestamp(_SMON["replay_at"], IST).isoformat(timespec="seconds") if _SMON["replay_at"] else None,
                        "last_review": datetime.fromtimestamp(_SMON["last_review_at"], IST).isoformat(timespec="seconds") if _SMON["last_review_at"] else None}}
@@ -2261,6 +2261,24 @@ async def monitor_export(request: Request, day: str = "", fresh: int = 0):
     blob = json.dumps(mon.chat_bundle(ctx), default=str, ensure_ascii=False, indent=1)
     return Response(blob, media_type="application/json",
                     headers={"Content-Disposition": f"attachment; filename=strategy-review-{day}.json", "Cache-Control": "no-store"})
+
+
+@app.post("/api/monitor/test-ai")
+async def monitor_test_ai(request: Request):
+    """v1.20.3: one tiny call to the configured AI, so a wrong key / variable name / model shows a clear message."""
+    _need_user(request)
+    rep_ = mon.key_report()
+    if not mon.provider():
+        why = ("the 'AI explanations' box is off" if not mon.SETTINGS.get("claude", True) else
+               "'AI for notes & reviews' is set to Off" if mon.SETTINGS.get("provider") == "off" else
+               f"provider is set to {mon.SETTINGS.get('provider')} but that key is missing" if mon.SETTINGS.get("provider") in ("claude", "gemini") else
+               "no GEMINI_API_KEY / ANTHROPIC_API_KEY variable reached the server (check the exact name, then Save Changes so Render redeploys)")
+        return {"ok": False, "message": "No AI in use: " + why, "keys": rep_}
+    text, err, model = await mon.ai_call("Reply with exactly: OK", "Connection test", "note", max_tokens=20, timeout=30.0)
+    if text:
+        _SMON["error"] = None
+        return {"ok": True, "message": f"{mon.ai_label()} answered ({model}): {text[:40]}", "keys": rep_}
+    return {"ok": False, "message": f"{mon.ai_label()} call failed: {err}", "keys": rep_}
 
 
 @app.post("/api/monitor/review-now")
