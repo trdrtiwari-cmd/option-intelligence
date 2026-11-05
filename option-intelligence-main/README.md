@@ -1,5 +1,12 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.12 - 15-minute timeframe
+
+* **Signal freshness by time, not bar count:** the fresh / expire bar counts were tuned on 5-minute candles, so on 15-minute candles a setup stayed "fresh" for 45 min and "live" for 3 hours. Now 5-minute limits are unchanged (standard 15 / 60 min, scalp 10 / 30 min) and slower candles keep the same time limits with a minimum of 2 bars fresh / 4 bars to expire (15-minute: 30 / 60 min).
+* **Diagnostics and the strategy monitor replay 15-minute charts with the 30-minute higher timeframe**, exactly like the live analysis (before: no higher timeframe, so the replay did not match live signals).
+* Diagnostics "Hold up to (candles)" defaults per timeframe: 1m 48, 3m 20, 5m 12, 15m 8 (about 2 hours).
+* To get background alerts / signal logging on 15-minute candles from the open, set `ALERT_INTERVAL=15` (and `ALERT_MODE`) on Render; the app also follows the timeframe you use in the terminal for 6 hours.
+
 ## v1.20.11 - Gemini reliability, monitor table layout
 
 * **Gemini:** one call at a time, at least 6 s apart (free-tier rate limit, `GEMINI_MIN_GAP_SEC`); a busy model (503 / 429 / timeout) is retried after 4 s, then the next free model is tried (`gemini-flash-lite-latest` → `gemini-flash-latest` → 2.5 Flash-Lite → 2.5 Flash; override with `GEMINI_MODELS`); a retired model name (404) skips straight to the next; a bad key stops at once. After all of them are busy, calls pause 2 minutes instead of using up the daily allowance. Findings whose AI note failed are retried every 2 minutes (3 at a time). The red error line clears after the next successful call.

@@ -160,3 +160,12 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn(); print("ok", name)
     print("all reconfirm tests passed")
+
+
+def test_signal_age_limits_per_timeframe():
+    import signal_fusion as sf_
+    std = {"fresh_bars": 3, "expire_bars": 12}
+    scalp = {"fresh_bars": 2, "expire_bars": 6}
+    assert sf_.signal_age_limits(std, 5) == (15, 60) and sf_.signal_age_limits(scalp, 5) == (10, 30)     # 5-minute: unchanged
+    assert sf_.signal_age_limits(std, 15) == (30, 60) and sf_.signal_age_limits(scalp, 15) == (30, 60)   # 15-minute: 2 / 4 bars
+    assert sf_.signal_age_limits(std, 1) == (3, 12)

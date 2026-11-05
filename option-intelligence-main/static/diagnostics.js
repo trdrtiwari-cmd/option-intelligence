@@ -124,3 +124,14 @@
     $("results").scrollIntoView({ behavior: "smooth" });
   }
 })();
+
+// v1.20.12: a sensible "hold up to" per timeframe (about 1 hour on 5-minute candles, 2 hours on 15-minute candles) unless you typed one
+(function () {
+  const iv = document.getElementById("interval"), hz = document.getElementById("horizon");
+  if (!iv || !hz) return;
+  const H = { "1": 48, "3": 20, "5": 12, "15": 8 };
+  let touched = false;
+  hz.addEventListener("input", () => { touched = true; });
+  const apply = () => { if (!touched && H[iv.value]) hz.value = H[iv.value]; };
+  iv.addEventListener("change", apply); apply();
+})();

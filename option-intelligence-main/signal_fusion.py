@@ -216,6 +216,16 @@ def dashboard_summary(dash):
                         "detail": c.get("detail", "")} for c in dash.get("contributions", [])]}
 
 
+def signal_age_limits(rules, interval):
+    """(fresh, expire) minutes for a signal. The bar counts were tuned on 5-minute candles; on 15 / 30-minute candles the same counts
+    meant a setup stayed 'fresh' for 45 min and 'live' for 3 hours (v1.20.12). Keep the 5-minute time limits, but never less than
+    2 bars fresh / 4 bars to expire on slower candles."""
+    iv = max(1, int(interval or 5))
+    fresh = min(rules["fresh_bars"] * iv, max(rules["fresh_bars"] * 5, 2 * iv))
+    expire = min(rules["expire_bars"] * iv, max(rules["expire_bars"] * 5, 4 * iv))
+    return fresh, max(expire, fresh)
+
+
 def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard", reconfirm=None, daily_losses=None, max_daily_losses=0):
     """Combine technical analysis `a` (indicators.analyze output) with the dashboard final signal `dash`
     (dashboard_data.final_signal output). `reconfirm` = {"tracker", "name", "window", "price", "ts"} switches on the hold-and-recheck
@@ -223,6 +233,7 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
     now_dt = now_dt.astimezone(IST)
     rules = mode_rules(mode)
     fresh_bars, expire_bars, max_chase = rules["fresh_bars"], rules["expire_bars"], rules["max_chase_atr"]
+    fresh_min, expire_min = signal_age_limits(rules, interval)
     side = a.get("side")
     sig = a.get("signal") or "WAIT"
     tech_level = "CONFIRMED" if sig.startswith("CONFIRMED") else "WATCH" if sig.startswith("WATCH") else "WAIT"
@@ -257,7 +268,7 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
     timing = {"state": "NONE", "side": side, "generated_at": None, "generated_at_text": None, "age_minutes": None, "age_bars": None,
               "signal_price": None, "price_now": a.get("last_close"), "moved_atr": None, "basis": None, "estimated": False,
               "lean_since_text": lean_run["text"] if lean_run else None, "rules": {
-                  "fresh_minutes": fresh_bars * interval, "expire_minutes": expire_bars * interval, "max_chase_atr": max_chase}}
+                  "fresh_minutes": fresh_min, "expire_minutes": expire_min, "max_chase_atr": max_chase}}
 
     def describe(since_dt, price, basis, estimated):
         age_min = max(0.0, (now_dt - since_dt).total_seconds() / 60.0)
@@ -284,9 +295,9 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
         if tech_run and replay.get("capped"):
             timing["estimated"] = True
         if precheck:
-            if age_min > expire_bars * interval:
+            if age_min > expire_min:
                 state = "EXPIRED"
-            elif age_min > fresh_bars * interval or (moved is not None and moved > max_chase):
+            elif age_min > fresh_min or (moved is not None and moved > max_chase):
                 state = "LATE"
             else:
                 state = "FRESH"
@@ -295,12 +306,12 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
             detail = f"Generated {timing['generated_at_text']} · {age_min:.0f} min ago{mv}"
             if state != "FRESH":
                 detail += " — don't chase; wait for a new pullback signal"
-            fresh_gate = {"label": f"Signal fresh (≤ {fresh_bars * interval} min old, ≤ {max_chase:g} ATR moved)", "pass": state == "FRESH", "detail": detail}
+            fresh_gate = {"label": f"Signal fresh (≤ {fresh_min} min old, ≤ {max_chase:g} ATR moved)", "pass": state == "FRESH", "detail": detail}
         else:
             timing["state"] = "FORMING"
     elif precheck:   # confirmed but the age cannot be established -> refuse rather than assume fresh
         timing["state"] = "UNKNOWN"
-        fresh_gate = {"label": f"Signal fresh (≤ {fresh_bars * interval} min old, ≤ {max_chase:g} ATR moved)", "pass": False,
+        fresh_gate = {"label": f"Signal fresh (≤ {fresh_min} min old, ≤ {max_chase:g} ATR moved)", "pass": False,
                       "detail": "Not enough same-session candle history to verify when the signal was generated"}
     if fresh_gate:
         gates.append(fresh_gate)

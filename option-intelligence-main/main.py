@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.11"
+APP_VERSION = "1.20.12"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -990,7 +990,7 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
     result = None
     try:
         result = await candles(symbol=sym, interval=interval, days=days)
-        htf_interval = 15 if interval < 15 else None
+        htf_interval = 15 if interval < 15 else 30 if interval < 30 else None     # v1.20.12: 15-minute charts use 30-minute HTF, as live
         htf_raw = None
         if htf_interval:
             try:
@@ -2053,7 +2053,7 @@ def _monitor_combo():
 async def _monitor_replay(sym, interval, mode, score_min, days=10):
     """The diagnostics replay over the last `days` (same engine and entry windows as live), used for missed moves + suggestions."""
     result = await candles(symbol=sym, interval=interval, days=days)
-    htf_interval = 15 if interval < 15 else None
+    htf_interval = 15 if interval < 15 else 30 if interval < 30 else None     # v1.20.12: same HTF as the live analysis
     htf_raw = (await candles(symbol=sym, interval=htf_interval, days=days))["candles"] if htf_interval else None
     return await asyncio.to_thread(dgn.run, result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw,
                                    htf_interval=htf_interval, volume_source=result.get("volume_source"), score_min=score_min)
