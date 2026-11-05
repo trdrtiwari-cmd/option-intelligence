@@ -277,9 +277,38 @@ $('monReview').onclick = async () => {
   setTimeout(loadMonitor, 1500); setTimeout(loadMonitor, 20000); setTimeout(loadMonitor, 60000);
 };
 
-$('monExport').onclick = () => {
+// v1.20.5: the Android app's WebView ignores file downloads, so: share sheet (send straight to the Claude app) -> normal
+// download in a browser -> copy to clipboard (paste into a Claude chat). Every path tells you what happened.
+$('monExport').onclick = async () => {
+  const btn = $('monExport'), msg = t => { $('monSaved').textContent = t; };
   const day = $('endDate').value || new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
-  location.href = '/api/monitor/export?day=' + encodeURIComponent(day);
+  btn.disabled = true; msg('Preparing the review file… (up to a minute if the replay has to run)');
+  try {
+    const r = await fetch('/api/monitor/export?day=' + encodeURIComponent(day), {credentials: 'same-origin'});
+    if (!r.ok) throw Error((await r.text()).slice(0, 200) || r.status);
+    const text = await r.text(), name = `strategy-review-${day}.json`;
+    const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    try {
+      const file = new File([text], name, {type: 'application/json'});
+      if (navigator.canShare && navigator.canShare({files: [file]})) {
+        await navigator.share({files: [file], title: name, text: 'review this day'});
+        msg('Shared. In Claude, add the message: review this day'); return;
+      }
+    } catch (e) { if (e && e.name === 'AbortError') { msg('Share cancelled.'); return; } }
+    if (!native) {
+      const url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+      const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      msg(`Downloaded ${name}. Upload it in a Claude chat and write: review this day`); return;
+    }
+    let copied = false;
+    try { await navigator.clipboard.writeText(text + '\n\nreview this day'); copied = true; } catch {}
+    if (!copied) { const ta = document.createElement('textarea'); ta.value = text + '\n\nreview this day'; document.body.appendChild(ta); ta.select();
+      try { copied = document.execCommand('copy'); } catch {} ta.remove(); }
+    msg(copied ? `Copied the ${day} review data (${Math.round(text.length / 1024)} KB). Open a Claude chat, long-press → Paste, send.`
+               : 'Could not copy here - open this page in Chrome and press Download for Claude there.');
+  } catch (e) { msg('Download failed: ' + e.message); }
+  finally { btn.disabled = false; }
 };
 
 function aiWhy(st, cfg) {

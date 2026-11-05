@@ -27,6 +27,7 @@ SETTINGS = {
     "gemini_model": os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"),
 }
 PROVIDERS = ("auto", "claude", "gemini", "off")
+GEMINI_FALLBACK = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-flash-latest")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
@@ -529,9 +530,21 @@ async def ai_call(system, user_text, kind="note", max_tokens=700, timeout=40.0):
         t, e = await claude_call(system, user_text, model, max_tokens, timeout)
     elif prov == "gemini":
         t, e = await gemini_call(system, user_text, model, max_tokens, timeout)
+        # v1.20.5: the free models are often "high demand" (503) - wait, retry, then try the other free Flash model once
+        if not t and e and (" 503" in e or " 429" in e or "overloaded" in e.lower()):
+            import asyncio
+            await asyncio.sleep(3)
+            t, e2 = await gemini_call(system, user_text, model, max_tokens, timeout)
+            if not t:
+                alt = GEMINI_FALLBACK if model != GEMINI_FALLBACK else "gemini-flash-lite-latest"
+                t, e3 = await gemini_call(system, user_text, alt, max_tokens, timeout)
+                if t:
+                    model = alt
+                else:
+                    e = e3 or e2 or e
     else:
         return None, None, None
-    return t, e, (model if t else None)
+    return t, (None if t else e), (model if t else None)
 
 
 def ai_label():

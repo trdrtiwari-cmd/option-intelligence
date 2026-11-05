@@ -173,3 +173,19 @@ def test_feed_state_only_for_open_pages():
     M._WS_ACTIVE[1] = {"sym": "NIFTY", "akey": ("NIFTY", 5, "standard", 70, -1), "since": now - 60}
     assert M._monitor_feed_state("NIFTY", now)["analysis_age"] >= 299
     M._WS_ACTIVE.clear()
+
+
+def test_gemini_retry_and_fallback():
+    calls = []
+    async def fake(system, user, model, mt=700, to=40.0):
+        calls.append(model)
+        return (None, "Gemini API 503: high demand") if len(calls) < 3 else ("OK", None)
+    old, oldsleep = mon.gemini_call, asyncio.sleep
+    os.environ["GEMINI_API_KEY"] = "AIzaX"; os.environ.pop("ANTHROPIC_API_KEY", None)
+    async def nosleep(*a): return None
+    mon.gemini_call = fake; asyncio.sleep = nosleep
+    try:
+        t, e, m = asyncio.run(mon.ai_call("s", "u"))
+        assert t == "OK" and e is None and m == mon.GEMINI_FALLBACK and len(calls) == 3
+    finally:
+        mon.gemini_call = old; asyncio.sleep = oldsleep; os.environ.pop("GEMINI_API_KEY", None)
