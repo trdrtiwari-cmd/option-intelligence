@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.3"
+APP_VERSION = "1.20.4"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1273,6 +1273,7 @@ async def live_derivatives(symbol: str = "NIFTY", expiry_date: str = "current_we
     }
 
 
+_WS_ACTIVE = {}      # browser socket id -> {sym, akey (its analysis combo), since}
 WS_TICK_SEC = float(os.getenv("WS_TICK_SEC", "0.1"))       # v1.19.7: index + option prices checked 10x a second, pushed when they move
 WS_PUSH_SEC = float(os.getenv("WS_PUSH_SEC", "0.1"))       # v1.19.7: candles + analysis checked 10x a second, pushed when newer
 
@@ -1320,6 +1321,8 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
         await websocket.close(code=4400)
         return
     index_key = INDEX_KEYS[sym]
+    conn_id = id(websocket)
+    _WS_ACTIVE[conn_id] = {"sym": sym, "akey": None, "since": time.time()}     # v1.20.4: the monitor only checks what is open
     send_lock = asyncio.Lock()
     sub = {"interval": None, "mode": "standard", "score_min": 70, "reconfirm": -1, "view": "index"}
     sent = {"an": None, "bars": None, "bars_src": None, "idx": None, "opt": {}, "ticks_at": 0.0, "push_at": 0.0}
@@ -1337,6 +1340,8 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                 if new != sub:
                     sub.clear()
                     sub.update(new)
+                    if sub.get("interval"):
+                        _WS_ACTIVE.get(conn_id, {})["akey"] = (sym, sub["interval"], sub["mode"], sub["score_min"], sub["reconfirm"])
                     sent["an"] = sent["bars"] = None       # settings changed: push the matching result straight away
                     sent["push_at"] = 0.0
 
@@ -1429,6 +1434,7 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
     except Exception as exc:
         logger.debug("Browser websocket closed: %s", exc)
     finally:
+        _WS_ACTIVE.pop(conn_id, None)
         for t in (read_task, pump_task):
             if t is not None and not t.done():
                 t.cancel()
@@ -2142,7 +2148,9 @@ def _monitor_feed_state(sym, now):
     with STREAM_LOCK:
         running = bool(STREAMS.get(sym))
         idx = _tick_view(INDEX_KEYS[sym], now)
-    ages = [now - ts for k, (ts, _r) in list(_AN_CACHE.items()) if isinstance(k, tuple) and len(k) == 5 and k[0] == sym]
+    # v1.20.4: only the analysis combos an open page is subscribed to (others are refreshed on demand, so their age means nothing)
+    keys = {c["akey"] for c in list(_WS_ACTIVE.values()) if c.get("sym") == sym and c.get("akey") and now - c.get("since", now) > 20}
+    ages = [now - _AN_CACHE[k][0] for k in keys if k in _AN_CACHE]
     return {"symbol": sym, "stream_running": running, "index_tick_age": idx.get("age_seconds") if idx else None,
             "analysis_age": min(ages) if ages else None, "token_ok": TOKEN_CHECK.get("state") != "EXPIRED"}
 
@@ -2160,8 +2168,11 @@ async def _monitor_loop():
                 live = start + timedelta(minutes=3) <= now_dt <= end
                 if live and t - _SMON["feed_at"] >= 5:
                     _SMON["feed_at"] = t
-                    watched = {k[0] for k, v in _USER_COMBOS.items() if t - v < 600} or {_monitor_combo()[0]}
+                    # v1.20.4: check a symbol only while a page has it open for 20+ s (the stream for a symbol nobody has open is
+                    # intentionally not running - that was reported as a "stream not running" problem) or while it has an open trade.
                     open_by = await asyncio.to_thread(sx.open_trade_count, SIGNAL_LOG_DB, SIGNAL_LOG_LOCK)
+                    watched = {c["sym"] for c in list(_WS_ACTIVE.values()) if t - c.get("since", t) > 20}
+                    watched |= {k for k, n in (open_by or {}).items() if n}
                     for sym in watched & set(INDEX_KEYS):
                         st = _monitor_feed_state(sym, t)
                         st["signal_active"] = bool(open_by.get(sym)) if isinstance(open_by, dict) else False

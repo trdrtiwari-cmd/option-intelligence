@@ -157,3 +157,19 @@ def test_gemini_request_shape():
 def test_chat_bundle():
     b = mon.chat_bundle({"day": "2026-11-04"})
     assert b["instructions"] == mon.SYSTEM_REVIEW and b["data"]["day"] == "2026-11-04" and "review this day" in b["how_to_use"]
+
+
+def test_feed_state_only_for_open_pages():
+    try:
+        import main as M
+    except Exception:
+        return
+    import time as _t
+    now = _t.time()
+    M._WS_ACTIVE.clear()
+    M._AN_CACHE[("NIFTY", 5, "standard", 70, -1)] = (now - 300, {})     # an old result nobody is subscribed to
+    st = M._monitor_feed_state("NIFTY", now)
+    assert st["analysis_age"] is None
+    M._WS_ACTIVE[1] = {"sym": "NIFTY", "akey": ("NIFTY", 5, "standard", 70, -1), "since": now - 60}
+    assert M._monitor_feed_state("NIFTY", now)["analysis_age"] >= 299
+    M._WS_ACTIVE.clear()
