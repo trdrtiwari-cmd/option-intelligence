@@ -24,7 +24,7 @@ COLUMNS = [("created_at", "TEXT"), ("session_date", "TEXT"), ("symbol", "TEXT"),
            ("reason", "TEXT"), ("idx_sl", "REAL"), ("idx_target", "REAL"), ("opt_entry", "REAL"), ("opt_sl", "REAL"), ("opt_target", "REAL"),
            ("rr", "REAL"), ("opt_30", "REAL"), ("opt_60", "REAL"), ("opt_max_60", "REAL"), ("opt_min_60", "REAL"), ("best_pct_60", "REAL"),
            ("worst_pct_60", "REAL"), ("test_result", "TEXT"), ("test_points", "REAL"), ("outcome_at", "TEXT"), ("outcome_note", "TEXT"),
-           ("blocked_by", "TEXT")]     # v1.20.6: the exact rules that failed (technical gates + entry window / dashboard / reconfirm / profit check)
+           ("blocked_by", "TEXT"), ("chart_pattern", "TEXT")]     # v1.20.6: the exact rules that failed (technical gates + entry window / dashboard / reconfirm / profit check)
 FIELDS = [c for c, _ in COLUMNS]
 
 
@@ -95,7 +95,8 @@ def make_row(now, symbol, interval, mode, a, final, rc, pick, timing):
             "option_ltp": op.get("entry") or pick.get("ask") or pick.get("ltp"), "index_price": ix.get("entry") or a.get("last_close"),
             "atr": a.get("atr"), "score": a.get("score"), "regime": a.get("regime_label") or a.get("regime"), "reason": str(reason)[:400],
             "idx_sl": ix.get("stop"), "idx_target": ix.get("target"), "opt_entry": op.get("entry"), "opt_sl": op.get("stop"),
-            "opt_target": op.get("target"), "rr": ix.get("rr"), "blocked_by": blocked_by(a, final) if stage != "BUY" else ""}
+            "opt_target": op.get("target"), "rr": ix.get("rr"), "blocked_by": blocked_by(a, final) if stage != "BUY" else "",
+            "chart_pattern": (lambda cp: f"{cp.get('name')} - {cp.get('detail')}"[:200] if cp and cp.get("name") not in (None, "None") else "")(a.get("chart_pattern"))}
 
 
 def insert(db_path, row, lock=None):

@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.15";
+const FRONTEND_VERSION="1.20.16";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -611,6 +611,9 @@ async function runAnalysis(force){
 // v1.19.6: one renderer for the analysis, used by the REST poll AND by the result the live socket pushes the moment it is computed.
 function applyAnalysis(a){
   {
+    try{const cp=a.chart_pattern,el=$("chartPattern");if(el){if(cp&&cp.name&&cp.name!=="None"){const col=cp.stage==="breakout"?(cp.side==="CE"?"var(--green)":"var(--red)"):"";
+      el.innerHTML=`<span style="color:${col};font-weight:700">${escapeHtml(cp.name)}</span> · ${escapeHtml(cp.detail||"")}`+(cp.trigger!=null?` · trigger ${fmt(cp.trigger)}`:"")+(cp.target!=null?` · target ${fmt(cp.target)}`:"")+(cp.invalidation!=null?` · invalid ${fmt(cp.invalidation)}`:"");}
+      else el.textContent=cp?cp.detail||"none":"—";}}catch{}
     $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";
     $("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
     $("decision").textContent=a.decision||"WAIT";
@@ -1616,3 +1619,5 @@ function pageSnapshot(){
     toast("Review file ready - upload it in a Claude chat and write: review this day");
   }catch(e){toast("Download for Claude failed: "+e.message)}finally{b.disabled=false;b.textContent=old}
 });})();
+
+function escapeHtml(t){return String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}

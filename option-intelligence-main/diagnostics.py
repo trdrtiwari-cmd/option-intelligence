@@ -72,7 +72,9 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
         if side and atr:
             stretch = ((a["ema9"] - a["last_close"]) if side == "PE" else (a["last_close"] - a["ema9"])) / atr
         rsi = a.get("rsi")
+        cpat = a.get("chart_pattern") or {}
         out.append({"i": i, "signal": a["signal"], "side": side, "score": a["score"], "regime": a.get("regime_label"), "phase": a.get("regime_phase"),
+                    "pattern": cpat.get("name"), "pattern_side": cpat.get("side"), "pattern_stage": cpat.get("stage"), "pe": a.get("pattern_effects"),
                     "failed": failed, "trigger": trigger, "stretch_atr": stretch, "atr": atr,
                     "rsi_ext": (rsi if side == "PE" else 100 - rsi) if (rsi is not None and side) else None})
     return cs, out
@@ -323,6 +325,11 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
                                                                           ["at the level (< 0.5 ATR)", "0.5–1.5 ATR away", "> 1.5 ATR away (extended)", "no level found"]),
         "Room to the next opposite level": _bucket(rows_conf, lambda r: "no level found" if r.get("sr_room") is None else
                                                    _band(r["sr_room"], (1.0, 2.0), ("< 1 ATR", "1–2 ATR", "> 2 ATR")), ["< 1 ATR", "1–2 ATR", "> 2 ATR", "no level found"]),
+        "Chart pattern at entry": _bucket(rows_conf, lambda r: "no pattern" if not r.get("pattern") or r.get("pattern") == "None" else
+                                          "range (no break)" if r.get("pattern_stage") == "range" else
+                                          ("breakout WITH the trade" if r.get("pattern_side") == r["side"] else "breakout AGAINST the trade") if r.get("pattern_stage") == "breakout" else
+                                          ("forming WITH the trade" if r.get("pattern_side") == r["side"] else "forming AGAINST the trade"),
+                                          ["breakout WITH the trade", "forming WITH the trade", "range (no break)", "forming AGAINST the trade", "breakout AGAINST the trade", "no pattern"]),
         "Signal of the day (same side)": _bucket(rows_conf, lambda r: "1st" if r.get("nth_today", 1) == 1 else "2nd or later", ["1st", "2nd or later"]),
     }
     report["strategies"] = [{"name": name, **stats([r["strat"][name] for r in rows_conf if name in r["strat"]])}
@@ -334,7 +341,8 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
                          "rsi_ext": None if r["rsi_ext"] is None else round(r["rsi_ext"], 1), "stretch_atr": None if r["stretch_atr"] is None else round(r["stretch_atr"], 2),
                          "zone": r["zone"], "vs_prev": r["vs_prev"], "atr": None if not r.get("atr") else round(r["atr"], 2),
                          "sr_dist_atr": r.get("sr_dist"), "sr_room_atr": r.get("sr_room"), "sr_strength": r.get("sr_strength"),
-                         "nth_today": r.get("nth_today")} for r in rows_conf]
+                         "nth_today": r.get("nth_today"), "pattern": r.get("pattern"), "pattern_side": r.get("pattern_side"),
+                         "pattern_stage": r.get("pattern_stage")} for r in rows_conf]
     gates = {}
     for r in rows_near:
         gates.setdefault(r["gate"], []).append(r["pnl"])
@@ -615,6 +623,73 @@ def trend_day_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, s
     return out
 
 
+# ---------------------------------------------------------------- v1.20.16 chart patterns: old rule vs pattern rule
+TRIG_LABELS = ("Entry trigger (EMA 9 retest resumes, or break of the last pause)", "Pullback-and-resume trigger (retest holds)")
+CANDLE_LABEL = "Closed-candle price-action confirmation"
+AGAINST_LABEL = "No opposite chart-pattern breakout"
+
+
+def _pattern_failed(r, mode, rule):
+    """Failed gates of a replayed bar under rule 'old' (last candle / pullback only) or 'new' (a chart-pattern breakout on the trade side
+    can confirm, an opposite breakout blocks), whatever CHART_PATTERN_MODE the replay itself ran with."""
+    pe = r.get("pe")
+    if not pe or not r.get("side"):
+        return None
+    trig = TRIG_LABELS[0] if mode == "scalp" else TRIG_LABELS[1]
+    base = [f for f in r["failed"] if f not in TRIG_LABELS and f != CANDLE_LABEL and f != AGAINST_LABEL]
+    pok, pag = pe.get("pattern_ok"), pe.get("pattern_against")
+    t_ok, c_ok = pe.get("trigger_old_ok"), pe.get("candle_old_ok")
+    if t_ok is None:                                   # gates were not evaluated that far (no ATR): keep what the replay saw
+        return list(r["failed"])
+    if rule == "old":
+        return base + ([trig] if not t_ok else []) + ([CANDLE_LABEL] if c_ok is False else [])
+    return base + ([trig] if not (t_ok or pok) else []) + ([CANDLE_LABEL] if c_ok is False and not pok else []) + ([AGAINST_LABEL] if pag else [])
+
+
+def _run_starts(replayed, ok):
+    out, prev = [], None
+    for r in replayed:
+        k = r.get("side") if ok(r) else None
+        if k and (prev is None or prev[0] != k or r["i"] != prev[1] + 1):
+            out.append(r)
+        prev = (k, r["i"]) if k else None
+    return out
+
+
+def pattern_rule_compare(cs, replayed, interval, horizon, cost, target, stop, mode):
+    """Entries under the old rule vs the chart-pattern rule on the same bars, judged on the live trailing exit (and by half)."""
+    sets = {}
+    for rule in ("old", "new"):
+        evs = _run_starts(replayed, lambda r, rule=rule: (lambda f: f is not None and not f)(_pattern_failed(r, mode, rule)))
+        sets[rule] = evaluate(cs, evs, interval, horizon, cost, target, stop, with_extras=True)
+    keys = {rule: {(r["i"], r["side"]) for r in rows} for rule, rows in sets.items()}
+    days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    tr = lambda rows: [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
+    out = {}
+    for rule, rows in sets.items():
+        d = {"trail": stats(tr(rows)), "points": stats([r["pnl"] for r in rows])}
+        if cut:
+            d["first"] = stats(tr([r for r in rows if r["day"] < cut]))
+            d["second"] = stats(tr([r for r in rows if r["day"] >= cut]))
+        out[rule] = d
+    added = [r for r in sets["new"] if (r["i"], r["side"]) not in keys["old"]]
+    removed = [r for r in sets["old"] if (r["i"], r["side"]) not in keys["new"]]
+    out["added"] = {"trail": stats(tr(added)), "trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pattern": r.get("pattern"),
+                                                             "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r in added][:30]}
+    out["removed"] = {"trail": stats(tr(removed)), "trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pattern": r.get("pattern"),
+                                                                 "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r in removed][:30]}
+    o, n = out["old"]["trail"], out["new"]["trail"]
+    nf, ns = out["new"].get("first") or {}, out["new"].get("second") or {}
+    of, os_ = out["old"].get("first") or {}, out["old"].get("second") or {}
+    both_better = bool(nf.get("n")) and bool(ns.get("n")) and nf.get("total", 0) >= of.get("total", 0) and ns.get("total", 0) >= os_.get("total", 0)
+    out["verdict"] = ("no difference in this period" if not added and not removed else
+                      "pattern rule better in both halves - keep it" if both_better and n.get("total", 0) > o.get("total", 0) else
+                      "pattern rule worse - set CHART_PATTERN_MODE=info" if n.get("total", 0) < o.get("total", 0) else
+                      "mixed - keep watching")
+    return out
+
+
 # ---------------------------------------------------------------- v1.20.13 support / resistance: does buying at the level work?
 def _sr_at(cs, i, atr, interval, symbol, cache=None, every=6):
     """S/R zones as they were known when bar i closed (same rules as the terminal's S/R map). Recomputed every `every` bars."""
@@ -826,6 +901,17 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                       + (f" Closest: target {nb['target']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} / stop {nb['stop']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} "
                                          f"— worst half {nb['worst_win']}% winners, {nb['worst_avg']:+.1f} pts/trade." if nb else "")
                                       + " A higher win rate here would only come from a smaller target than stop, which these signals do not pay for."})
+    try:                       # v1.20.16: does the chart-pattern rule beat the last-candle / pullback-only rule?
+        pr = pattern_rule_compare(cs, replayed, interval, horizon, cost, target, stop, mode)
+        rep["pattern_rule"] = pr
+        o, n_ = pr["old"]["trail"], pr["new"]["trail"]
+        rep["verdict"].insert(0, {"level": "action" if pr["verdict"].startswith(("pattern rule better", "pattern rule worse")) else "info",
+                                  "text": f"Chart-pattern rule (pattern breakout can confirm, opposite breakout blocks) vs old rule, live trailing exit: "
+                                          f"{n_.get('n', 0)} trades {n_.get('avg', 0):+.1f} pts each ({n_.get('total', 0):+.0f} total) vs {o.get('n', 0)} trades "
+                                          f"{o.get('avg', 0):+.1f} ({o.get('total', 0):+.0f}); added {pr['added']['trail'].get('n', 0)}, removed {pr['removed']['trail'].get('n', 0)}. "
+                                          f"Verdict: {pr['verdict']}."})
+    except Exception as exc:
+        rep["pattern_rule"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.13: entries at support / resistance reversals (the owner's idea), measured
         sv = sr_reversal_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop, symbol)
         rep["sr_reversal"] = sv

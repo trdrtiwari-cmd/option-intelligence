@@ -101,6 +101,10 @@ CE_BREAKOUT_STRICT = FRESH_BREAK_BLOCK == "1"      # kept for compatibility with
 # (directional_structure: proven move + range break / swing structure / VWAP) now satisfies them in every mode, as scalp already did.
 # They still count in the score. LAG_RELIEF=0 restores the old strict behaviour.
 LAG_RELIEF = _os.getenv("LAG_RELIEF", "1") != "0"
+# v1.20.16 chart patterns (chart_patterns.py). include = a pattern breakout on the trade side can confirm the entry (as the alternative to
+# the last-candle confirmation / the pullback trigger) and a pattern breakout AGAINST the side blocks it; info = shown and recorded only.
+CHART_PATTERN_MODE = (_os.getenv("CHART_PATTERN_MODE", "include").strip().lower() or "include")
+import chart_patterns as _cp
 RSI_MOMENTUM = float(_os.getenv("RSI_MOMENTUM", "40"))
 
 
@@ -498,6 +502,8 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     rsi = rsi_wilder(closes)
     rsi_prev = rsi_wilder(closes[:-1]) if len(closes) > 16 else None
     atr = atr_wilder(cs)
+    chart_pattern = _cp.detect(cs, atr)                     # v1.20.16: the shape of the last ~80 closed candles
+    pattern_effects = None
     vwap, vwap_source = session_vwap(cs)
     mc = macd(closes)
     adx = adx_wilder(cs)
@@ -648,8 +654,18 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
                 gates.append({"label": "Not a fresh breakout / breakdown bar (wait for the retest)", "pass": False,
                               "detail": f"Fresh {fresh_phase.lower()} bar — in the Oct-Nov replays these entries won 25-44% and lost money; the retest entry (TREND phase) won 57-61%"})
         candle_check = candle_confirmation(cs, side)
+        pat_on = CHART_PATTERN_MODE == "include"
+        pat_ok, pat_against = _cp.supports(chart_pattern, side), _cp.against(chart_pattern, side)
+        pat_txt = f"{chart_pattern['name']}: {chart_pattern['detail']}"
+        pattern_effects = {"candle_old_ok": bool(candle_check["confirmed"]) if rules["micro_trigger"] else None, "trigger_old_ok": None,
+                           "pattern_ok": pat_ok, "pattern_against": pat_against, "mode": CHART_PATTERN_MODE}
         if rules["micro_trigger"]:
-            gates.append({"label": "Closed-candle price-action confirmation", "pass": candle_check["confirmed"], "detail": candle_check["detail"]})
+            c_ok = candle_check["confirmed"] or (pat_on and pat_ok)
+            gates.append({"label": "Closed-candle price-action confirmation", "pass": c_ok,
+                          "detail": candle_check["detail"] if candle_check["confirmed"] or not (pat_on and pat_ok) else "Chart pattern confirms: " + pat_txt})
+        if pat_on:
+            gates.append({"label": "No opposite chart-pattern breakout", "pass": not pat_against,
+                          "detail": ("Against the trade: " + pat_txt) if pat_against else (pat_txt if chart_pattern.get("side") else chart_pattern["detail"])})
         if atr:
             # Anti-chase gates: most of the day's losses came from entering after the move had already happened.
             stretch = (last - e9[-1]) if side == "CE" else (e9[-1] - last)
@@ -661,10 +677,15 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
             ok_pb, pb_detail = pullback_resume(cs, e9, atr, side)
             if rules["micro_trigger"]:
                 ok_mc, mc_detail = micro_continuation(cs, atr, side)
-                gates.append({"label": "Entry trigger (EMA 9 retest resumes, or break of the last pause)", "pass": ok_pb or ok_mc,
-                              "detail": ("Retest: " + pb_detail) if ok_pb else ("Pause break: " + mc_detail) if ok_mc else f"{mc_detail} · {pb_detail}"})
+                old = ok_pb or ok_mc
+                pattern_effects["trigger_old_ok"] = bool(old)
+                gates.append({"label": "Entry trigger (EMA 9 retest resumes, or break of the last pause)", "pass": old or (pat_on and pat_ok),
+                              "detail": ("Retest: " + pb_detail) if ok_pb else ("Pause break: " + mc_detail) if ok_mc else
+                                        ("Chart pattern: " + pat_txt) if (pat_on and pat_ok) else f"{mc_detail} · {pb_detail}"})
             else:
-                gates.append({"label": "Pullback-and-resume trigger (retest holds)", "pass": ok_pb, "detail": pb_detail})
+                pattern_effects["trigger_old_ok"] = bool(ok_pb)
+                gates.append({"label": "Pullback-and-resume trigger (retest holds)", "pass": ok_pb or (pat_on and pat_ok),
+                              "detail": pb_detail if ok_pb or not (pat_on and pat_ok) else "Chart pattern: " + pat_txt})
     failed = [g for g in gates if not g["pass"]]
     if side and not failed:
         signal = f"CONFIRMED_{side}"
@@ -679,6 +700,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "mode_rules": {k: rules[k] for k in ("room_atr", "fresh_bars", "expire_bars", "max_chase_atr")},
         "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
         "regime": regime, "regime_label": regime_label, "regime_phase": regime_phase, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
+        "chart_pattern": chart_pattern, "pattern_effects": pattern_effects,
         "trend_evidence": ds["evidence"], "candle_confirmation": candle_confirmation(cs, side) if side else {"pattern": "NO_DIRECTIONAL_BIAS", "confirmed": False, "detail": "No CE/PE bias to confirm."},
         "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
                   "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"], "broke_out": ds["broke_out"]}, "checks": checks, "gates": gates,

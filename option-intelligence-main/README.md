@@ -1,5 +1,12 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.16 - chart patterns in the signal decision; readable indicator cards
+
+* **New `chart_patterns.py`** reads the shape of the last ~80 closed candles: range and its breakout / breakdown, bull / bear flag, double bottom / top, ascending / descending triangle - each with trigger, invalidation and measured-move target. Shown on the terminal ("Chart pattern" card), stored on the signal board and in the Claude review.
+* **Used in the decision** (`CHART_PATTERN_MODE=include`, default): a pattern **breakout on the trade side** can confirm the entry instead of the last candle (scalp) or the pullback retest (standard); a pattern **breakout against the side** (e.g. a double top or range breakdown while the engine leans CE) blocks it - new gate "No opposite chart-pattern breakout". All other gates (score, trend, windows, chasing, fresh-break, profit check) still apply. `CHART_PATTERN_MODE=info` shows patterns without using them.
+* **Diagnostics checks it**: "Chart-pattern rule vs old rule" (same bars, live trailing exit, halves, trades added / removed, verdict) and a "Chart pattern at entry" group.
+* **Phone layout:** RSI / ATR / Support / Resistance / Volume cards no longer break numbers across lines (2 per row on phones; trendlines and chart pattern full width).
+
 ## v1.20.15 - missed moves: newest first
 
 The missed-big-move examples kept only the FIRST 25 of the period, so the latest days (e.g. the 5 Nov rally) never appeared in Diagnostics, and the strategy monitor - which picks today's examples from that list - could not report today's missed moves. Now the 40 most recent are kept, newest first.

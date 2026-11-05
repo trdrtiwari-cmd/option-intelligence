@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.15"
+APP_VERSION = "1.20.16"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2283,6 +2283,7 @@ def _compact_analysis(a):
                      "failed_checks": [c.get("label") for c in (bp.get("checks") or []) if isinstance(c, dict) and not c.get("pass")][:8],
                      "supports": [(l.get("price"), l.get("strength")) for l in ((bp.get("sr") or {}).get("supports") or [])][:3],
                      "resistances": [(l.get("price"), l.get("strength")) for l in ((bp.get("sr") or {}).get("resistances") or [])][:3]} if bp else None,
+        "chart_pattern": a.get("chart_pattern"), "pattern_effects": a.get("pattern_effects"),
         "cache_age_s": a.get("cache_age_s"),
     }
 
