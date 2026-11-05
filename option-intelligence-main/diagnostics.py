@@ -730,7 +730,9 @@ def leading_compare(cs, replayed, interval, horizon, cost, target, stop, mode):
             e, f_, s_ = d["extra"], d.get("extra_first") or {}, d.get("extra_second") or {}
             both = bool(f_.get("n")) and bool(s_.get("n")) and f_.get("avg", 0) > 0 and s_.get("avg", 0) > 0
             d["verdict"] = ("no extra entries" if not e.get("n") else
-                            "adds profit in both halves (15+ trades) - candidate for LEADING_TRIGGER" if both and e["n"] >= 15 and e["avg"] > 0 else
+                            ("adds profit in both halves (15+ trades) - candidate for LEADING_TRIGGER" if variant == "strict" else
+                             "adds profit in both halves (15+ trades) - but LEADING_TRIGGER only gives the STRICT version live; this loose one skips the trend / chasing / sideways rules")
+                            if both and e["n"] >= 15 and e["avg"] > 0 else
                             "positive, not proven yet (need 15+ extra trades, positive in both halves)" if e.get("avg", 0) > 0 else
                             "loses - do not use")
             out["kinds"].append(d)
