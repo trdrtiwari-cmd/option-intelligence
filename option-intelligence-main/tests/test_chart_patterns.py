@@ -60,3 +60,16 @@ def test_window_is_selectable_1_to_2_hours():
     old_path = [120.0] * 5 + [100, 99, 100, 106, 112, 114, 112] + [113 + (k % 3) for k in range(40)] + [100.2, 101, 105, 110, 116]
     p = cp.detect(candles(old_path, 0.5), 3.0, 5, minutes=120)
     assert not p["name"].startswith("Double bottom")
+
+
+def test_breakout_holds_for_retest_then_expires():
+    base = [100.0] * 40
+    imp = [100 + 4 * k for k in range(1, 11)]
+    flag = [139, 137, 136, 134, 133, 132]
+    # break at 142, then a small retest that holds above the trigger (~135-ish) for 3 candles
+    p = cp.detect(candles(base + imp + flag + [142, 140, 139.5, 141]), 5.0)
+    assert p["side"] == "CE" and p["stage"] == "breakout" and p["bars_ago"] == 3 and "retest holding" in p["name"], p
+    assert cp.supports(p, "CE")
+    # the retest closes well back inside the flag -> no longer a breakout
+    q = cp.detect(candles(base + imp + flag + [142, 140, 130]), 5.0)
+    assert not cp.supports(q, "CE"), q

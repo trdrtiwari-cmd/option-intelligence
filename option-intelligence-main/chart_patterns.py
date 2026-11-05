@@ -185,11 +185,9 @@ def _triangle(cs, atr, side):
                f"flat {'top' if asc else 'bottom'} {top:.0f} with {'higher lows' if asc else 'lower highs'} - trigger {top:.0f}")
 
 
-def detect(cs, atr, interval=5, look=None, minutes=None):
-    """Most relevant chart pattern on closed candles, or {"name": "None", ...}. cs: dicts with open/high/low/close, oldest first.
-    Only the last window_bars(interval) candles are read, so a pattern must have formed within about the last 3 hours."""
-    look = look or window_bars(interval, minutes)
-    if not atr or len(cs) < look:
+def _detect_now(cs, atr, look):
+    """Pattern as of the LAST candle of cs (a breakout only on the bar that broke)."""
+    if len(cs) < look:
         return _mk("None", None, "none", None, None, None, "not enough candles")
     cs = cs[-look:]
     found = []
@@ -212,6 +210,41 @@ def detect(cs, atr, interval=5, look=None, minutes=None):
             best = dict(best, detail=best["detail"] + f" · inside a {rp['detail'].split(' - ')[0]}")
         return best
     return rp or _mk("None", None, "none", None, None, None, "no clear chart pattern")
+
+
+# v1.20.19: a breakout stays valid for a few candles while price holds beyond the trigger. Before, a pattern counted only ON the
+# breakout candle - exactly the candle the "Not a fresh breakout bar (wait for the retest)" and "Not chasing" rules block - so in the
+# 30-day replay it never confirmed a single trade ("added 0, removed 0"). The classic pattern entry is the retest after the break.
+HOLD_BARS = int(_os.getenv("CHART_PATTERN_HOLD_BARS", "6"))
+RETEST_ATR = 0.25                # a retest may dip this far back through the trigger
+
+
+def detect(cs, atr, interval=5, look=None, minutes=None):
+    """Most relevant chart pattern on closed candles, or {"name": "None", ...}. cs: dicts with open/high/low/close, oldest first.
+    The pattern must have formed inside the selected window (window_bars). A breakout found on one of the last HOLD_BARS candles
+    still counts while every close since then held beyond the trigger (less RETEST_ATR) and never crossed the invalidation level."""
+    look = look or window_bars(interval, minutes)
+    if not atr or len(cs) < look:
+        return _mk("None", None, "none", None, None, None, "not enough candles")
+    now = _detect_now(cs, atr, look)
+    if now.get("stage") == "breakout":
+        return now
+    for j in range(1, HOLD_BARS + 1):
+        if len(cs) - j < look:
+            break
+        p = _detect_now(cs[:len(cs) - j], atr, look)
+        if p.get("stage") != "breakout" or not p.get("side") or p.get("trigger") is None:
+            continue
+        up = p["side"] == "CE"
+        after = cs[len(cs) - j:]
+        trig, inv = p["trigger"], p.get("invalidation")
+        held = all((c["close"] >= trig - RETEST_ATR * atr) if up else (c["close"] <= trig + RETEST_ATR * atr) for c in after)
+        safe = inv is None or all((c["low"] > inv) if up else (c["high"] < inv) for c in after)
+        if held and safe:
+            return dict(p, bars_ago=j, name=p["name"].replace(" breakout", "").replace(" breakdown", "") + (" breakout" if "breakout" in p["name"] else " breakdown")
+                        + " (retest holding)", detail=p["detail"] + f" · broke {j} candle{'s' if j > 1 else ''} ago, holding {'above' if up else 'below'} {trig:.0f}")
+        break                    # the most recent breakout failed its retest: do not reach for an older one
+    return now
 
 
 def supports(pattern, side):

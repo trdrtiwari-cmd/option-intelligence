@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.19 - pattern breakouts count during the retest
+
+The first 30-day check of the chart-pattern rule showed "added 0, removed 0": a pattern counted only ON the breakout candle, and that is exactly the candle the "Not a fresh breakout bar (wait for the retest)" and "Not chasing" rules block - so it could never confirm anything. A breakout now stays valid for up to 6 candles (`CHART_PATTERN_HOLD_BARS`) while every close holds beyond the trigger (a retest may dip 0.25 ATR back) and the invalidation level is never crossed - the classic "break, retest, go" entry. Shown as e.g. "Bull flag breakout (retest holding) · broke 3 candles ago, holding above 24515". If the latest breakout fails its retest, older ones are not used.
+
 ## v1.20.18 - selectable chart-pattern window (1 to 2 hours)
 
 New **Pattern window** selector on the terminal (owner) and in Diagnostics: 1 h, 1 h 15, 1 h 30 (default), 1 h 45, 2 h. A pattern (flag, double bottom / top, triangle, range) must have formed inside that time to confirm or block a signal. On 5-minute charts that is 12-24 candles; at least 12 candles on any timeframe (3 hours on 15-minute charts). The terminal setting is saved with the other signal settings, applies at once to live signals, alerts, the signal log and the monitor (analysis cache cleared), and Diagnostics starts with the same value so you can compare windows on the same 30 days. Env default: `CHART_PATTERN_MINUTES=90`.
