@@ -94,6 +94,19 @@
       table($("wfTable"), ["Exit (target / stop)", "All: win · avg", "First half", "Second half"], rows.map(x => [`${x.target}${u(x)} / ${x.stop}${u(x)}`,
         `${x.all.win_rate}% · ${num(x.all.avg)}`, `${x.first.win_rate}% · ${num(x.first.avg)}`, `${x.second.win_rate}% · ${num(x.second.avg)}`]));
     }
+    const srv = rep.sr_reversal;
+    if (srv && $("srTable")) {
+      const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";
+      if (srv.error) table($("srTable"), ["S/R reversal"], [["Could not run: " + srv.error]]);
+      else {
+        table($("srTable"), ["Entry rule", "Trailing exit (live)", "1st half", "2nd half", "Fixed 1.5/1.5 ATR", `Points (${P.target}/${P.stop})`, "Verdict"],
+          [["Current signals", sc(srv.baseline_trail), "", "", "", "", ""]].concat(srv.variants.map(v => [v.label, sc(v.trail), sc(v.first), sc(v.second), sc(v.fixed_atr), sc(v.points),
+            { text: v.verdict, cls: v.verdict.startsWith("beats") ? "green" : v.verdict.startsWith("loses") ? "red" : "" }])));
+        const tr = (srv.variants[0] || {}).trades || [];
+        table($("srTrades"), ["Reversal trade (with trend)", "Side", "Level", "Strength", "Result (pts, trailing)"],
+          tr.length ? tr.map(x => [`${x.day} ${x.time}`, x.side, x.level, x.strength, { text: num(x.pts), cls: x.pts > 0 ? "green" : "red" }]) : [["None in this period", "", "", "", ""]]);
+      }
+    }
     const ws = rep.window_slots;
     if (ws && $("wsTable")) {
       const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";

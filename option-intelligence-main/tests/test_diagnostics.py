@@ -180,3 +180,31 @@ def test_window_slots_split():
     assert by["09:15-09:45"]["trail"]["n"] == 2 and by["12:00-14:30"]["trail"]["n"] == 2
     assert by["15:00-15:20"]["trail"]["n"] <= 1          # bar 70 = 15:05-15:10 close; entry path ends at the 15:20 square-off
     assert all("verdict" in w for w in ws)
+
+
+def test_sr_reversal_and_features_run():
+    rows = staircase_days(5, 1)
+    rep = dg.run(rows, mode="scalp", cost=2.0, live_window=False)
+    assert "sr_reversal" in rep and not rep["sr_reversal"].get("error"), rep.get("sr_reversal")
+    assert "Signal of the day (same side)" in rep["groups"]
+    assert "Distance from support (CE) / resistance (PE) at entry" in rep["groups"]
+    for t in rep["trades"]:
+        assert "nth_today" in t and "sr_dist_atr" in t
+
+
+def test_sr_reversal_event_rule():
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 11, 5, 10, 0, tzinfo=dg.IST)
+    cs = [{"_dt": t0 + timedelta(minutes=5 * k), "open": 100, "high": 101, "low": 99, "close": 100} for k in range(10)]
+    cs[5] = {"_dt": cs[5]["_dt"], "open": 99.5, "high": 103, "low": 95.2, "close": 102.8}     # dips to support 95, closes strong
+    import diagnostics as d2
+    old = d2._sr_at
+    d2._sr_at = lambda *a, **k: {"supports": [{"price": 95.0, "strength": "Strong"}], "resistances": [{"price": 110.0, "strength": "Medium"}]}
+    try:
+        rep = [{"i": i, "signal": "WATCH_CE", "side": "CE", "atr": 4.0, "score": 60, "failed": []} for i in range(10)]
+        ev = d2.sr_reversal_events(cs, rep, 5, "NIFTY", "with_trend")
+        assert [e["i"] for e in ev] == [5] and ev[0]["side"] == "CE" and ev[0]["level"] == 95.0
+        rep_pe = [dict(r, side="PE") for r in rep]
+        assert d2.sr_reversal_events(cs, rep_pe, 5, "NIFTY", "with_trend") == []     # engine leans PE: no CE trade
+    finally:
+        d2._sr_at = old

@@ -1,5 +1,10 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.13 - Diagnostics: does buying at support / selling at resistance work?
+
+* New what-if **"buy at support / sell at resistance reversals"**: a bar touches a Medium / Strong support (CE) or resistance (PE) known before that bar (within 0.25 ATR, or breaks it by < 0.5 ATR) and closes back away from it as a reversal candle (bullish / bearish, close in the far half of the bar), inside the entry windows, one trade per level per day, one at a time. Two variants: with the engine leaning the same side, and the reversal candle alone. Judged on the live trailing exit, by half, against the current signals. Live signals unchanged until it proves itself.
+* New groups for the signals actually taken: **distance from the support (CE) / resistance (PE)** at entry, **room to the next opposite level**, and **1st vs later same-side signal of the day**; the trades table includes `sr_dist_atr`, `sr_room_atr`, `nth_today`.
+
 ## v1.20.12 - 15-minute timeframe
 
 * **Signal freshness by time, not bar count:** the fresh / expire bar counts were tuned on 5-minute candles, so on 15-minute candles a setup stayed "fresh" for 45 min and "live" for 3 hours. Now 5-minute limits are unchanged (standard 15 / 60 min, scalp 10 / 30 min) and slower candles keep the same time limits with a minimum of 2 bars fresh / 4 bars to expire (15-minute: 30 / 60 min).

@@ -317,6 +317,13 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
         "Price vs previous close": _bucket(rows_conf, lambda r: r["vs_prev"], ["with prev-close side", "against prev-close side"]),
         "Cutoff what-if: entries before / after 12:00": _bucket(rows_conf, lambda r: "before 12:00" if r["minute"] < 720 else "12:00 or later", ["before 12:00", "12:00 or later"]),
         "Cutoff what-if: entries before / after 13:30": _bucket(rows_conf, lambda r: "before 13:30" if r["minute"] < 810 else "13:30 or later", ["before 13:30", "13:30 or later"]),
+        # v1.20.13: the "buy at support" question, measured on the signals actually taken
+        "Distance from support (CE) / resistance (PE) at entry": _bucket(rows_conf, lambda r: "no level found" if r.get("sr_dist") is None else
+                                                                          _band(r["sr_dist"], (0.5, 1.5), ("at the level (< 0.5 ATR)", "0.5–1.5 ATR away", "> 1.5 ATR away (extended)")),
+                                                                          ["at the level (< 0.5 ATR)", "0.5–1.5 ATR away", "> 1.5 ATR away (extended)", "no level found"]),
+        "Room to the next opposite level": _bucket(rows_conf, lambda r: "no level found" if r.get("sr_room") is None else
+                                                   _band(r["sr_room"], (1.0, 2.0), ("< 1 ATR", "1–2 ATR", "> 2 ATR")), ["< 1 ATR", "1–2 ATR", "> 2 ATR", "no level found"]),
+        "Signal of the day (same side)": _bucket(rows_conf, lambda r: "1st" if r.get("nth_today", 1) == 1 else "2nd or later", ["1st", "2nd or later"]),
     }
     report["strategies"] = [{"name": name, **stats([r["strat"][name] for r in rows_conf if name in r["strat"]])}
                             for name, _ in STRATEGIES + ATR_STRATEGIES] if rows_conf else []
@@ -325,7 +332,9 @@ def build_report(rows_conf, rows_near, params, random_stats=None):
     report["trades"] = [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pnl": round(r["pnl"], 1), "exit": r["exit"], "mfe": round(r["mfe"], 1),
                          "mae": round(r["mae"], 1), "score": r["score"], "regime": r["regime"], "phase": r["phase"], "trigger": r["trigger"],
                          "rsi_ext": None if r["rsi_ext"] is None else round(r["rsi_ext"], 1), "stretch_atr": None if r["stretch_atr"] is None else round(r["stretch_atr"], 2),
-                         "zone": r["zone"], "vs_prev": r["vs_prev"], "atr": None if not r.get("atr") else round(r["atr"], 2)} for r in rows_conf]
+                         "zone": r["zone"], "vs_prev": r["vs_prev"], "atr": None if not r.get("atr") else round(r["atr"], 2),
+                         "sr_dist_atr": r.get("sr_dist"), "sr_room_atr": r.get("sr_room"), "sr_strength": r.get("sr_strength"),
+                         "nth_today": r.get("nth_today")} for r in rows_conf]
     gates = {}
     for r in rows_near:
         gates.setdefault(r["gate"], []).append(r["pnl"])
@@ -605,6 +614,121 @@ def trend_day_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, s
     return out
 
 
+# ---------------------------------------------------------------- v1.20.13 support / resistance: does buying at the level work?
+def _sr_at(cs, i, atr, interval, symbol, cache=None, every=6):
+    """S/R zones as they were known when bar i closed (same rules as the terminal's S/R map). Recomputed every `every` bars."""
+    import option_plan as _op
+    key = i - (i % every)
+    if cache is not None and key in cache:
+        sr = cache[key]
+    else:
+        per = max(1, round(375 / max(1, interval)))
+        sr = _op.sr_levels(cs[max(0, key - per * 6):key + 1], atr, interval, symbol)
+        if cache is not None:
+            cache[key] = sr
+    return sr
+
+
+def _levels_around(sr, price):
+    """All zone prices from a cached S/R read, split again around `price` (the cache may be a few bars old)."""
+    lv = [l for l in (sr.get("supports") or []) + (sr.get("resistances") or [])]
+    below = sorted([l for l in lv if l["price"] <= price], key=lambda l: price - l["price"])
+    above = sorted([l for l in lv if l["price"] > price], key=lambda l: l["price"] - price)
+    return below, above
+
+
+def sr_features(cs, rows, interval, symbol):
+    """Adds to each evaluated row: distance from the level it is bought off (support for CE, resistance for PE) and the room to the
+    next opposite level, both in ATR, plus the n-th same-side signal of the day."""
+    cache, seen = {}, {}
+    for r in sorted(rows, key=lambda x: x["i"]):
+        atr = r.get("atr")
+        price = cs[r["i"]]["close"]
+        sr = _sr_at(cs, r["i"], atr, interval, symbol, cache) if atr else {}
+        below, above = _levels_around(sr, price) if sr else ([], [])
+        own, opp = (below, above) if r["side"] == "CE" else (above, below)
+        r["sr_dist"] = round(abs(price - own[0]["price"]) / atr, 2) if own and atr else None
+        r["sr_room"] = round(abs(opp[0]["price"] - price) / atr, 2) if opp and atr else None
+        r["sr_strength"] = own[0]["strength"] if own else None
+        k = (r["day"], r["side"])
+        seen[k] = seen.get(k, 0) + 1
+        r["nth_today"] = seen[k]
+    return rows
+
+
+def sr_reversal_events(cs, replayed, interval, symbol, variant="with_trend", touch_atr=0.25, max_break_atr=0.5):
+    """Entries at a support (CE) / resistance (PE) REVERSAL, as the owner suggested:
+      bar i's low came within `touch_atr` of a Medium/Strong support (or broke it by less than `max_break_atr`), and the bar CLOSED back
+      above it, bullish (close > open, close in the upper half of the bar) - mirror for PE at resistance;
+      inside the live entry windows; one trade per level per day and one trade at a time.
+      variant 'with_trend': the engine must also lean the same side on that bar (score gate not required);
+      variant 'any': the reversal candle alone."""
+    rec = {r["i"]: r for r in replayed}
+    cache, out, used, busy = {}, [], set(), -1
+    for i in sorted(rec):
+        r = rec[i]
+        atr = r.get("atr")
+        if not atr or i <= busy or i + 1 >= len(cs):
+            continue
+        c = cs[i]
+        t = c["_dt"].astimezone(IST)
+        if not _sf.in_entry_window(t.hour * 60 + t.minute + interval):
+            continue
+        sr = _sr_at(cs, i - 1, atr, interval, symbol, cache)        # levels known BEFORE this bar
+        if not sr:
+            continue
+        rng = max(c["high"] - c["low"], 1e-9)
+        below, above = _levels_around(sr, c["close"])
+        for side in ("CE", "PE"):
+            if variant == "with_trend" and r.get("side") != side:
+                continue
+            lv = [l for l in (below if side == "CE" else above) if l["strength"] in ("Strong", "Medium")]
+            if not lv:
+                continue
+            L = lv[0]["price"]
+            if side == "CE":
+                ok = (c["low"] <= L + touch_atr * atr and c["low"] >= L - max_break_atr * atr and c["close"] > L
+                      and c["close"] > c["open"] and (c["close"] - c["low"]) / rng >= 0.5)
+            else:
+                ok = (c["high"] >= L - touch_atr * atr and c["high"] <= L + max_break_atr * atr and c["close"] < L
+                      and c["close"] < c["open"] and (c["high"] - c["close"]) / rng >= 0.5)
+            key = (t.date(), side, round(L / max(1.0, 0.5 * atr)))
+            if ok and key not in used:
+                used.add(key)
+                out.append({**r, "side": side, "level": L, "level_strength": lv[0]["strength"]})
+                busy = i + 6                                  # one at a time (about the median trade length)
+                break
+    return out
+
+
+def sr_reversal_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop, symbol):
+    days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    base_tr = [r["strat"][TRAIL_NAME] for r in conf_rows if TRAIL_NAME in r.get("strat", {})]
+    out = {"baseline_trail": stats(base_tr), "variants": []}
+    for variant, label in (("with_trend", "Reversal at support / resistance, engine leaning the same side"),
+                           ("any", "Reversal candle at support / resistance only (no trend filter)")):
+        rows = evaluate(cs, sr_reversal_events(cs, replayed, interval, symbol, variant), interval, horizon, cost, target, stop, with_extras=True)
+        tr = [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
+        v = {"variant": variant, "label": label, "trail": stats(tr), "points": stats([r["pnl"] for r in rows]),
+             "fixed_atr": stats([r["atr_grid"]["1.5/1.5"] for r in rows if "1.5/1.5" in r.get("atr_grid", {})]),
+             "trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "level": round(r["level"], 1), "strength": r["level_strength"],
+                         "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r in rows][:40]}
+        if cut:
+            v["first"] = stats([r["strat"][TRAIL_NAME] for r in rows if r["day"] < cut and TRAIL_NAME in r.get("strat", {})])
+            v["second"] = stats([r["strat"][TRAIL_NAME] for r in rows if r["day"] >= cut and TRAIL_NAME in r.get("strat", {})])
+        e, f_, s_ = v["trail"], v.get("first") or {}, v.get("second") or {}
+        both = bool(f_.get("n")) and bool(s_.get("n")) and f_.get("avg", 0) > 0 and s_.get("avg", 0) > 0
+        better = e.get("n") and out["baseline_trail"].get("n") and e["avg"] > out["baseline_trail"]["avg"]
+        v["verdict"] = ("no reversal entries in this period" if not e.get("n") else
+                        "beats the current signals - positive in both halves with 15+ trades; paper-test it" if both and e["n"] >= 15 and better else
+                        "positive in both halves but not better than the current signals" if both and e["n"] >= 15 else
+                        "positive but not proven (need 15+ trades, positive in both halves)" if e.get("avg", 0) > 0 else
+                        "loses - do not add it")
+        out["variants"].append(v)
+    return out
+
+
 # ---------------------------------------------------------------- v1.20.10 entry window split by time slot
 WINDOW_SLOTS = (("09:15-09:45 (before the morning window)", 0, 9 * 60 + 45), ("12:00-14:30 (midday gap)", 12 * 60, 14 * 60 + 30),
                 ("15:00-15:20 (after the afternoon window)", 15 * 60, 24 * 60))
@@ -650,6 +774,10 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
     random_stats = random_entry_baseline(cs, interval, horizon, cost, target, stop)
     params = {"symbol": symbol, "interval": interval, "mode": mode, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
               "days": days, "bars_evaluated": len(replayed)}
+    try:
+        sr_features(cs, conf_rows, interval, symbol)
+    except Exception:
+        pass
     rep = build_report(conf_rows, near_rows, params, random_stats)
     try:                       # v1.19.5: how the live exit plan (stop >= 1.5 ATR, target per plan) did on these signals
         import option_plan as _op
@@ -697,6 +825,24 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                       + (f" Closest: target {nb['target']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} / stop {nb['stop']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} "
                                          f"— worst half {nb['worst_win']}% winners, {nb['worst_avg']:+.1f} pts/trade." if nb else "")
                                       + " A higher win rate here would only come from a smaller target than stop, which these signals do not pay for."})
+    try:                       # v1.20.13: entries at support / resistance reversals (the owner's idea), measured
+        sv = sr_reversal_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop, symbol)
+        rep["sr_reversal"] = sv
+        v0 = sv["variants"][0]
+        if v0["trail"].get("n"):
+            rep["verdict"].append({"level": "action" if v0["verdict"].startswith("beats") else "info",
+                                   "text": f"What-if “{v0['label']}”: {v0['trail']['n']} trades, {v0['trail']['win_rate']}% winners, {v0['trail']['avg']:+.1f} pts each "
+                                           f"(live trailing exit) vs {sv['baseline_trail'].get('avg', 0):+.1f} for the current signals. Verdict: {v0['verdict']}."})
+        g = rep["groups"].get("Signal of the day (same side)") or []
+        later = next((x for x in g if x["label"] == "2nd or later"), None)
+        first = next((x for x in g if x["label"] == "1st"), None)
+        if later and first and later.get("n", 0) >= 3:
+            rep["verdict"].append({"level": "action" if later["avg"] < 0 < first["avg"] else "info",
+                                   "text": f"Same-side signals of the day: 1st {first['n']} trades {first['win_rate']}% / {first['avg']:+.1f} pts; "
+                                           f"2nd or later {later['n']} trades {later['win_rate']}% / {later['avg']:+.1f} pts."
+                                           + (" Later signals of the day are losing - a 'one trade per side per day' limit is worth testing." if later["avg"] < 0 < first["avg"] else "")})
+    except Exception as exc:
+        rep["sr_reversal"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.10: which part of the entry-window block costs / saves money
         ws = window_slots(cs, near, interval, horizon, cost, target, stop)
         rep["window_slots"] = ws
