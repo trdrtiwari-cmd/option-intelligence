@@ -502,7 +502,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     rsi = rsi_wilder(closes)
     rsi_prev = rsi_wilder(closes[:-1]) if len(closes) > 16 else None
     atr = atr_wilder(cs)
-    chart_pattern = _cp.detect(cs, atr)                     # v1.20.16: the shape of the last ~80 closed candles
+    chart_pattern = _cp.detect(cs, atr, interval)           # v1.20.17: the shape of about the last 3h20m of closed candles
     pattern_effects = None
     vwap, vwap_source = session_vwap(cs)
     mc = macd(closes)

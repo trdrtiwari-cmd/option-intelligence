@@ -45,3 +45,11 @@ def test_double_bottom_breakout():
 def test_not_enough_data():
     assert cp.detect(candles([100.0] * 10), 2.0)["name"] == "None"
     assert cp.detect(candles([100.0] * 50), None)["name"] == "None"
+
+
+def test_window_is_time_based():
+    assert cp.window_bars(5) == 40 and cp.window_bars(1) == 80 and cp.window_bars(3) == 67 and cp.window_bars(15) == 24
+    # a double bottom whose first low is 6+ hours old is not reported on a 5-minute chart
+    old = [120.0] * 5 + [100, 99, 100, 106, 112, 114, 112] + [113 + (k % 3) for k in range(60)] + [100.2, 101, 105, 110, 116]
+    p = cp.detect(candles(old, 0.5), 3.0, 5)
+    assert not (p["name"].startswith("Double bottom"))
