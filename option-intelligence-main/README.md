@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.9 - trailing exit plan (now the default)
+
+The 6 Oct - 5 Nov replay (13 signals) made +2.5 pts/trade with the fixed 1.5 / 1.5 ATR exit and +8.7 with a trailing stop on the same 1.5 ATR stop. New exit plan **"trail"** (default; Signals page → Exit plan): stop 1.5 ATR (min 20 pts); once the trade is +1.2 ATR the stop trails 0.75 ATR behind the best price; 3 ATR is only a cap / the R:R basis. Trades record `exit_plan`, `trail_start_pts`, `trail_pts`; exits are settled from the 1-minute path (the trail moves only on completed bars - no look-ahead) and from the live price, with the new status **TRAIL** (stats count it; alerts say "TRAILING STOP hit"). Diagnostics keeps reporting both: the fixed 1.5 / 1.5 plan and the "ATR trail: stop 1.5, trail 0.75 once +1.2" row. Set `EXIT_PLAN=t1.5` to go back. Small sample - paper trade it.
+
 ## v1.20.8 - downloads work in the Android app
 
 The app's WebView ignores normal downloads, so Diagnostics "Download report", the Signals Excel / CSV exports, the signal-board CSV, Download for Claude, the account data export and the paper-trade CSV did nothing on the phone. All of them now go through `static/savefile.js`: in the app the file is written to **Documents/OptionIntelligence/** and the share menu opens (Drive, Files, WhatsApp, Claude); in a browser it is a normal download. This needs the new APK (adds the Capacitor Filesystem + Share plugins); an older APK falls back to the share sheet or copying text, and says so.

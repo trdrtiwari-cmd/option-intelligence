@@ -30,7 +30,9 @@ EXTRA_COLUMNS = [("trade_status", "TEXT DEFAULT 'OPEN'"), ("exit_price", "REAL")
                  ("option_entry", "REAL"), ("option_sl", "REAL"), ("option_target", "REAL"), ("option_delta", "REAL"),
                  ("option_exit", "REAL"), ("option_exit_source", "TEXT"), ("option_pnl_points", "REAL"),
                  ("lot_size", "INTEGER"), ("qty", "INTEGER"), ("charges_rs", "REAL"), ("net_pnl_rs", "REAL"),
-                 ("target_basis", "TEXT"), ("rr", "REAL"), ("exit_basis", "TEXT")]
+                 ("target_basis", "TEXT"), ("rr", "REAL"), ("exit_basis", "TEXT"),
+                 # v1.20.9 trailing exit plan: start trailing once the trade is +trail_start_pts, stop trail_pts behind the best price
+                 ("exit_plan", "TEXT"), ("trail_start_pts", "REAL"), ("trail_pts", "REAL")]
 
 
 # Runtime overrides (v1.18.7). Set from the Signals page / stored in the database, so ATR multiples can be changed without a
@@ -145,9 +147,9 @@ def settle_open_signals(db_path, symbol, price, now, atr_backfill=None, lock=Non
     def run():
         with sqlite3.connect(db_path, timeout=5) as db:
             ensure_columns(db)
-            rows = db.execute("SELECT id,session_date,side,entry,last_close,stop_loss,target,target_name,peak_points,worst_points "
+            rows = db.execute("SELECT id,session_date,side,entry,last_close,stop_loss,target,target_name,peak_points,worst_points,trail_start_pts,trail_pts "
                               "FROM signal_log WHERE symbol=? AND COALESCE(trade_status,'OPEN')='OPEN'", (symbol,)).fetchall()
-            for rid, sdate, side, entry, last_close, sl, tp, tname, peak, worst in rows:
+            for rid, sdate, side, entry, last_close, sl, tp, tname, peak, worst, tr_start, tr_pts in rows:
                 sign = 1 if str(side).upper() == "CE" else -1
                 if str(sdate) < today:
                     db.execute("UPDATE signal_log SET trade_status='EXPIRED',exit_time=?,exit_reason=? WHERE id=?",
@@ -170,12 +172,16 @@ def settle_open_signals(db_path, symbol, price, now, atr_backfill=None, lock=Non
                     db.execute("UPDATE signal_log SET entry=?,stop_loss=?,target=?,target_name=?,levels_backfilled=1 WHERE id=?",
                                (entry, round(sl, 2), round(tp, 2), tname, rid))
                 move = (price - entry) * sign
+                prev_peak = _num(peak)
                 peak = move if peak is None else max(_num(peak) or move, move)
+                sl0 = sl
+                if _num(tr_pts):                               # trailing stop from the best move seen BEFORE this price
+                    sl = trail_stop(sl, sign, entry, prev_peak, (_num(tr_start), _num(tr_pts)))
                 worst = move if worst is None else min(_num(worst) or move, move)
                 reason = status = None
                 exit_px = price
                 if sl is not None and ((sign == 1 and price <= sl) or (sign == -1 and price >= sl)):
-                    status, reason = "STOP", "Stop-loss crossed"
+                    status, reason = ("TRAIL", "Trailing stop crossed") if sl != sl0 else ("STOP", "Stop-loss crossed")
                 elif tp is not None and ((sign == 1 and price >= tp) or (sign == -1 and price <= tp)):
                     status, reason, exit_px = "TARGET", f"{tname or cfg['target']} safe target reached", tp
                 elif now.time() >= cfg["squareoff"] or (now.time() > dtime(15, 30)):
@@ -201,17 +207,28 @@ def settle_open_signals(db_path, symbol, price, now, atr_backfill=None, lock=Non
     return closed
 
 
-def _first_exit(path, sign, entry, sl, tp, squareoff):
+def trail_stop(sl, sign, entry, peak, trail):
+    """Effective stop: the initial stop, raised (CE) / lowered (PE) to best price - trail once the best move reached the start."""
+    if not trail or trail[0] is None or trail[1] is None or peak is None or peak < trail[0] or sl is None:
+        return sl
+    t = entry + sign * (peak - trail[1])
+    return max(sl, t) if sign == 1 else min(sl, t)
+
+
+def _first_exit(path, sign, entry, sl, tp, squareoff, trail=None):
     """Walk 1-minute bars (oldest first). Stop is checked before target inside a bar (pessimistic). A bar that OPENS beyond a level
     fills at its open (a real gap); otherwise the level itself is the fill. A bar that starts at / after the square-off time exits at
     its open. Returns (status, price, bar, peak, worst) or (None, None, None, peak, worst)."""
     peak = worst = None
+    sl0 = sl
     for c in path:
         t = c["_dt"]
         if t.time() >= squareoff:
             px = c["open"]
             mv = (px - entry) * sign
             return "SQUAREOFF", px, c, max(peak if peak is not None else mv, mv), min(worst if worst is not None else mv, mv)
+        sl = trail_stop(sl0, sign, entry, peak, trail)     # trailing uses the best price of EARLIER bars only (conservative)
+        trailed = sl is not None and sl0 is not None and sl != sl0
         hi_mv, lo_mv = (c["high"] - entry) * sign, (c["low"] - entry) * sign
         fav, adv = max(hi_mv, lo_mv), min(hi_mv, lo_mv)
         peak = fav if peak is None else max(peak, fav)
@@ -219,9 +236,9 @@ def _first_exit(path, sign, entry, sl, tp, squareoff):
         o = c["open"]
         if sl is not None:
             if (sign == 1 and o <= sl) or (sign == -1 and o >= sl):
-                return "STOP", o, c, peak, worst
+                return ("TRAIL" if trailed else "STOP"), o, c, peak, worst
             if (sign == 1 and c["low"] <= sl) or (sign == -1 and c["high"] >= sl):
-                return "STOP", sl, c, peak, worst
+                return ("TRAIL" if trailed else "STOP"), sl, c, peak, worst
         if tp is not None:
             if (sign == 1 and o >= tp) or (sign == -1 and o <= tp):
                 return "TARGET", o, c, peak, worst
@@ -247,9 +264,9 @@ def settle_with_candles(db_path, symbol, candles_1m, now, lock=None):
     def run():
         with sqlite3.connect(db_path, timeout=5) as db:
             ensure_columns(db)
-            rows = db.execute("SELECT id,session_date,generated_at,side,entry,last_close,stop_loss,target,target_name "
+            rows = db.execute("SELECT id,session_date,generated_at,side,entry,last_close,stop_loss,target,target_name,trail_start_pts,trail_pts "
                               "FROM signal_log WHERE symbol=? AND COALESCE(trade_status,'OPEN')='OPEN'", (symbol,)).fetchall()
-            for rid, sdate, gen, side, entry, last_close, sl, tp, tname in rows:
+            for rid, sdate, gen, side, entry, last_close, sl, tp, tname, tr_start, tr_pts in rows:
                 entry = _num(entry) or _num(last_close)
                 try:
                     gen_dt = datetime.fromisoformat(str(gen))
@@ -264,7 +281,8 @@ def settle_with_candles(db_path, symbol, candles_1m, now, lock=None):
                 path = [dict(c, _dt=c["_dt"].astimezone(ist)) for c in path]
                 if not path:
                     continue
-                status, px, bar, peak, worst = _first_exit(path, sign, entry, _num(sl), _num(tp), cfg["squareoff"])
+                trail = (_num(tr_start), _num(tr_pts)) if _num(tr_pts) else None
+                status, px, bar, peak, worst = _first_exit(path, sign, entry, _num(sl), _num(tp), cfg["squareoff"], trail)
                 session_over = day < now.date() and path[-1]["_dt"].time() >= dtime(15, 29)
                 if status is None and session_over:          # earlier session, never hit anything: close at its last bar
                     bar = path[-1]
@@ -278,8 +296,9 @@ def settle_with_candles(db_path, symbol, candles_1m, now, lock=None):
                 net = gross - cfg["cost"]
                 when = bar["_dt"]
                 reason = {"STOP": "Stop-loss touched", "TARGET": f"{tname or cfg['target']} target touched",
+                          "TRAIL": f"Trailing stop touched (locked {gross:+.1f} pts)",
                           "SQUAREOFF": f"Time exit at {cfg['squareoff'].strftime('%H:%M')} IST"}[status]
-                if status != "SQUAREOFF" and abs(px - (_num(sl) if status == "STOP" else _num(tp))) > 1e-6:
+                if status in ("STOP", "TARGET") and abs(px - (_num(sl) if status == "STOP" else _num(tp))) > 1e-6:
                     reason += " (gapped through: filled at the bar's open)"
                 db.execute("UPDATE signal_log SET trade_status=?,exit_price=?,gross_pnl_points=?,net_pnl_points=?,exit_time=?,exit_reason=?,"
                            "peak_points=?,worst_points=?,exit_basis=? WHERE id=?",
@@ -338,7 +357,7 @@ def open_trade_count(db_path, lock=None):
         return {}
 
 
-CLOSED = ("TARGET", "STOP", "SQUAREOFF")
+CLOSED = ("TARGET", "STOP", "TRAIL", "SQUAREOFF")
 
 
 def _stats(rows):
@@ -359,7 +378,7 @@ def _stats(rows):
     side = lambda s_: sum(1 for r in rows if str(r.get("side") or "").upper() == s_)
     return {"signals": len(rows), "ce": side("CE"), "pe": side("PE"), "open": sum(1 for r in rows if (r.get("trade_status") or "OPEN") == "OPEN"),
             "expired": sum(1 for r in rows if r.get("trade_status") == "EXPIRED"), "closed": len(closed),
-            "target_exits": cnt("TARGET"), "stop_exits": cnt("STOP"), "time_exits": cnt("SQUAREOFF"),
+            "target_exits": cnt("TARGET"), "stop_exits": cnt("STOP"), "time_exits": cnt("SQUAREOFF"), "trail_exits": cnt("TRAIL"),
             "wins": len(wins), "losses": len(losses), "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
             "gross_points": round(gross, 2), "cost_points": round(gross - net, 2), "net_points": round(net, 2),
             "avg_win": round(sum(wins) / len(wins), 2) if wins else None, "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,

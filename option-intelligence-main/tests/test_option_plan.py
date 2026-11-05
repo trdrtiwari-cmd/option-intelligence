@@ -161,7 +161,8 @@ if __name__ == "__main__":
 
 
 def test_stop_is_at_least_1_5_atr_and_plans():
-    assert op.plan_levels(None) == (1.5, 20, 1.5, "t1.5")
+    assert op.plan_levels(None) == (1.5, 20, 3.0, "trail") and op.plan_levels("t1.5") == (1.5, 20, 1.5, "t1.5")
+    assert op.trail_levels("trail", 20) == (24.0, 15.0) and op.trail_levels("t1.5", 20) == (None, None)
     assert op.plan_levels("t3")[2] == 3.0
     assert op.plan_levels("t2", custom_sl_atr=0.75)[0] == 1.5            # a custom stop can never go below the 1.5 ATR rule
     assert op.plan_levels("t2", custom_sl_atr=2.0, custom_target_atr=4)[:3] == (2.0, 20, 4.0)

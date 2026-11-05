@@ -620,7 +620,7 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
     rep = build_report(conf_rows, near_rows, params, random_stats)
     try:                       # v1.19.5: how the live exit plan (stop >= 1.5 ATR, target per plan) did on these signals
         import option_plan as _op
-        sl_m, _mp, tg_m, plan_key = _op.plan_levels(None)
+        sl_m, _mp, tg_m, plan_key = _op.plan_levels("t1.5")      # the fixed 1.5 / 1.5 plan; the trailing plan is the "ATR trail" row
         k = f"{tg_m:g}/{sl_m:g}"
         days_ = sorted({r["day"] for r in conf_rows})
         cut = days_[len(days_) // 2] if len(days_) >= 4 else None

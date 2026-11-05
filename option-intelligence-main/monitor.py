@@ -351,7 +351,7 @@ def losses(rows):
     out = []
     for r in rows:
         net = _f(r.get("net_pnl_points"))
-        if r.get("trade_status") in ("STOP", "SQUAREOFF", "TIME", "EXPIRED") and net is not None and net < 0:
+        if r.get("trade_status") in ("STOP", "TRAIL", "SQUAREOFF", "TIME", "EXPIRED") and net is not None and net < 0:
             c = loss_causes(r)
             name = r.get("option_name") or f"{r.get('symbol')} {r.get('side')}"
             t = str(r.get("generated_at") or "")[11:16]

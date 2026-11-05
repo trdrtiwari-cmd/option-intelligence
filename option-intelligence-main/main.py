@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.8"
+APP_VERSION = "1.20.9"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1600,6 +1600,8 @@ def record_signal_row(symbol, interval, mode, a):
                 "reason": str(plan.get("summary") or final.get("headline") or "")[:500], "target_name": f"{ix.get('target_atr')}xATR",
                 "atr_at_entry": atr_v, "sl_atr_mult": ix.get("sl_atr"), "target_atr_mult": ix.get("target_atr"),
                 "target_basis": ix.get("target_basis"), "rr": ix.get("rr"),
+                "exit_plan": plan.get("exit_plan"), "trail_start_pts": op.trail_levels(plan.get("exit_plan"), atr_v)[0],
+                "trail_pts": op.trail_levels(plan.get("exit_plan"), atr_v)[1],
                 "option_key": opt.get("instrument_key"), "option_name": opt.get("name"), "option_strike": opt.get("strike"), "option_expiry": opt.get("expiry"),
                 "option_entry": opt.get("entry"), "option_sl": opt.get("stop"), "option_target": opt.get("target"), "option_delta": opt.get("delta"),
                 "lot_size": opt.get("lot_size"), "qty": opt.get("qty"), "charges_rs": opt.get("charges_rs")}
@@ -1626,7 +1628,7 @@ def stopouts_today(symbol):
     try:
         today = datetime.now(IST).date().isoformat()
         with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
-            row = db.execute("SELECT COUNT(*) FROM signal_log WHERE session_date=? AND symbol=? AND trade_status IN ('STOP','SQUAREOFF') "
+            row = db.execute("SELECT COUNT(*) FROM signal_log WHERE session_date=? AND symbol=? AND trade_status IN ('STOP','TRAIL','SQUAREOFF') "
                              "AND COALESCE(net_pnl_points,0) < 0", (today, symbol)).fetchone()
         return int(row[0] or 0)
     except Exception as exc:
@@ -1756,7 +1758,7 @@ async def _option_exit_price(row, live):
 async def _after_exits(sym, closed, live):
     """For every trade just closed: record the option exit premium and money result, then push an EXIT notification."""
     for c in closed:
-        if c.get("status") not in ("TARGET", "STOP", "SQUAREOFF"):
+        if c.get("status") not in ("TARGET", "STOP", "TRAIL", "SQUAREOFF"):
             continue
         try:
             row = await asyncio.to_thread(_signal_row, c["id"])
@@ -1777,7 +1779,7 @@ async def _after_exits(sym, closed, live):
 async def _send_exit_alert(sym, row, c, opt_exit, rs, push=True):
     try:
         name = row.get("option_name") or f"{sym} {row.get('side')}"
-        word = {"TARGET": "TARGET hit", "STOP": "STOP-LOSS hit", "SQUAREOFF": "time exit"}.get(c["status"], c["status"])
+        word = {"TARGET": "TARGET hit", "STOP": "STOP-LOSS hit", "TRAIL": "TRAILING STOP hit", "SQUAREOFF": "time exit"}.get(c["status"], c["status"])
         title = f"{name} - {word}: {c['net']:+.1f} pts" + (f" / ₹{rs:+,.0f}" if rs is not None else "")
         when = str(c.get("exit_time") or "")[11:19] or datetime.now(IST).strftime("%H:%M:%S")
         oe = _float_or_none(row.get("option_entry"))
@@ -3247,6 +3249,11 @@ async def _buy_plan(sym, interval, mode, score_min, a, raw_candles, pick):
             logger.info("Premium trend unavailable: %s", str(getattr(exc, "detail", exc))[:120])
     plan = op.profit_plan(side, entry, a.get("atr"), sr, pick, ptrend, sl_atr, min_sl, tgt_atr, ocfg)
     plan["exit_plan"] = plan_key
+    ts, tp_ = op.trail_levels(plan_key, (plan.get("index") or {}).get("atr") or a.get("atr"))
+    if ts and isinstance(plan.get("index"), dict):
+        plan["index"].update(trail_start_pts=ts, trail_pts=tp_)
+        if plan.get("summary"):
+            plan["summary"] += f" · trailing stop {tp_:.0f} pts behind the best price once +{ts:.0f} pts (target {plan['index'].get('target')} is only a cap)"
     plan["sr"] = {"resistances": (sr or {}).get("resistances", [])[:3], "supports": (sr or {}).get("supports", [])[:3]}
     return plan
 

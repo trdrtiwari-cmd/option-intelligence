@@ -65,8 +65,19 @@ EXIT_PLANS = {
     "t1.5": {"label": "Stop 1.5 ATR · target 1.5 ATR (1 : 1)", "target_atr": 1.5},
     "t2": {"label": "Stop 1.5 ATR · target 2 ATR (1 : 1.33)", "target_atr": 2.0},
     "t3": {"label": "Stop 1.5 ATR · target 3 ATR (1 : 2)", "target_atr": 3.0},
+    # v1.20.9: best exit in the 6 Oct - 5 Nov replay (+8.7 vs +2.5 pts/trade for t1.5, 13 trades): same 1.5 ATR stop; once the trade is
+    # +1.2 ATR in profit the stop trails 0.75 ATR behind the best price. 3 ATR is only a cap (and the R:R basis for the profit check).
+    "trail": {"label": "Stop 1.5 ATR · trail 0.75 ATR once +1.2 ATR (cap 3 ATR)", "target_atr": 3.0, "trail_start_atr": 1.2, "trail_atr": 0.75},
 }
-DEFAULT_EXIT_PLAN = os.getenv("EXIT_PLAN", "t1.5") if os.getenv("EXIT_PLAN", "t1.5") in EXIT_PLANS else "t1.5"
+
+
+def trail_levels(plan_name, atr):
+    """(start_pts, distance_pts) of the trailing stop for this plan, or (None, None)."""
+    p = EXIT_PLANS.get(plan_name) or {}
+    if not p.get("trail_atr") or not atr:
+        return None, None
+    return round(p["trail_start_atr"] * float(atr), 2), round(p["trail_atr"] * float(atr), 2)
+DEFAULT_EXIT_PLAN = os.getenv("EXIT_PLAN", "trail") if os.getenv("EXIT_PLAN", "trail") in EXIT_PLANS else "trail"   # v1.20.9
 
 
 def plan_levels(plan_name=None, custom_sl_atr=None, custom_target_atr=None):

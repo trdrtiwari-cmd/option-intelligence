@@ -45,7 +45,7 @@ function render() {
   $('statRows').textContent = rows.length;
   $('statSides').textContent = `${sides.filter(x => x === 'CE').length} / ${sides.filter(x => x === 'PE').length}`;
   $('statWait').textContent = `${open.length} open / ${closed.length} closed`;
-  $('statExits').textContent = `${count('TARGET')} / ${count('STOP')} / ${count('SQUAREOFF')}`;
+  $('statExits').textContent = `${count('TARGET')}${count('TRAIL') ? ' (+' + count('TRAIL') + ' trail)' : ''} / ${count('STOP')} / ${count('SQUAREOFF')}`;
   $('statWin').textContent = closed.length ? `${(wins / closed.length * 100).toFixed(0)}% (${wins}/${closed.length})` : '—';
   $('statNet').textContent = closed.length ? signed(net) : '—'; $('statNet').style.cssText = tone(closed.length ? net : null);
   const o = openSum.length ? openSum.reduce((a, b) => a + b, 0) : null;
@@ -58,7 +58,7 @@ function render() {
 
   $('rows').innerHTML = rows.length ? rows.map(r => {
     const st = r.trade_status || 'OPEN';
-    const stColor = st === 'TARGET' ? 'color:var(--green)' : st === 'STOP' ? 'color:var(--red)' : '';
+    const stColor = st === 'TARGET' || (st === 'TRAIL' && Number(r.net_pnl_points) > 0) ? 'color:var(--green)' : st === 'STOP' || st === 'TRAIL' ? 'color:var(--red)' : '';
     const live = st === 'OPEN' ? openPnl(r) : null;
     const netv = st === 'OPEN' && live !== null ? live - cfg.cost_points : r.net_pnl_points;
     const money = st === 'OPEN' ? (live === null ? {v: null} : rowRupees(r, live)) : rowRupees(r);
