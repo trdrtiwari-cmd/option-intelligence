@@ -200,7 +200,7 @@ async function settleNow() {
   finally { b.disabled = false; load(); }
 }
 
-function exportFile(type) { location.href = '/api/signals/export.' + type + '?' + filters(); }
+function exportFile(type) { const u = '/api/signals/export.' + type + '?' + filters(); if (window.oiSaveUrl) window.oiSaveUrl(u, 'option_intelligence_signals.' + type).catch(() => {}); else location.href = u; }
 
 try { $('qty').value = localStorage.getItem('oi-sig-qty') || ''; $('delta').value = localStorage.getItem('oi-sig-delta') || '0.5'; } catch {}
 ['qty', 'delta'].forEach(id => $(id).addEventListener('input', () => { try { localStorage.setItem('oi-sig-' + id, $(id).value); } catch {} render(); renderSummary(); }));
@@ -211,7 +211,7 @@ $('saveAtr').onclick = () => saveAtr(false);
 $('resetAtr').onclick = () => saveAtr(true);
 $('settleNow').onclick = settleNow;
 $('boardStage').onchange = loadBoard;
-$('boardCsv').onclick = () => { const p = filters(); p.set('stage', $('boardStage').value); p.delete('limit'); location.href = '/api/signal-board/export.csv?' + p; };
+$('boardCsv').onclick = () => { const p = filters(); p.set('stage', $('boardStage').value); p.delete('limit'); const u = '/api/signal-board/export.csv?' + p; if (window.oiSaveUrl) window.oiSaveUrl(u, 'option_intelligence_signal_board.csv').catch(() => {}); else location.href = u; };
 if ($('saveOpt')) $('saveOpt').onclick = async () => { $('optMsg').textContent = 'Saving…'; await saveAtr('opt'); $('optMsg').textContent = $('atrMsg').textContent; };
 $('exportXlsx').onclick = () => exportFile('xlsx');
 $('exportCsv').onclick = () => exportFile('csv');
@@ -288,19 +288,8 @@ $('monExport').onclick = async () => {
     if (!r.ok) throw Error((await r.text()).slice(0, 200) || r.status);
     const text = await r.text(), name = `strategy-review-${day}.json`;
     const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
-    try {
-      const file = new File([text], name, {type: 'application/json'});
-      if (navigator.canShare && navigator.canShare({files: [file]})) {
-        await navigator.share({files: [file], title: name, text: 'review this day'});
-        msg('Shared. In Claude, add the message: review this day'); return;
-      }
-    } catch (e) { if (e && e.name === 'AbortError') { msg('Share cancelled.'); return; } }
-    if (!native) {
-      const url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
-      const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-      msg(`Downloaded ${name}. Upload it in a Claude chat and write: review this day`); return;
-    }
+    const hasFs = !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem);
+    if (window.oiSave && (!native || hasFs)) { msg((await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this day'); return; }
     let copied = false;
     try { await navigator.clipboard.writeText(text + '\n\nreview this day'); copied = true; } catch {}
     if (!copied) { const ta = document.createElement('textarea'); ta.value = text + '\n\nreview this day'; document.body.appendChild(ta); ta.select();

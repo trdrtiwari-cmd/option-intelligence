@@ -44,7 +44,7 @@
   $("exportBtn").onclick = () => {
     if (!cache) return;
     const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), data: cache.data }, null, 2)], { type: "application/json" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "option-intelligence-data.json"; document.body.appendChild(a); a.click(); a.remove();
+    if (window.oiSave) window.oiSave("option-intelligence-data.json", blob); else { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "option-intelligence-data.json"; document.body.appendChild(a); a.click(); a.remove(); }
   };
   $("pwForm").addEventListener("submit", async ev => {
     ev.preventDefault(); const m = $("pwMsg"); m.textContent = "";

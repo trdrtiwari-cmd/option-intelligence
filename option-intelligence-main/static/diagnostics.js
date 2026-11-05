@@ -48,7 +48,13 @@
   const statCells = s => s.n ? [s.n, s.win_rate + "%", { text: num(s.avg), cls: s.avg > 0 ? "green" : "red" }, num(s.total, 0), s.pf == null ? "—" : s.pf, s.se == null ? "—" : "±" + s.se] : [0, "—", "—", "—", "—", "—"];
 
   let lastReport = null;
-  $("dlBtn").addEventListener("click", () => { if (!lastReport) return; const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(lastReport, null, 2)], { type: "application/json" })); a.download = `diagnostics-${lastReport.params.symbol}-${lastReport.params.mode}.json`; document.body.appendChild(a); a.click(); a.remove(); });
+  $("dlBtn").addEventListener("click", () => {          // v1.20.8: works in the Android app too (savefile.js)
+    if (!lastReport) return;
+    const name = `diagnostics-${lastReport.params.symbol}-${lastReport.params.mode}-${(lastReport.params.days || []).slice(-1)[0] || "report"}.json`;
+    const text = JSON.stringify(lastReport, null, 1);
+    if (window.oiSave) window.oiSave(name, text, "application/json");
+    else { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "application/json" })); a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
+  });
   function render(rep) {
     lastReport = rep;
     const P = rep.params;

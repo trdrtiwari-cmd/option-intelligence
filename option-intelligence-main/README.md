@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.8 - downloads work in the Android app
+
+The app's WebView ignores normal downloads, so Diagnostics "Download report", the Signals Excel / CSV exports, the signal-board CSV, Download for Claude, the account data export and the paper-trade CSV did nothing on the phone. All of them now go through `static/savefile.js`: in the app the file is written to **Documents/OptionIntelligence/** and the share menu opens (Drive, Files, WhatsApp, Claude); in a browser it is a normal download. This needs the new APK (adds the Capacitor Filesystem + Share plugins); an older APK falls back to the share sheet or copying text, and says so.
+
 ## v1.20.7 - Diagnostics what-if: trend-day entries
 
 On one-way days the price never pulls back, so the pullback trigger and the 12:00-14:30 gap block every entry (5 Nov: 51 CE setups not bought, 42 of their 1.5 ATR test trades hit target). Diagnostics now replays a stricter trend-day rule **without changing live signals**: same side, score ≥ 70 and every other gate passing except the pullback trigger (variant 2: also not-chasing) and the 12:00-14:30 window; only after 2+ earlier same-side setups of that day had already reached their 1.5 ATR target with no stop since (strictly causal); one trade at a time, max 3 a day; live 1.5 / 1.5 ATR exit. It reports the extra trades alone, by half, and added to the confirmed signals, with a verdict - "promising" only with 15+ trades positive in both halves. The monitor's reviews include it too.

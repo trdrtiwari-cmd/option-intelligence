@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.7";
+const FRONTEND_VERSION="1.20.8";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1354,7 +1354,7 @@ function paperExportCsv(){
   const cols=["symbol","type","strike","expiry","qty","entry","sl_initial","sl","t1","t2","t3","risk_mode","slip","opened_at","status","last_price","exit_price","exit_time","exit_reason","realized_pnl","mfe","mae","override","ctx_signal","ctx_score","ctx_failed","ctx_opt_vol","ctx_spread_pct","ctx_index_entry","ctx_index_exit","ctx_regime","ctx_mode","ctx_signal_at","ctx_signal_age_min","ctx_dash","ctx_htf"];
   const esc=v=>`"${String(v??"").replace(/"/g,'""')}"`;
   const csv=[cols.join(","),...trades.map(t=>cols.map(k=>esc(t[k])).join(","))].join("\r\n");
-  const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="option-intelligence-paper-trades.csv";a.click();URL.revokeObjectURL(url);
+  if(window.oiSave){window.oiSave("option-intelligence-paper-trades.csv",csv,"text/csv");return}const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="option-intelligence-paper-trades.csv";a.click();URL.revokeObjectURL(url);
 }
 $("paperSaveCapital").addEventListener("click",()=>{
   const value=Number($("paperInitialCapital").value);
