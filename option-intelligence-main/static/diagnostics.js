@@ -94,6 +94,14 @@
       table($("wfTable"), ["Exit (target / stop)", "All: win · avg", "First half", "Second half"], rows.map(x => [`${x.target}${u(x)} / ${x.stop}${u(x)}`,
         `${x.all.win_rate}% · ${num(x.all.avg)}`, `${x.first.win_rate}% · ${num(x.first.avg)}`, `${x.second.win_rate}% · ${num(x.second.avg)}`]));
     }
+    const ws = rep.window_slots;
+    if (ws && $("wsTable")) {
+      const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";
+      if (ws.error) table($("wsTable"), ["Window slots"], [["Could not run: " + ws.error]]);
+      else table($("wsTable"), ["Time slot", `Points exit (${P.target}/${P.stop})`, "Fixed 1.5/1.5 ATR", "Trailing exit (live)", "Trailing 1st half", "Trailing 2nd half", "Verdict"],
+        ws.map(w => [w.slot, sc(w.points), sc(w.fixed_atr), sc(w.trail), sc(w.trail_first), sc(w.trail_second),
+          { text: w.verdict, cls: w.verdict.startsWith("worth") ? "green" : w.verdict.startsWith("keep") ? "red" : "" }]));
+    }
     const td = rep.trend_day;
     if (td && $("tdTable")) {
       if (td.error) { table($("tdTable"), ["What-if"], [["Could not run: " + td.error]]); }

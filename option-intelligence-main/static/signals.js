@@ -258,7 +258,7 @@ async function loadMonitor() {
     showReview(+($('monReviewPick').value || 0));
     $('monRows').innerHTML = d.events.length ? d.events.map(e =>
       `<tr><td>${esc(timeOnly(e.created_at).slice(0, 16))}</td><td><span style="color:${monColor[e.severity] || ''};font-weight:600">${esc(e.kind)}</span>${sub(esc(e.symbol || ''))}</td>`
-      + `<td class="wrap">${esc(e.title)}${monDetail(e)}</td><td class="wrap">${e.claude_note ? esc(e.claude_note) : '<span class="sub">—</span>'}</td></tr>`).join('')
+      + `<td class="wrap">${esc(e.title)}${monDetail(e)}</td><td class="wrap">${e.claude_note ? esc(e.claude_note) : '<span class="sub">' + noteHint(e, st) + '</span>'}</td></tr>`).join('')
       : '<tr><td colspan="4" class="empty">No findings for these dates. They are added automatically during market hours.</td></tr>';
   } catch (e) { $('monRows').innerHTML = `<tr><td colspan="4" class="empty">Could not load the monitor: ${esc(e.message)}</td></tr>`; }
 }
@@ -315,3 +315,9 @@ $('monTest').onclick = async () => {
   } catch (e) { $('monSaved').textContent = '✗ ' + e.message; }
   loadMonitor();
 };
+
+function noteHint(e, st) {            // v1.20.10: say why there is no AI note instead of a bare dash
+  if (e.kind === 'SUGGESTION') return 'Summarised in the review above';
+  if (e.kind === 'FEED' || e.kind === 'OPTION' || e.severity === 'info') return 'Explained by the finding itself';
+  return st && st.ai ? 'Waiting for the AI - retried every 2 minutes' : 'No AI connected';
+}

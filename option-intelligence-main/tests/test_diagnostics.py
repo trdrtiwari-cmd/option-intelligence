@@ -169,3 +169,14 @@ def test_trend_day_whatif_is_causal():
     for e in ev3:
         m = cs[e["i"]]["_dt"].astimezone(dg.IST); mm = m.hour * 60 + m.minute + 5
         assert 720 <= mm < 870
+
+
+def test_window_slots_split():
+    cs = _rising_day(75)                      # 09:15 ... 15:25 rising
+    g = "Entry time window (live app)"
+    near = [{"i": i, "signal": "WATCH_CE", "side": "CE", "atr": 10.0, "score": 80, "failed": [g], "gate": g} for i in (1, 3, 40, 45, 70)]
+    ws = dg.window_slots(cs, near, 5, 12, 2.0, 30, 20)
+    by = {w["slot"].split(" ")[0]: w for w in ws}
+    assert by["09:15-09:45"]["trail"]["n"] == 2 and by["12:00-14:30"]["trail"]["n"] == 2
+    assert by["15:00-15:20"]["trail"]["n"] <= 1          # bar 70 = 15:05-15:10 close; entry path ends at the 15:20 square-off
+    assert all("verdict" in w for w in ws)

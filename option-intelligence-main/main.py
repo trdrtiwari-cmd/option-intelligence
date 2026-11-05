@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.9"
+APP_VERSION = "1.20.11"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2089,6 +2089,7 @@ async def _monitor_note(f, day):
     text, err, model = await mon.ai_call(mon.SYSTEM_NOTE, mon.note_prompt(f), "note", max_tokens=300)
     if text:
         await asyncio.to_thread(mon.set_note, SIGNAL_LOG_DB, f["id"], text, model, SIGNAL_LOG_LOCK)
+        _SMON["error"] = None                                   # v1.20.10: a success clears an old error message
     elif err:
         _SMON["error"] = err
 
@@ -2124,8 +2125,7 @@ async def monitor_review(kind="intraday", force=False):
         if mon.provider():
             if force or await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK) < mon.SETTINGS["max_calls"]:
                 text, err, model = await mon.ai_call(mon.SYSTEM_REVIEW, json.dumps(ctx, default=str, ensure_ascii=False), kind, max_tokens=1200, timeout=90.0)
-                if err:
-                    _SMON["error"] = err
+                _SMON["error"] = err or None
         if not text:
             model = None
             text = ("No AI connected - code findings only. Free option: press 'Download for Claude' and upload the file in your Claude chat."
@@ -2188,6 +2188,12 @@ async def _monitor_loop():
                     log = (await get_signal_log(day, day, "", 10000))["rows"]
                     board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, day, day, "", "", 2000, SIGNAL_LOG_LOCK)
                     await _monitor_store(mon.check_trades(log) + mon.losses(log) + mon.missed_from_board(board), day, _monitor_combo()[0])
+                if t - _SMON.get("notes_at", 0) >= 120 and mon.provider():      # v1.20.10: retry notes that failed (busy AI)
+                    _SMON["notes_at"] = t
+                    todo = [e for e in await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 200, SIGNAL_LOG_LOCK)
+                            if not e.get("claude_note") and e["kind"] in ("LOSS", "MISSED", "RULE", "DRIFT") and e["severity"] != "info"]
+                    for e in todo[:3]:
+                        await _monitor_note(e, day)
                 review_from = start + timedelta(minutes=45)        # 10:00 on a normal day
                 if live and now_dt >= review_from and t - _SMON["last_review_at"] >= mon.SETTINGS["review_every_min"] * 60:
                     await monitor_review("intraday")

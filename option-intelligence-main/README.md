@@ -1,5 +1,14 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.11 - Gemini reliability, monitor table layout
+
+* **Gemini:** one call at a time, at least 6 s apart (free-tier rate limit, `GEMINI_MIN_GAP_SEC`); a busy model (503 / 429 / timeout) is retried after 4 s, then the next free model is tried (`gemini-flash-lite-latest` → `gemini-flash-latest` → 2.5 Flash-Lite → 2.5 Flash; override with `GEMINI_MODELS`); a retired model name (404) skips straight to the next; a bad key stops at once. After all of them are busy, calls pause 2 minutes instead of using up the daily allowance. Findings whose AI note failed are retried every 2 minutes (3 at a time). The red error line clears after the next successful call.
+* **Monitor table:** left-aligned, readable columns on wide screens; the AI column says why there is no note ("Summarised in the review above" for suggestions, "Explained by the finding itself" for feed / info findings, "Waiting for the AI" while a retry is pending).
+
+## v1.20.10 - Diagnostics: entry window split by time slot
+
+New Diagnostics table "Entry time window by slot": setups blocked ONLY by the entry window (every other gate passed), split into 09:15-09:45, 12:00-14:30 and 15:00-15:20, each with the points exit, the fixed 1.5 / 1.5 ATR exit and the live trailing exit (with first / second half). A slot is "worth opening" only with 15+ setups positive in both halves. Live signals unchanged.
+
 ## v1.20.9 - trailing exit plan (now the default)
 
 The 6 Oct - 5 Nov replay (13 signals) made +2.5 pts/trade with the fixed 1.5 / 1.5 ATR exit and +8.7 with a trailing stop on the same 1.5 ATR stop. New exit plan **"trail"** (default; Signals page → Exit plan): stop 1.5 ATR (min 20 pts); once the trade is +1.2 ATR the stop trails 0.75 ATR behind the best price; 3 ATR is only a cap / the R:R basis. Trades record `exit_plan`, `trail_start_pts`, `trail_pts`; exits are settled from the 1-minute path (the trail moves only on completed bars - no look-ahead) and from the live price, with the new status **TRAIL** (stats count it; alerts say "TRAILING STOP hit"). Diagnostics keeps reporting both: the fixed 1.5 / 1.5 plan and the "ATR trail: stop 1.5, trail 0.75 once +1.2" row. Set `EXIT_PLAN=t1.5` to go back. Small sample - paper trade it.

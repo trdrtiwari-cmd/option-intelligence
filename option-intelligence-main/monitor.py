@@ -560,25 +560,70 @@ async def gemini_call(system, user_text, model, max_tokens=700, timeout=40.0):
         return None, f"{type(exc).__name__}: {str(exc)[:160]}"
 
 
+_GEMINI_GATE = {"lock": None, "last": 0.0, "cooldown_until": 0.0}
+GEMINI_MIN_GAP = float(os.getenv("GEMINI_MIN_GAP_SEC", "6"))      # free tier: ~10-15 requests/minute -> keep calls apart
+
+
+def gemini_models(primary):
+    """Models to try in order (v1.20.10): the configured one, then the other free Flash aliases. GEMINI_MODELS overrides."""
+    env = [m.strip() for m in os.getenv("GEMINI_MODELS", "").split(",") if m.strip()]
+    chain = env or [primary, GEMINI_FALLBACK, "gemini-flash-lite-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash"]
+    out = []
+    for m in chain:
+        if m and m not in out:
+            out.append(m)
+    return out
+
+
+def _transient(e):
+    e = (e or "").lower()
+    return any(k in e for k in (" 503", " 429", " 500", "overloaded", "unavailable", "high demand", "timeout", "readtimeout", "connecterror"))
+
+
+async def _gemini_robust(system, user_text, model, max_tokens, timeout):
+    """v1.20.10: one call at a time, at least GEMINI_MIN_GAP seconds apart (free-tier rate limit), retry busy models with a back-off,
+    then walk down the free model list. A 404 (model name retired) moves straight to the next model. After everything failed with
+    'busy' errors, calls pause for 2 minutes instead of burning the daily allowance."""
+    import asyncio
+    import time as _t
+    if _GEMINI_GATE["lock"] is None:
+        _GEMINI_GATE["lock"] = asyncio.Lock()
+    if _t.time() < _GEMINI_GATE["cooldown_until"]:
+        return None, "Gemini busy - paused for a minute after repeated 'high demand' replies; will retry automatically", None
+    async with _GEMINI_GATE["lock"]:
+        last_err = None
+        for k, m in enumerate(gemini_models(model)):
+            for attempt in range(2 if k == 0 else 1):
+                wait = GEMINI_MIN_GAP - (_t.time() - _GEMINI_GATE["last"])
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                _GEMINI_GATE["last"] = _t.time()
+                t, e = await gemini_call(system, user_text, m, max_tokens, timeout)
+                if t:
+                    _GEMINI_GATE["cooldown_until"] = 0.0
+                    return t, None, m
+                last_err = e
+                if "api key" in (e or "").lower() or "permission" in (e or "").lower():
+                    return None, e, None                    # wrong / blocked key: every model would fail the same way
+                if " 404" in (e or "") or " 400" in (e or ""):
+                    break                                   # this model name is not available: next model
+                if not _transient(e):
+                    return None, e, None                    # e.g. bad key - retrying will not help
+                if attempt == 0 and k == 0:
+                    await asyncio.sleep(4)
+        if _transient(last_err):
+            _GEMINI_GATE["cooldown_until"] = _t.time() + 120
+        return None, last_err, None
+
+
 async def ai_call(system, user_text, kind="note", max_tokens=700, timeout=40.0):
     """Route to the configured provider. Returns (text, error, model) - model None when nothing was called."""
     prov, model = provider(), model_for(kind)
     if prov == "claude":
         t, e = await claude_call(system, user_text, model, max_tokens, timeout)
     elif prov == "gemini":
-        t, e = await gemini_call(system, user_text, model, max_tokens, timeout)
-        # v1.20.5: the free models are often "high demand" (503) - wait, retry, then try the other free Flash model once
-        if not t and e and (" 503" in e or " 429" in e or "overloaded" in e.lower()):
-            import asyncio
-            await asyncio.sleep(3)
-            t, e2 = await gemini_call(system, user_text, model, max_tokens, timeout)
-            if not t:
-                alt = GEMINI_FALLBACK if model != GEMINI_FALLBACK else "gemini-flash-lite-latest"
-                t, e3 = await gemini_call(system, user_text, alt, max_tokens, timeout)
-                if t:
-                    model = alt
-                else:
-                    e = e3 or e2 or e
+        t, e, used = await _gemini_robust(system, user_text, model, max_tokens, timeout)
+        model = used or model
     else:
         return None, None, None
     return t, (None if t else e), (model if t else None)

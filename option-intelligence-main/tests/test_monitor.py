@@ -217,3 +217,25 @@ def test_init_removes_duplicate_board_findings():
         mon.add_event(db, {"day": "2026-11-05", "kind": "MISSED", "severity": "info", "title": "WATCH NIFTY 24450 CE 13:38 not bought", "dedupe": f"board-missed-{i}"})
     mon.init(db)
     assert len(mon.events(db, "2026-11-05", "2026-11-05")) == 1
+
+
+def test_gemini_404_skips_and_bad_key_stops():
+    calls = []
+    async def fake(system, user, model, mt=700, to=40.0):
+        calls.append(model)
+        if model == "dead-model":
+            return None, "Gemini API 404: model not found"
+        return "fine", None
+    old, oldsleep = mon.gemini_call, asyncio.sleep
+    async def nosleep(*a): return None
+    mon.gemini_call = fake; asyncio.sleep = nosleep
+    mon._GEMINI_GATE.update(lock=None, last=0.0, cooldown_until=0.0)
+    try:
+        t, e, m = asyncio.run(mon._gemini_robust("s", "u", "dead-model", 50, 5))
+        assert t == "fine" and m != "dead-model" and calls[0] == "dead-model" and len(calls) == 2
+        async def badkey(*a, **k): calls.append("x"); return None, "Gemini API 400: API key not valid"
+        mon.gemini_call = badkey; calls.clear()
+        t, e, m = asyncio.run(mon._gemini_robust("s", "u", "gemini-flash-lite-latest", 50, 5))
+        assert t is None and "400" in e
+    finally:
+        mon.gemini_call = old; asyncio.sleep = oldsleep; mon._GEMINI_GATE.update(lock=None, last=0.0, cooldown_until=0.0)

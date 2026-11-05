@@ -605,6 +605,39 @@ def trend_day_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, s
     return out
 
 
+# ---------------------------------------------------------------- v1.20.10 entry window split by time slot
+WINDOW_SLOTS = (("09:15-09:45 (before the morning window)", 0, 9 * 60 + 45), ("12:00-14:30 (midday gap)", 12 * 60, 14 * 60 + 30),
+                ("15:00-15:20 (after the afternoon window)", 15 * 60, 24 * 60))
+TRAIL_NAME = "ATR trail: stop 1.5, trail 0.75 once +1.2"
+
+
+def window_slots(cs, near, interval, horizon, cost, target, stop):
+    """Setups blocked ONLY by the entry time window, split by when they happened, so a slot can be judged on its own.
+    Three exits: the points exit of the run, the fixed 1.5 / 1.5 ATR plan and the live trailing plan (with first / second half)."""
+    evs = [e for e in near if e.get("gate") == "Entry time window (live app)"]
+    rows = evaluate(cs, evs, interval, horizon, cost, target, stop, with_extras=True)
+    days = sorted({r["day"] for r in rows})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    out = []
+    for label, lo, hi in WINDOW_SLOTS:
+        rs = [r for r in rows if lo <= r["minute"] + interval < hi]
+        tr = [r["strat"][TRAIL_NAME] for r in rs if TRAIL_NAME in r.get("strat", {})]
+        d = {"slot": label, "points": stats([r["pnl"] for r in rs]), "fixed_atr": stats([r["atr_grid"]["1.5/1.5"] for r in rs if "1.5/1.5" in r.get("atr_grid", {})]),
+             "trail": stats(tr)}
+        if cut:
+            d["trail_first"] = stats([r["strat"][TRAIL_NAME] for r in rs if r["day"] < cut and TRAIL_NAME in r.get("strat", {})])
+            d["trail_second"] = stats([r["strat"][TRAIL_NAME] for r in rs if r["day"] >= cut and TRAIL_NAME in r.get("strat", {})])
+        f, s_ = d.get("trail_first") or {}, d.get("trail_second") or {}
+        both = bool(f.get("n")) and bool(s_.get("n")) and f.get("avg", 0) > 0 and s_.get("avg", 0) > 0
+        n = d["trail"].get("n", 0)
+        d["verdict"] = ("no blocked setups" if not n else
+                        "worth opening - positive in both halves with 15+ setups (paper-test first)" if both and n >= 15 and d["trail"]["avg"] > 0 else
+                        "promising, too few setups (need 15+, positive in both halves)" if d["trail"].get("avg", 0) > 0 else
+                        "keep closed - these setups lose")
+        out.append(d)
+    return out
+
+
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
         horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70, live_window=True):
@@ -664,6 +697,15 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                       + (f" Closest: target {nb['target']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} / stop {nb['stop']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} "
                                          f"— worst half {nb['worst_win']}% winners, {nb['worst_avg']:+.1f} pts/trade." if nb else "")
                                       + " A higher win rate here would only come from a smaller target than stop, which these signals do not pay for."})
+    try:                       # v1.20.10: which part of the entry-window block costs / saves money
+        ws = window_slots(cs, near, interval, horizon, cost, target, stop)
+        rep["window_slots"] = ws
+        parts = [f"{w['slot'].split(' ')[0]}: {w['trail']['n']} setups, {w['trail']['avg']:+.1f} pts ({w['verdict'].split(' - ')[0]})" for w in ws if w["trail"].get("n")]
+        if parts:
+            rep["verdict"].append({"level": "action" if any(w["verdict"].startswith("worth") for w in ws) else "info",
+                                   "text": "Entry window by time slot (setups blocked only by the window, live trailing exit): " + "; ".join(parts) + "."})
+    except Exception as exc:
+        rep["window_slots"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.7 what-if (Diagnostics only - live signals unchanged)
         td = trend_day_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop)
         rep["trend_day"] = td
