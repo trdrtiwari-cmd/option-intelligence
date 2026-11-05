@@ -1,5 +1,10 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.14 - Claude review covers the whole terminal
+
+* The review file (Download for Claude on the Signals page, the new **Download for Claude** button on the terminal, and the automatic Gemini/Claude reviews) now includes a `terminal` block: app version, market / token state, settings (background-alert symbols / timeframe / mode / score, signal config incl. exit plan and entry windows, monitor), the live analysis of every symbol / timeframe in use (score, regime, failed gates, final decision and blockers, timing, reconfirmation, option pick, buy plan with S/R and failed profit checks), feed state per index, today's signal log and signal board summary.
+* From the terminal button it also includes a `page` block: chart view, selected option, the trendlines and S/R map drawn on the chart, indicators shown, decision text. The reviewer is told to check the settings against the evidence and flag anything in the live state that looks wrong.
+
 ## v1.20.13 - Diagnostics: does buying at support / selling at resistance work?
 
 * New what-if **"buy at support / sell at resistance reversals"**: a bar touches a Medium / Strong support (CE) or resistance (PE) known before that bar (within 0.25 ATR, or breaks it by < 0.5 ATR) and closes back away from it as a reversal candle (bullish / bearish, close in the far half of the bar), inside the entry windows, one trade per level per day, one at a time. Two variants: with the engine leaning the same side, and the reversal candle alone. Judged on the live trailing exit, by half, against the current signals. Live signals unchanged until it proves itself.

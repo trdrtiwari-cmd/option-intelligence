@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.13"
+APP_VERSION = "1.20.14"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2122,6 +2122,10 @@ async def monitor_review(kind="intraday", force=False):
         all_today = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 200, SIGNAL_LOG_LOCK)
         ctx = mon.review_context(day, sym, log, [e for e in all_today if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep, sugg,
                                  mon.board_gate_stats(board))
+        try:
+            ctx["terminal"] = await _terminal_snapshot(day)       # v1.20.14: live terminal state for the reviewer
+        except Exception as exc:
+            ctx["terminal"] = {"error": str(exc)[:120]}
         if mon.provider():
             if force or await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK) < mon.SETTINGS["max_calls"]:
                 text, err, model = await mon.ai_call(mon.SYSTEM_REVIEW, json.dumps(ctx, default=str, ensure_ascii=False), kind, max_tokens=1200, timeout=90.0)
@@ -2254,8 +2258,82 @@ async def monitor_settings(request: Request, payload: MonitorSettings):
     return {"settings": dict(mon.SETTINGS)}
 
 
+# ---- v1.20.14: everything the terminal shows, for the Claude review ----------------------------------------------------------
+def _compact_analysis(a):
+    """The parts of a terminal analysis a reviewer needs (no candles / long lists)."""
+    if not isinstance(a, dict):
+        return None
+    fin, bp, pk, rc, tm = a.get("final") or {}, a.get("buy_plan") or {}, a.get("option_pick") or {}, a.get("reconfirm") or {}, a.get("timing") or {}
+    ix = bp.get("index") or {}
+    return {
+        "status": a.get("status"), "score": a.get("score"), "bull_score": a.get("bull_score"), "bear_score": a.get("bear_score"),
+        "regime": a.get("regime_label") or a.get("regime"), "regime_note": str(a.get("regime_note") or "")[:240], "phase": a.get("regime_phase"),
+        "technical_signal": a.get("signal"), "side": a.get("side"), "last_close": a.get("last_close"), "atr": a.get("atr"), "rsi": a.get("rsi"),
+        "ema9": a.get("ema9"), "ema21": a.get("ema21"), "vwap": a.get("vwap_approx"), "breakout_high": a.get("breakout_high"), "breakdown_low": a.get("breakdown_low"),
+        "final": {"level": fin.get("level"), "action": fin.get("action"), "headline": str(fin.get("headline") or "")[:300],
+                  "blockers": [str(b)[:160] for b in (fin.get("blockers") or [])][:10], "dashboard": fin.get("dashboard_level")},
+        "gates_failed": [g.get("label") for g in (a.get("gates") or []) if isinstance(g, dict) and not g.get("pass")][:15],
+        "gates_passed": len([g for g in (a.get("gates") or []) if isinstance(g, dict) and g.get("pass")]),
+        "timing": {k: tm.get(k) for k in ("state", "generated_at_text", "age_minutes", "moved_atr")},
+        "reconfirm": {k: rc.get(k) for k in ("state", "reason", "elapsed", "window")} if rc else None,
+        "option_pick": {k: pk.get(k) for k in ("name", "label", "ltp", "delta", "strike", "type")} if pk else None,
+        "buy_plan": {"ok": bp.get("ok"), "summary": str(bp.get("summary") or "")[:300], "exit_plan": bp.get("exit_plan"),
+                     "entry": ix.get("entry"), "stop": ix.get("stop"), "target": ix.get("target"), "rr": ix.get("rr"),
+                     "target_basis": ix.get("target_basis"),
+                     "failed_checks": [c.get("label") for c in (bp.get("checks") or []) if isinstance(c, dict) and not c.get("pass")][:8],
+                     "supports": [(l.get("price"), l.get("strength")) for l in ((bp.get("sr") or {}).get("supports") or [])][:3],
+                     "resistances": [(l.get("price"), l.get("strength")) for l in ((bp.get("sr") or {}).get("resistances") or [])][:3]} if bp else None,
+        "cache_age_s": a.get("cache_age_s"),
+    }
+
+
+async def _terminal_snapshot(day):
+    """Settings, live analyses of the combinations in use, feed state, today's signal log and signal board summary."""
+    now = time.time()
+    syms, iv, mode, smin, _d = _poller_cfg()
+    combos = _watch_list(syms, iv, mode, smin)
+    analyses = []
+    for (s_, i_, m_, sm_) in combos[:6]:
+        hits = [(k, v) for k, v in list(_AN_CACHE.items()) if isinstance(k, tuple) and len(k) == 5 and k[:4] == (s_, i_, m_, sm_)]
+        if hits:
+            k, (ts, res) = max(hits, key=lambda kv: kv[1][0])
+            analyses.append({"symbol": s_, "interval": i_, "mode": m_, "score_min": sm_, "age_s": round(now - ts, 1), "analysis": _compact_analysis(res)})
+    feeds = {}
+    for s_ in INDEX_KEYS:
+        with STREAM_LOCK:
+            idx = _tick_view(INDEX_KEYS[s_], now)
+            running = bool(STREAMS.get(s_))
+        feeds[s_] = {"stream_running": running, "index_ltp": idx.get("ltp") if idx else None, "tick_age_s": idx.get("age_seconds") if idx else None}
+    try:
+        cfg = await signal_log_config()
+    except Exception:
+        cfg = {}
+    log = (await get_signal_log(day, day, "", 10000))["rows"]
+    board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, day, day, "", "", 5000, SIGNAL_LOG_LOCK)
+    return {"app_version": APP_VERSION, "market": market_status(), "token_state": TOKEN_CHECK.get("state"),
+            "settings": {"background_alerts": {"symbols": syms, "interval": iv, "mode": mode, "score_min": smin},
+                         "signals_config": cfg, "monitor": {k: mon.SETTINGS.get(k) for k in ("enabled", "provider", "max_calls")}},
+            "combos_in_use": [list(c) for c in combos], "live_analyses": analyses, "feeds": feeds,
+            "signal_log_today": sx.summarize(log, "day").get("total") if log else {"signals": 0},
+            "signal_board_today": sb.summary(board), "monitor_status": {"error": _SMON.get("error"), "last_review_at": _SMON.get("last_review_at")}}
+
+
+@app.post("/api/monitor/export")
+async def monitor_export_post(request: Request, day: str = "", fresh: int = 0):
+    """Same file, plus what the page itself shows (chart trendlines, S/R map, selected option, chart view) sent by the terminal."""
+    try:
+        client = await request.json()
+    except Exception:
+        client = None
+    return await _monitor_export_impl(request, day, fresh, client if isinstance(client, dict) else None)
+
+
 @app.get("/api/monitor/export")
 async def monitor_export(request: Request, day: str = "", fresh: int = 0):
+    return await _monitor_export_impl(request, day, fresh, None)
+
+
+async def _monitor_export_impl(request, day="", fresh=0, client=None):
     """v1.20.1 free review: one JSON file (instructions + the day's trades, losses and causes, missed moves, replay, suggestions)
     to upload in a Claude chat. Uses the data saved with that day's latest review; builds it now for today (or with fresh=1)."""
     _need_user(request)
@@ -2281,6 +2359,14 @@ async def monitor_export(request: Request, day: str = "", fresh: int = 0):
         evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 300, SIGNAL_LOG_LOCK)
         ctx = mon.review_context(day, sym, log, [e for e in evs if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep,
                                  mon.suggestions(rep) if rep else [], mon.board_gate_stats(board))
+    ctx = dict(ctx)
+    if day == ist_now().date().isoformat():
+        try:
+            ctx["terminal"] = await _terminal_snapshot(day)
+        except Exception as exc:
+            ctx["terminal"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    if client:
+        ctx["page"] = json.loads(json.dumps(client, default=str)[:20000]) if len(json.dumps(client, default=str)) <= 20000 else {"note": "page snapshot too large"}
     blob = json.dumps(mon.chat_bundle(ctx), default=str, ensure_ascii=False, separators=(",", ":"))   # compact: fits a paste
     return Response(blob, media_type="application/json",
                     headers={"Content-Disposition": f"attachment; filename=strategy-review-{day}.json", "Cache-Control": "no-store"})

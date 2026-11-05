@@ -239,3 +239,29 @@ def test_gemini_404_skips_and_bad_key_stops():
         assert t is None and "400" in e
     finally:
         mon.gemini_call = old; asyncio.sleep = oldsleep; mon._GEMINI_GATE.update(lock=None, last=0.0, cooldown_until=0.0)
+
+
+def test_export_includes_terminal_and_page():
+    try:
+        import main as M
+    except Exception:
+        return
+    import json as _j
+    M._need_user = lambda r: {"id": 1}
+    old_tok = M.runtime_token
+    M.runtime_token = None
+    day = M.ist_now().date().isoformat()
+    M._AN_CACHE[("NIFTY", 5, "scalp", 70, -1)] = (__import__("time").time(), {"status": "ok", "score": 72, "regime_label": "SIDEWAYS",
+        "gates": [{"label": "Not sideways / not in a range", "pass": False}, {"label": "Score ≥ 70", "pass": True}],
+        "final": {"level": "WATCH", "action": "WATCH CE", "headline": "h", "blockers": ["x: y"]}, "option_pick": {"name": "NIFTY 24300 CE", "ltp": 301.4}})
+    try:
+        r = asyncio.run(M._monitor_export_impl(None, day, 0, {"chart_view": "option", "trendlines": {"support": {"broken": True}}}))
+        b = _j.loads(r.body)
+        t = b["data"]["terminal"]
+        assert t["app_version"] == M.APP_VERSION and "settings" in t and "feeds" in t
+        la = [x for x in t["live_analyses"] if x["symbol"] == "NIFTY" and x["interval"] == 5 and x["mode"] == "scalp"]
+        assert la and la[0]["analysis"]["gates_failed"] == ["Not sideways / not in a range"] and la[0]["analysis"]["option_pick"]["ltp"] == 301.4
+        assert b["data"]["page"]["chart_view"] == "option"
+        assert "terminal" in b["instructions"]
+    finally:
+        M.runtime_token = old_tok

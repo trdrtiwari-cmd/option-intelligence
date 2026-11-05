@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.13";
+const FRONTEND_VERSION="1.20.14";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1591,3 +1591,28 @@ async function loadMonitorPill(){
   }catch{el.textContent="Monitor";el.className="pill muted"}
 }
 loadMonitorPill();setInterval(()=>{if(document.visibilityState==="visible")loadMonitorPill()},30000);
+
+// v1.20.14: "Download for Claude" on the terminal - the server adds settings, live analyses, the signal log / board and the replay;
+// the page adds what only it knows: chart view, selected option, trendlines and the S/R map drawn on the chart.
+function pageSnapshot(){
+  const lv=l=>l?{price:l.price,strength:l.strength,basis:l.basis}:null, tl=t=>t?{direction:t.direction,value:Math.round(t.value*100)/100,touches:t.touches,broken:!!t.broken,bars:t.bars}:null;
+  const sr=lastSR||{};
+  return {symbol:getSymbol(),interval:getInterval(),mode:getMode(),score_min:getScoreMin(),reconfirm:getReconfirm(),chart_view:$("chartView").value,
+    refresh:$("refreshEvery")?.value,live_price:$("lastPrice")?.textContent,price_note:$("priceChange")?.textContent,stream:$("streamStatus")?.textContent,
+    updated:$("lastUpdated")?.textContent,monitor:$("monPill")?.textContent,decision:$("bigDecision")?.textContent,decision_note:$("decisionSub")?.textContent,
+    selected_option:paperSelected?{name:paperSelectedLabel?paperSelectedLabel():null,instrument_key:paperSelected.instrument_key,ltp:paperSelected.ltp,type:paperSelected.type,strike:paperSelected.strike}:null,
+    trendlines:lastTrendlines?{support:tl(lastTrendlines.support),resistance:tl(lastTrendlines.resistance)}:null,
+    sr:{supports:(sr.supports||[]).slice(0,3).map(lv),resistances:(sr.resistances||[]).slice(0,3).map(lv)},
+    chart_indicators:{ema9:$("ema9")?.textContent,ema21:$("ema21")?.textContent,vwap:$("vwap")?.textContent,rsi:$("rsi")?.textContent,atr:$("atr")?.textContent,rel_vol:$("relVol")?.textContent},
+    page_version:FRONTEND_VERSION};
+}
+(function(){const b=$("claudeExport");if(!b)return;b.addEventListener("click",async()=>{
+  b.disabled=true;const old=b.textContent;b.textContent="Preparing…";
+  try{const day=new Date(Date.now()+330*60000).toISOString().slice(0,10);
+    const r=await fetch(`/api/monitor/export?day=${day}`,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(pageSnapshot())});
+    if(!r.ok)throw Error((await r.text()).slice(0,160));
+    const text=await r.text(),name=`strategy-review-${day}.json`;
+    if(window.oiSave)await window.oiSave(name,text,"application/json");else toast("Saving files is not available on this page");
+    toast("Review file ready - upload it in a Claude chat and write: review this day");
+  }catch(e){toast("Download for Claude failed: "+e.message)}finally{b.disabled=false;b.textContent=old}
+});})();
