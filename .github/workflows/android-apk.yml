@@ -37,13 +37,20 @@ jobs:
       - run: npx cap add android
       - name: Configure Firebase for native push (only when the secret exists)
         run: |
-          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
-            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > android/app/google-services.json
-            sed -i '/dependencies {/a\        classpath "com.google.gms:google-services:4.4.2"' android/build.gradle
-            echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
-            echo "Firebase configured"
+          if [ -z "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "No GOOGLE_SERVICES_JSON_BASE64 secret - building without native push (web/Telegram alerts still work)"; exit 0
+          fi
+          # Accept the secret as base64 (with or without line breaks) or as the raw JSON itself.
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | tr -d ' \r\n' | base64 --decode -i > /tmp/gs.json 2>/dev/null || true
+          node -e "const j=JSON.parse(require('fs').readFileSync('/tmp/gs.json','utf8'));if(!j.project_info)throw 1" 2>/dev/null \
+            || printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" > /tmp/gs.json
+          if node -e "const j=JSON.parse(require('fs').readFileSync('/tmp/gs.json','utf8'));if(!j.project_info)throw 1" 2>/dev/null; then
+            cp /tmp/gs.json android/app/google-services.json
+            grep -q "google-services" android/build.gradle || sed -i '/dependencies {/a\        classpath "com.google.gms:google-services:4.4.2"' android/build.gradle
+            grep -q "com.google.gms.google-services" android/app/build.gradle || echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
+            echo "Firebase configured (native push enabled)"
           else
-            echo "No GOOGLE_SERVICES_JSON_BASE64 secret - building without native push (web/Telegram alerts still work)"
+            echo "::warning::GOOGLE_SERVICES_JSON_BASE64 is not a valid google-services.json (base64 or raw) - building WITHOUT native push"
           fi
       - run: npx capacitor-assets generate --android --iconBackgroundColor '#0b1220' --splashBackgroundColor '#0b1220'
       - run: npx cap sync android
