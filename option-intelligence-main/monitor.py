@@ -578,6 +578,52 @@ def gemini_models(primary):
     return out
 
 
+_GEMINI_FOUND = {"at": 0.0, "models": [], "good": None}
+
+
+def _suggested_model(err):
+    """Google's 404 says which model to use instead ("... use models/gemini-x-flash ..."): take that name."""
+    import re as _re
+    m = _re.search(r"models/([A-Za-z0-9._-]+)", (err or "").split("no longer available", 1)[-1])
+    return m.group(1) if m else None
+
+
+async def gemini_discover(force=False):
+    """v1.20.25: ask Google which models this key can call (ListModels) and keep the Flash text models, newest first.
+    Cached for 6 hours. Model names are retired often; this keeps the monitor working without a code change."""
+    import time as _t
+    if not force and _GEMINI_FOUND["models"] and _t.time() - _GEMINI_FOUND["at"] < 6 * 3600:
+        return _GEMINI_FOUND["models"]
+    key = gemini_key()
+    if not key:
+        return []
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get("https://generativelanguage.googleapis.com/v1beta/models", params={"pageSize": 200},
+                                 headers={"x-goog-api-key": key})
+        if r.status_code != 200:
+            return _GEMINI_FOUND["models"]
+        names = []
+        for mdl in r.json().get("models") or []:
+            n = str(mdl.get("name") or "").replace("models/", "")
+            if "generateContent" not in (mdl.get("supportedGenerationMethods") or []) or "flash" not in n:
+                continue
+            if any(x in n for x in ("image", "tts", "audio", "live", "embedding", "native", "exp")):
+                continue
+            names.append(n)
+        import re as _re
+
+        def rank(n):
+            v = _re.search(r"(\d+(?:\.\d+)?)", n)
+            return (0 if "preview" in n else 1, 1 if n.endswith("-latest") else 0, float(v.group(1)) if v else 0.0, 1 if "lite" in n else 0)
+        names.sort(key=rank, reverse=True)
+        _GEMINI_FOUND.update(at=_t.time(), models=names)
+        return names
+    except Exception:
+        return _GEMINI_FOUND["models"]
+
+
 def _transient(e):
     e = (e or "").lower()
     return any(k in e for k in (" 503", " 429", " 500", "overloaded", "unavailable", "high demand", "timeout", "readtimeout", "connecterror"))
@@ -595,7 +641,26 @@ async def _gemini_robust(system, user_text, model, max_tokens, timeout):
         return None, "Gemini busy - paused for a minute after repeated 'high demand' replies; will retry automatically", None
     async with _GEMINI_GATE["lock"]:
         last_err = None
-        for k, m in enumerate(gemini_models(model)):
+        chain = gemini_models(model)
+        if _GEMINI_FOUND["models"]:                 # models Google listed for this key earlier: right after the configured one
+            chain = chain[:1] + [m for m in _GEMINI_FOUND["models"][:3] if m not in chain[:1]] + [m for m in chain[1:] if m not in _GEMINI_FOUND["models"][:3]]
+        if _GEMINI_FOUND["good"]:
+            chain = [_GEMINI_FOUND["good"]] + [m for m in chain if m != _GEMINI_FOUND["good"]]
+        tried, k = set(), -1
+        while True:
+            pending = [m for m in chain if m not in tried]
+            if not pending:
+                # v1.20.25: every listed name failed as "not found" - add Google's suggested name and the models this key can use
+                if last_err and (" 404" in last_err or " 400" in last_err) and not _GEMINI_FOUND.get("_looked"):
+                    _GEMINI_FOUND["_looked"] = True
+                    extra = ([_suggested_model(last_err)] if _suggested_model(last_err) else []) + (await gemini_discover(force=True))[:5]
+                    chain += [m for m in extra if m and m not in chain]
+                    pending = [m for m in chain if m not in tried]
+                if not pending:
+                    break
+            m = pending[0]
+            tried.add(m)
+            k += 1
             for attempt in range(2 if k == 0 else 1):
                 wait = GEMINI_MIN_GAP - (_t.time() - _GEMINI_GATE["last"])
                 if wait > 0:
@@ -604,18 +669,25 @@ async def _gemini_robust(system, user_text, model, max_tokens, timeout):
                 t, e = await gemini_call(system, user_text, m, max_tokens, timeout)
                 if t:
                     _GEMINI_GATE["cooldown_until"] = 0.0
+                    _GEMINI_FOUND["good"] = m                  # remember the working model: tried first next time
+                    _GEMINI_FOUND.pop("_looked", None)
                     return t, None, m
                 last_err = e
                 if "api key" in (e or "").lower() or "permission" in (e or "").lower():
                     return None, e, None                    # wrong / blocked key: every model would fail the same way
                 if " 404" in (e or "") or " 400" in (e or ""):
+                    if _GEMINI_FOUND["good"] == m:
+                        _GEMINI_FOUND["good"] = None
                     break                                   # this model name is not available: next model
                 if not _transient(e):
                     return None, e, None                    # e.g. bad key - retrying will not help
                 if attempt == 0 and k == 0:
                     await asyncio.sleep(4)
+        _GEMINI_FOUND.pop("_looked", None)
         if _transient(last_err):
             _GEMINI_GATE["cooldown_until"] = _t.time() + 120
+        if last_err and " 404" in last_err:
+            last_err = f"No Gemini model available to this key (tried {len(tried)}: {', '.join(list(tried)[:6])}). Last: {last_err[:160]}"
         return None, last_err, None
 
 

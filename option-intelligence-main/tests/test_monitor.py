@@ -229,7 +229,7 @@ def test_gemini_404_skips_and_bad_key_stops():
     old, oldsleep = mon.gemini_call, asyncio.sleep
     async def nosleep(*a): return None
     mon.gemini_call = fake; asyncio.sleep = nosleep
-    mon._GEMINI_GATE.update(lock=None, last=0.0, cooldown_until=0.0)
+    mon._GEMINI_GATE.update(lock=None, last=0.0, cooldown_until=0.0); mon._GEMINI_FOUND.update(at=0.0, models=[], good=None)
     try:
         t, e, m = asyncio.run(mon._gemini_robust("s", "u", "dead-model", 50, 5))
         assert t == "fine" and m != "dead-model" and calls[0] == "dead-model" and len(calls) == 2
@@ -265,3 +265,36 @@ def test_export_includes_terminal_and_page():
         assert "terminal" in b["instructions"]
     finally:
         M.runtime_token = old_tok
+
+
+def test_gemini_retired_models_switch_to_suggested_and_listed(monkeypatch):
+    import asyncio
+    import monitor as mon
+    monkeypatch.setattr(mon, "GEMINI_MIN_GAP", 0)
+    mon._GEMINI_FOUND.update(at=0.0, models=[], good=None)
+    mon._GEMINI_GATE.update(lock=None, last=0.0, cooldown_until=0.0)
+    calls = []
+
+    async def fake_call(system, text, model, max_tokens=700, timeout=40.0):
+        calls.append(model)
+        if model == "gemini-9-flash":
+            return "ok review", None
+        return None, f"Gemini API 404: This model models/{model} is no longer available to new users. Please update your code to use models/gemini-9-flash for the latest features."
+
+    async def fake_discover(force=False):
+        return ["gemini-9-flash-lite"]
+    monkeypatch.setattr(mon, "gemini_call", fake_call)
+    monkeypatch.setattr(mon, "gemini_discover", fake_discover)
+    t, e, used = asyncio.run(mon._gemini_robust("s", "u", "gemini-2.5-flash", 100, 5))
+    assert t == "ok review" and used == "gemini-9-flash" and e is None
+    assert mon._GEMINI_FOUND["good"] == "gemini-9-flash"
+    calls.clear()
+    asyncio.run(mon._gemini_robust("s", "u", "gemini-2.5-flash", 100, 5))
+    assert calls == ["gemini-9-flash"]                 # the working model is tried first next time
+    mon._GEMINI_FOUND.update(at=0.0, models=[], good=None)
+
+
+def test_suggested_model_parsed():
+    import monitor as mon
+    e = "Gemini API 404: This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash for the latest"
+    assert mon._suggested_model(e) == "gemini-3.8-flash"
