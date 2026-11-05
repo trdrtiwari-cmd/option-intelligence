@@ -137,3 +137,35 @@ def test_atr_trailing_keeps_minimum_stop():
     path = [{"open": 100, "high": 101, "low": 100 - 1.4 * 10, "close": 99}, {"open": 99, "high": 99, "low": 80, "close": 80}]
     for name, fn in dg.ATR_STRATEGIES:
         assert fn(path, 100.0, 1, 10.0) == -15.0, name
+
+
+def _rising_day(n=60, step=4.0):
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 11, 5, 9, 15, tzinfo=dg.IST)
+    cs, p = [], 24000.0
+    for k in range(n):
+        o = p; c = p + step
+        cs.append({"_dt": t0 + timedelta(minutes=5 * k), "open": o, "high": c + 1, "low": o - 1, "close": c})
+        p = c
+    return cs
+
+
+def test_trend_day_whatif_is_causal():
+    cs = _rising_day()
+    trig = "Pullback-and-resume trigger (retest holds)"
+    rep = [{"i": i, "signal": "WATCH_CE", "side": "CE", "atr": 10.0, "score": 80, "failed": [trig]} for i in range(5, 55)]
+    ev = dg.trend_day_events(cs, rep, "base", interval=5)
+    assert ev, "a steady trend with proven setups must produce trend-day entries"
+    first = ev[0]["i"]
+    # proofs need 1.5 ATR = 15 pts -> 4 bars each; the 2nd proof starts at bar 8 and is decided by bar ~12, so no entry before that
+    assert first >= 12 and ev[0]["trend_proofs"] >= 2
+    assert len(ev) <= 3 and all(b["i"] > a["i"] for a, b in zip(ev, ev[1:]))
+    # a gate that is NOT relaxable blocks everything
+    rep2 = [dict(r, failed=[trig, "Higher timeframe agrees"]) for r in rep]
+    assert dg.trend_day_events(cs, rep2, "base", interval=5) == []
+    # outside 12:00-14:30 the entry window stays a hard block
+    rep3 = [dict(r, failed=[trig, "Entry time window (live app)"]) for r in rep]
+    ev3 = dg.trend_day_events(cs, rep3, "base", interval=5)
+    for e in ev3:
+        m = cs[e["i"]]["_dt"].astimezone(dg.IST); mm = m.hour * 60 + m.minute + 5
+        assert 720 <= mm < 870

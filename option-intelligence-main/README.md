@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.7 - Diagnostics what-if: trend-day entries
+
+On one-way days the price never pulls back, so the pullback trigger and the 12:00-14:30 gap block every entry (5 Nov: 51 CE setups not bought, 42 of their 1.5 ATR test trades hit target). Diagnostics now replays a stricter trend-day rule **without changing live signals**: same side, score ≥ 70 and every other gate passing except the pullback trigger (variant 2: also not-chasing) and the 12:00-14:30 window; only after 2+ earlier same-side setups of that day had already reached their 1.5 ATR target with no stop since (strictly causal); one trade at a time, max 3 a day; live 1.5 / 1.5 ATR exit. It reports the extra trades alone, by half, and added to the confirmed signals, with a verdict - "promising" only with 15+ trades positive in both halves. The monitor's reviews include it too.
+
 ## v1.20.6 - which rule blocked each setup, no duplicate findings
 
 * **Signal board "Blocked by"**: every WATCH / SETUP / NO BUY / FAILED row now stores the exact rules that failed (technical gates, entry window, dashboard, reconfirmation, profit check), shown under "Why". The monitor review gets `today_blocking_rules`: for each rule, how many of today's setups it blocked and how many of those the 1.5 ATR test trade won / lost - the evidence for relaxing or keeping it.

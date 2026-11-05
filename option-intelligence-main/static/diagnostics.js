@@ -88,6 +88,18 @@
       table($("wfTable"), ["Exit (target / stop)", "All: win · avg", "First half", "Second half"], rows.map(x => [`${x.target}${u(x)} / ${x.stop}${u(x)}`,
         `${x.all.win_rate}% · ${num(x.all.avg)}`, `${x.first.win_rate}% · ${num(x.first.avg)}`, `${x.second.win_rate}% · ${num(x.second.avg)}`]));
     }
+    const td = rep.trend_day;
+    if (td && $("tdTable")) {
+      if (td.error) { table($("tdTable"), ["What-if"], [["Could not run: " + td.error]]); }
+      else {
+        const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";
+        table($("tdTable"), ["Rule (1.5 / 1.5 ATR exit)", "Extra trades · win · avg pts", "First half", "Second half", "Signals + extra", "Verdict"],
+          [["Current rules (confirmed signals only)", sc(td.baseline), "", "", sc(td.baseline), ""]].concat(td.variants.map(v =>
+            [v.label, sc(v.extra), sc(v.first), sc(v.second), sc(v.combined), { text: v.verdict, cls: v.verdict.startsWith("promising") ? "green" : v.verdict.startsWith("loses") ? "red" : "" }])));
+        const tr = (td.variants[0] || {}).trades || [];
+        table($("tdTrades"), ["Extra trade (trend day rule)", "Side", "Result (pts)", "Proven setups before it"], tr.length ? tr.map(x => [`${x.day} ${x.time}`, x.side, { text: num(x.pts), cls: x.pts > 0 ? "green" : "red" }, x.proofs]) : [["No extra trades in this period", "", "", ""]]);
+      }
+    }
     const mm = rep.missed_moves;
     if (mm && $("missedBlockers")) {
       $("mmRule").textContent = mm.moves ? `${mm.moves} big moves · caught ${mm.caught} · missed ${mm.missed}. Rule: ${mm.rule}.` : "No clean big moves in this period.";

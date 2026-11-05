@@ -501,6 +501,110 @@ def missed_moves(cs, replayed, horizon=12, move_atr=2.5, max_adverse_atr=0.75, b
             "rule": f"move ≥ {move_atr:g} ATR within {horizon} bars without {max_adverse_atr:g} ATR against first; caught = CONFIRMED on that side from {before} bars before to {after} after the start"}
 
 
+# ---------------------------------------------------------------- v1.20.7 what-if: trend-day entries (Diagnostics only)
+TREND_RELAX = {
+    "base": ("Entry trigger", "Pullback-and-resume"),
+    "chase": ("Entry trigger", "Pullback-and-resume", "Not chasing"),
+}
+MIDDAY = (12 * 60, 14 * 60 + 30)        # the entry-window gap a trend day may fill; before 09:45 / after 15:00 stay blocked
+
+
+def _touch(cs, i, d, atr, sl_m=1.5, tg_m=1.5):
+    """1.5 / 1.5 ATR test trade entered at the open after bar i: ('target'|'stop'|None, index of the bar that decided it)."""
+    if i + 1 >= len(cs) or not atr:
+        return None, None
+    day = cs[i]["_dt"].astimezone(IST).date()
+    entry = cs[i + 1]["open"]
+    for k in range(i + 1, len(cs)):
+        kt = cs[k]["_dt"].astimezone(IST)
+        if kt.date() != day or kt.hour * 60 + kt.minute >= SQUAREOFF_MIN:
+            return None, k
+        c = cs[k]
+        if ((entry - c["low"]) if d > 0 else (c["high"] - entry)) >= sl_m * atr:
+            return "stop", k
+        if ((c["high"] - entry) if d > 0 else (entry - c["low"])) >= tg_m * atr:
+            return "target", k
+    return None, None
+
+
+def trend_day_events(cs, replayed, variant="base", min_proofs=2, max_per_day=3, interval=5):
+    """Extra entries a 'trend-day' rule would add. Strictly causal - uses only what was known when each bar closed:
+      * the engine leans side S with score >= the threshold (the score gate is NOT relaxed) and every other gate passes, except
+        the entry trigger / pullback (and, for variant 'chase', the not-chasing gate), and the entry window ONLY for 12:00-14:30;
+      * proof of a trend day: at least `min_proofs` earlier same-side setups of the same day (>= 3 bars apart) whose 1.5 ATR test
+        trade had ALREADY reached its target, without any same-side setup hitting its stop since;
+      * one trend-day trade at a time, at most `max_per_day` per day, never on a bar that is already a confirmed signal."""
+    relax = TREND_RELAX[variant]
+    by_day, out = {}, []
+    for r in replayed:
+        by_day.setdefault(cs[r["i"]]["_dt"].astimezone(IST).date(), []).append(r)
+    for day, rows in by_day.items():
+        proofs = []                     # (side, start_i, result, decided_at)
+        busy_until, taken, last_proof_i = -1, 0, {}
+        for r in rows:
+            i, side = r["i"], r.get("side")
+            if not side or not r.get("atr"):
+                continue
+            d = 1 if side == "CE" else -1
+            if "Score ≥ 70" not in r["failed"] and not any(f.startswith("Engine leaned") for f in r["failed"]) \
+                    and i - last_proof_i.get(side, -99) >= 3:
+                res, k = _touch(cs, i, d, r["atr"])
+                proofs.append((side, i, res, k))
+                last_proof_i[side] = i
+            if r["signal"].startswith("CONFIRMED") or i <= busy_until or taken >= max_per_day:
+                continue
+            m = cs[i]["_dt"].astimezone(IST)
+            minute = m.hour * 60 + m.minute + interval          # the bar's close time, as the live window check uses
+            ok = True
+            for f in r["failed"]:
+                if f.startswith(relax):
+                    continue
+                if f.startswith("Entry time window") and MIDDAY[0] <= minute < MIDDAY[1]:
+                    continue
+                ok = False
+                break
+            if not ok:
+                continue
+            known = [p for p in proofs if p[0] == side and p[1] < i and p[3] is not None and p[3] <= i]
+            if any(p[2] == "stop" for p in known):
+                last_stop = max(p[3] for p in known if p[2] == "stop")
+                known = [p for p in known if p[3] > last_stop]
+            if sum(1 for p in known if p[2] == "target") < min_proofs:
+                continue
+            res, k = _touch(cs, i, d, r["atr"])
+            busy_until = k if k is not None else i + 12
+            taken += 1
+            out.append({**r, "trend_proofs": sum(1 for p in known if p[2] == "target")})
+    return out
+
+
+def trend_day_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop, plan_key="1.5/1.5"):
+    """Report for both variants: the extra trades alone, by half, and added to the confirmed signals."""
+    days = sorted({r["day"] for r in conf_rows}) or sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    base_vals = [r["atr_grid"][plan_key] for r in conf_rows if plan_key in r.get("atr_grid", {})]
+    out = {"plan": plan_key, "baseline": stats(base_vals), "variants": []}
+    for variant, label in (("base", "Trend day: skip the pullback trigger, allow 12:00-14:30"),
+                           ("chase", "Trend day + allow chasing (> 1 ATR beyond EMA 9)")):
+        evs = trend_day_events(cs, replayed, variant, interval=interval)
+        rows = evaluate(cs, evs, interval, horizon, cost, target, stop)
+        vals = [r["atr_grid"][plan_key] for r in rows if plan_key in r.get("atr_grid", {})]
+        v = {"variant": variant, "label": label, "extra": stats(vals), "combined": stats(base_vals + vals),
+             "trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pts": round(r["atr_grid"].get(plan_key, 0), 1),
+                         "proofs": r.get("trend_proofs")} for r in rows][:40]}
+        if cut:
+            v["first"] = stats([r["atr_grid"][plan_key] for r in rows if r["day"] < cut and plan_key in r.get("atr_grid", {})])
+            v["second"] = stats([r["atr_grid"][plan_key] for r in rows if r["day"] >= cut and plan_key in r.get("atr_grid", {})])
+        e, f_, s_ = v["extra"], v.get("first") or {}, v.get("second") or {}
+        both = bool(f_.get("n")) and bool(s_.get("n")) and f_.get("avg", 0) > 0 and s_.get("avg", 0) > 0
+        v["verdict"] = ("no extra trades in this period" if not e.get("n") else
+                        "promising - positive in both halves with 15+ trades; still paper-test before going live" if both and e["n"] >= 15 and e["avg"] > 0 else
+                        "positive but too few trades (need 15+, positive in both halves)" if e.get("avg", 0) > 0 else
+                        "loses - keep the current rules")
+        out["variants"].append(v)
+    return out
+
+
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
         horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70, live_window=True):
@@ -560,6 +664,17 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                       + (f" Closest: target {nb['target']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} / stop {nb['stop']:g}{' ATR' if nb['kind'] == 'ATR' else ' pts'} "
                                          f"— worst half {nb['worst_win']}% winners, {nb['worst_avg']:+.1f} pts/trade." if nb else "")
                                       + " A higher win rate here would only come from a smaller target than stop, which these signals do not pay for."})
+    try:                       # v1.20.7 what-if (Diagnostics only - live signals unchanged)
+        td = trend_day_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop)
+        rep["trend_day"] = td
+        b = td["variants"][0]
+        if b["extra"].get("n"):
+            e = b["extra"]
+            rep["verdict"].append({"level": "action" if b["verdict"].startswith("promising") else "info",
+                                   "text": f"What-if “{b['label']}”: {e['n']} extra trades, {e['win_rate']}% winners, {e['avg']:+.1f} pts each at the live "
+                                           f"1.5 / 1.5 ATR exit (signals + extra: {b['combined']['n']} trades, {b['combined']['avg']:+.1f} pts each). Verdict: {b['verdict']}."})
+    except Exception as exc:
+        rep["trend_day"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     mm = missed_moves(cs, replayed, horizon=horizon)
     rep["missed_moves"] = mm
     if mm["moves"]:

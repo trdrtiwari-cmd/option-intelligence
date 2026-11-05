@@ -629,7 +629,9 @@ def review_context(day, symbol, trades, findings, board_missed, rep, sugg, gate_
                    "live_exit": rep.get("live_exit"), "confirmed": (rep.get("confirmed") or {}).get("stats"),
                    "missed_moves": {k: (rep.get("missed_moves") or {}).get(k) for k in ("moves", "caught", "missed", "blockers")},
                    "near_miss_by_gate": (rep.get("ablation") or [])[:10],
-                   "verdict": [v.get("text") for v in (rep.get("verdict") or [])][:10]},
+                   "verdict": [v.get("text") for v in (rep.get("verdict") or [])][:10],
+                   "trend_day_whatif": [{k: v.get(k) for k in ("label", "extra", "first", "second", "combined", "verdict")}
+                                        for v in ((rep.get("trend_day") or {}).get("variants") or [])]},
         "code_suggestions": sugg,
     }
 
