@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.22 - Opening Range Breakout tested in Diagnostics
+
+New "Opening Range Breakout (ORB)" table: opening range = high / low of the first 15 or 30 minutes after 09:15; the first 5-minute close above it is a CE entry, below it a PE entry; one trade a day, entries until 12:00. Versions: the break alone, only when the engine leans the same way, only when the range is 0.5-2.5 ATR wide. Live trailing exit, first / second half, verdict, trade list. Not live - the app trades it only if it proves itself on NIFTY / BANKNIFTY.
+
 ## v1.20.20 - leading triggers tested against the lagging pullback trigger; why the pattern rule adds nothing
 
 * **Pattern rule explained in Diagnostics:** the verdict now says how many bars had a pattern breakout on the engine's side and which other rules blocked them (e.g. "Not a fresh breakout bar", "Not sideways"), so "added 0" can be read.

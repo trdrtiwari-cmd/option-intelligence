@@ -208,3 +208,18 @@ def test_sr_reversal_event_rule():
         assert d2.sr_reversal_events(cs, rep_pe, 5, "NIFTY", "with_trend") == []     # engine leans PE: no CE trade
     finally:
         d2._sr_at = old
+
+
+def test_orb_events_first_break_only():
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 11, 5, 9, 15, tzinfo=dg.IST)
+    cs = []
+    for k in range(40):
+        p = 100.0 if k < 6 else 100 + (k - 5) * 2.0          # flat 09:15-09:45, then rising
+        cs.append({"_dt": t0 + timedelta(minutes=5 * k), "open": p - 0.5, "high": p + 1, "low": p - 1, "close": p})
+    rep = [{"i": i, "signal": "WATCH_CE", "side": "CE", "atr": 2.0, "score": 70, "failed": []} for i in range(40)]
+    ev = dg.orb_events(cs, rep, 5, 15, "plain")
+    assert len(ev) == 1 and ev[0]["side"] == "CE"
+    m = ev[0]["i"]
+    assert cs[m]["_dt"].astimezone(dg.IST).hour * 60 + cs[m]["_dt"].astimezone(dg.IST).minute >= 9 * 60 + 30
+    assert dg.orb_events(cs, [dict(r, side="PE") for r in rep], 5, 15, "with_trend") == []

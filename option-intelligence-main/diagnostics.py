@@ -739,6 +739,76 @@ def leading_compare(cs, replayed, interval, horizon, cost, target, stop, mode):
     return out
 
 
+# ---------------------------------------------------------------- v1.20.22 Opening Range Breakout (ORB), a strategy the app does not use
+ORB_LAST_ENTRY = 12 * 60          # first break only, before noon (the morning window is where the signals pay)
+
+
+def orb_events(cs, replayed, interval, or_minutes=15, variant="plain"):
+    """Classic Opening Range Breakout (Crabel; Zarattini & Aziz): the high / low of the first `or_minutes` after 09:15 is the opening
+    range; the FIRST 5-minute close above it is a CE entry, below it a PE entry; one trade a day, entries until 12:00.
+    variant 'plain'      - the break alone
+            'with_trend' - the engine must lean the same side on that bar
+            'width'      - only when the opening range is 0.5-2.5 ATR wide (skips dead and chaotic opens)"""
+    rec = {r["i"]: r for r in replayed}
+    by_day = {}
+    for i, c in enumerate(cs):
+        by_day.setdefault(c["_dt"].astimezone(IST).date(), []).append(i)
+    out = []
+    for day, idx in by_day.items():
+        start = 9 * 60 + 15
+        orb = [i for i in idx if start <= (lambda t: t.hour * 60 + t.minute)(cs[i]["_dt"].astimezone(IST)) < start + or_minutes]
+        if not orb:
+            continue
+        hi, lo = max(cs[i]["high"] for i in orb), min(cs[i]["low"] for i in orb)
+        for i in idx:
+            t = cs[i]["_dt"].astimezone(IST)
+            m = t.hour * 60 + t.minute
+            if m < start + or_minutes or i in orb:
+                continue
+            if m + interval > ORB_LAST_ENTRY:
+                break
+            c = cs[i]["close"]
+            side = "CE" if c > hi else "PE" if c < lo else None
+            if not side:
+                continue
+            r = rec.get(i)
+            atr = r.get("atr") if r else None
+            if not atr:
+                break
+            if variant == "with_trend" and r.get("side") != side:
+                break                                     # the first break did not agree with the engine: no trade that day
+            if variant == "width" and not 0.5 <= (hi - lo) / atr <= 2.5:
+                break
+            out.append({**r, "side": side, "or_high": hi, "or_low": lo, "or_width_atr": round((hi - lo) / atr, 2)})
+            break
+    return out
+
+
+def orb_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop):
+    days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    tr = lambda rows: [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
+    out = {"baseline": stats(tr(conf_rows)), "variants": []}
+    for orm in (15, 30):
+        for variant, label in (("plain", "break alone"), ("with_trend", "engine leans the same side"), ("width", "range 0.5-2.5 ATR wide")):
+            rows = evaluate(cs, orb_events(cs, replayed, interval, orm, variant), interval, horizon, cost, target, stop, with_extras=True)
+            v = {"or_minutes": orm, "variant": variant, "label": f"ORB {orm} min - {label}", "trail": stats(tr(rows)),
+                 "points": stats([r["pnl"] for r in rows]), "fixed_atr": stats([r["atr_grid"]["1.5/1.5"] for r in rows if "1.5/1.5" in r.get("atr_grid", {})]),
+                 "trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "or_width_atr": r.get("or_width_atr"),
+                             "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r in rows][:30]}
+            if cut:
+                v["first"] = stats(tr([r for r in rows if r["day"] < cut]))
+                v["second"] = stats(tr([r for r in rows if r["day"] >= cut]))
+            e, f_, s_ = v["trail"], v.get("first") or {}, v.get("second") or {}
+            both = bool(f_.get("n")) and bool(s_.get("n")) and f_.get("avg", 0) > 0 and s_.get("avg", 0) > 0
+            v["verdict"] = ("no trades" if not e.get("n") else
+                            "works - positive in both halves with 15+ trades; worth a live paper test" if both and e["n"] >= 15 and e["avg"] > 0 else
+                            "positive, not proven (need 15+ trades, positive in both halves)" if e.get("avg", 0) > 0 else
+                            "loses in this period")
+            out["variants"].append(v)
+    return out
+
+
 # ---------------------------------------------------------------- v1.20.13 support / resistance: does buying at the level work?
 def _sr_at(cs, i, atr, interval, symbol, cache=None, every=6):
     """S/R zones as they were known when bar i closed (same rules as the terminal's S/R map). Recomputed every `every` bars."""
@@ -964,6 +1034,17 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                           + (f"; what else blocked them: " + ", ".join(f"{b['gate']} ({b['bars']})" for b in pr.get('pattern_blockers', [])[:3]) if pr.get("pattern_blockers") else "") + "."})
     except Exception as exc:
         rep["pattern_rule"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    try:                       # v1.20.22: Opening Range Breakout - a separate strategy, measured on the same days
+        ob = orb_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop)
+        rep["orb"] = ob
+        best = max((v for v in ob["variants"] if v["trail"].get("n")), key=lambda v: v["trail"].get("total", 0), default=None)
+        if best:
+            rep["verdict"].insert(2, {"level": "action" if best["verdict"].startswith("works") else "info",
+                                      "text": f"Opening Range Breakout (not used by the app) - best variant “{best['label']}”: {best['trail']['n']} trades, "
+                                              f"{best['trail']['win_rate']}% winners, {best['trail']['avg']:+.1f} pts each, {best['trail']['total']:+.0f} total (live trailing exit) "
+                                              f"vs current signals {ob['baseline'].get('avg', 0):+.1f} each. Verdict: {best['verdict']}."})
+    except Exception as exc:
+        rep["orb"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.20: leading triggers instead of the lagging pullback trigger
         ld = leading_compare(cs, replayed, interval, horizon, cost, target, stop, mode)
         rep["leading"] = ld

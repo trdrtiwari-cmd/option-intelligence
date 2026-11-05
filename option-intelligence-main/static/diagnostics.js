@@ -95,6 +95,19 @@
       table($("wfTable"), ["Exit (target / stop)", "All: win · avg", "First half", "Second half"], rows.map(x => [`${x.target}${u(x)} / ${x.stop}${u(x)}`,
         `${x.all.win_rate}% · ${num(x.all.avg)}`, `${x.first.win_rate}% · ${num(x.first.avg)}`, `${x.second.win_rate}% · ${num(x.second.avg)}`]));
     }
+    const ob = rep.orb;
+    if (ob && $("orbTable")) {
+      const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";
+      if (ob.error) table($("orbTable"), ["ORB"], [["Could not run: " + ob.error]]);
+      else {
+        table($("orbTable"), ["Strategy", "Trailing exit (live)", "1st half", "2nd half", "Fixed 1.5/1.5 ATR", `Points (${P.target}/${P.stop})`, "Total (trailing)", "Verdict"],
+          [["Current signals", sc(ob.baseline), "", "", "", "", num(ob.baseline.total, 0), ""]].concat(ob.variants.map(v => [v.label, sc(v.trail), sc(v.first), sc(v.second), sc(v.fixed_atr), sc(v.points),
+            num(v.trail.total, 0), { text: v.verdict, cls: v.verdict.startsWith("works") ? "green" : v.verdict.startsWith("loses") ? "red" : "" }])));
+        const best = ob.variants.filter(v => v.trail.n).sort((a, b) => (b.trail.total || 0) - (a.trail.total || 0))[0];
+        table($("orbTrades"), [`Trades - ${best ? best.label : "none"}`, "Side", "Range (ATR)", "Result (pts, trailing)"],
+          best && best.trades.length ? best.trades.map(x => [`${x.day} ${x.time}`, x.side, x.or_width_atr, { text: num(x.pts), cls: x.pts > 0 ? "green" : "red" }]) : [["None", "", "", ""]]);
+      }
+    }
     const ld = rep.leading;
     if (ld && $("leadTable")) {
       const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";
