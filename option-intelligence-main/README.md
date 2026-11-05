@@ -1,5 +1,12 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.2 - option last price fixes, monitor times
+
+* **Option price jumping between strikes:** the automatic "2 strikes ITM" pick moves with every 50-pt index move, and the chart followed it, so the last price jumped between contracts with very different premiums. The chart now stays on the contract chosen for a setup; it switches only when the side changes (CE↔PE) or a new setup starts after WAIT.
+* **Header price snapping back:** in the option view the 30 s candle reload set the last price to the REST candle close (can lag the live tick by up to a minute). A fresh live tick now always wins.
+* **Option chain flicker:** an illiquid strike with no trade for 15 s flipped from the live tick back to the older REST snapshot. The newest price now wins.
+* **Monitor:** times shown in IST (were UTC, e.g. 05:31 instead of 11:01); BANKNIFTY findings labelled BANKNIFTY; "not bought but paid" now needs +15 % with the test target (or +30 %), not +4 %.
+
 ## v1.20.1 - free ways to get the AI review
 
 * **Download for Claude** (free, uses your Claude chat plan): Signals page → Claude strategy monitor → *Download for Claude*. You get `strategy-review-YYYY-MM-DD.json` with the review instructions and the day's data (trades, losses + causes, missed moves + blocking gates, setups not bought that paid, replay of the last 10 days, code suggestions). Upload it in a Claude chat and write "review this day". Uses the "To date" filter, else today. `GET /api/monitor/export?day=YYYY-MM-DD`.

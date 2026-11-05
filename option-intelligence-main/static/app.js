@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.1";
+const FRONTEND_VERSION="1.20.2";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -349,12 +349,17 @@ function renderBuyPlan(a){
   $("bpNote").textContent=ok?"Paper signal, recorded in the Daily Signal Log with these levels. Index levels decide the exit; the premium levels are delta/gamma estimates.":
     plan?("No buy: "+bad.map(c=>`${c.label} — ${c.detail}`).join(" · ")):"Strike chosen automatically (2 strikes in the money on the signal side, by default). Stop-loss and target are set when the signal is confirmed and passes the profit check.";
 }
-let lastAutoOptionKey=null;
+let lastAutoOptionKey=null,lastAutoSide=null;
 function autoSwitchOption(a){
   const pk=a&&a.option_pick,lvl=a&&a.final&&a.final.level;
-  if(!pk||!pk.instrument_key||!["WATCH","PENDING","CONFIRMED"].includes(lvl))return;
+  if(!pk||!pk.instrument_key||!["WATCH","PENDING","CONFIRMED"].includes(lvl)){if(!lvl||lvl==="WAIT")lastAutoSide=null;return}
   if(($("autoOption")&&$("autoOption").value)==="off"||pk.symbol!==getSymbol())return;
   if(lastAutoOptionKey===pk.instrument_key)return;              // once per contract: after that your own choice is left alone
+  // v1.20.2: stay on the contract chosen for this setup. The "2 strikes ITM" pick moves with every 50-pt index move, and following it
+  // made the chart / last price jump between strikes (very different premiums). Switch again only when the side changes or a new
+  // setup starts after a WAIT.
+  if(lastAutoSide===pk.type&&paperSelected&&paperSelected.type===pk.type)return;
+  lastAutoSide=pk.type;
   lastAutoOptionKey=pk.instrument_key;
   if(pk.lot_size)chainLotSize=pk.lot_size;
   if(!(paperSelected&&paperSelected.instrument_key===pk.instrument_key))selectPaperContract(pk.type,pk.strike,pk.instrument_key,pk.ltp,pk.expiry,null);
@@ -500,7 +505,7 @@ function renderCandles(candles){
   const vwapLegend=document.querySelector(".vwap-legend"),vwapIsVol=!!vw.at(-1)?.volumeBased;
   if(vwapLegend)vwapLegend.textContent=vwapIsVol?"━ VWAP":"━ Session avg price (no index volume)";
   if($("vwapLabel"))$("vwapLabel").textContent=vwapIsVol?"VWAP (session)":"Session avg price (no volume)";
-  if(unique.length){const last=unique.at(-1),rsi=rsiValue(closes),atr=atrValue(unique),volume=last.volume,avgVol=unique.slice(-21,-1).reduce((a,c)=>a+c.volume,0)/Math.max(1,unique.slice(-21,-1).length);$("lastPrice").textContent=fmt(last.close);$("chartSubtitle").textContent=chartSource==="option"&&paperSelected?`${paperSelectedLabel()} · ${getInterval()}-minute premium OHLC`:`${getSymbol()==="NIFTY"?"NIFTY 50":"BANK NIFTY"} · ${getInterval()}-minute OHLC`;
+  if(unique.length){const last=unique.at(-1),rsi=rsiValue(closes),atr=atrValue(unique),volume=last.volume,avgVol=unique.slice(-21,-1).reduce((a,c)=>a+c.volume,0)/Math.max(1,unique.slice(-21,-1).length);$("lastPrice").textContent=fmt(liveOptLtp()??last.close);$("chartSubtitle").textContent=chartSource==="option"&&paperSelected?`${paperSelectedLabel()} · ${getInterval()}-minute premium OHLC`:`${getSymbol()==="NIFTY"?"NIFTY 50":"BANK NIFTY"} · ${getInterval()}-minute OHLC`;
     $("chartRsi").textContent=fmt(rsi);$("chartAtr").textContent=fmt(atr);$("chartVolume").textContent=avgVol>0?`${fmt(volume,0)} (${fmt(volume/avgVol,2)}x)`:`${fmt(volume,0)} · ratio N/A`;
     $("chartNote").textContent=chartSource==="option"?`Selected option premium candles · ${unique.length} bars. Indicators and support/resistance use this option's own candles. Historical data may be unavailable for illiquid/expired contracts.`:"Underlying index candles. Support/resistance zones are listed in the S/R map below; the nearest three per side are drawn. Choose Selected option premium, then select CE/PE from the option chain to switch the chart to that contract.";
     $("ema9").textContent=fmt(e9.at(-1));$("ema21").textContent=fmt(e21.at(-1));$("vwap").textContent=fmt(vw.at(-1)?.value);$("rsi").textContent=fmt(rsi);$("atr").textContent=fmt(atr);$("relVol").textContent=avgVol>0?`${fmt(volume/avgVol,2)}x`:"—";$("breakHigh").textContent=fmt(Math.max(...unique.slice(-20,-1).map(c=>c.high)));$("breakLow").textContent=fmt(Math.min(...unique.slice(-20,-1).map(c=>c.low)));
@@ -689,7 +694,8 @@ function renderFilteredChain(opts={}){
   filtered.forEach(r=>{
     const call=r.call_options||{},put=r.put_options||{},cm0=call.market_data||{},pm0=put.market_data||{};
     const lc=liveTickMap[call.instrument_key],lp=liveTickMap[put.instrument_key];
-    const cm=lc&&lc.fresh&&lc.ltp!=null?{...cm0,ltp:lc.ltp,oi:lc.oi??cm0.oi}:cm0,pm=lp&&lp.fresh&&lp.ltp!=null?{...pm0,ltp:lp.ltp,oi:lp.oi??pm0.oi}:pm0;
+    const newer=t=>t&&t.ltp!=null&&(t.fresh||(t._rx||0)>optionChainAt);   // v1.20.2: newest price wins - no flipping back to an older REST snapshot
+    const cm=newer(lc)?{...cm0,ltp:lc.ltp,oi:lc.oi??cm0.oi}:cm0,pm=newer(lp)?{...pm0,ltp:lp.ltp,oi:lp.oi??pm0.oi}:pm0;
     const tr=document.createElement("tr");
     const strike=Number(r.strike_price);
     if(atmStrike!==null&&Math.abs(strike-atmStrike)<0.001){tr.classList.add("atm-row");atmRow=tr}
@@ -709,7 +715,7 @@ function renderFilteredChain(opts={}){
   $("chainStatus").textContent=`Showing ${filtered.length} of ${rows.length} strikes${chainLotSize?` · lot size ${chainLotSize}`:""}${optionChainSpot?` · spot ${fmt(optionChainSpot)} · ATM ${fmt(atmStrike,0)}`:" · spot unavailable"}. ATM row highlighted. Select Use CE/Use PE. Near-ATM prices update from live WebSocket ticks; other rows are REST snapshots (refreshed every 10 s while the market is open).`;
 }
 function renderChain(data){
-  optionChainRows=data.data||data.chain||[];chainLotSize=data.lot_size||null;
+  optionChainRows=data.data||data.chain||[];optionChainAt=Date.now();chainLotSize=data.lot_size||null;
   if(!optionChainRows.length){$("chainStatus").textContent="Upstox returned zero option rows for this expiry. Try another listed expiry or check Render Logs.";renderFilteredChain();return}
   renderFilteredChain();
 }
@@ -749,11 +755,11 @@ async function refreshChainQuiet(){
   if(!/^\d{4}-\d{2}-\d{2}$/.test($("expiry").value||"")||!optionChainRows.length)return;
   try{
     const data=await api(`/api/option-chain?symbol=${encodeURIComponent(getSymbol())}&expiry_date=${encodeURIComponent($("expiry").value)}`);
-    optionChainRows=data.data||[];chainLotSize=data.lot_size||chainLotSize;renderFilteredChain({scroll:false});
+    optionChainRows=data.data||[];optionChainAt=Date.now();chainLotSize=data.lot_size||chainLotSize;renderFilteredChain({scroll:false});
   }catch{}
 }
 $("refreshBtn").addEventListener("click",refresh);
-$("symbol").addEventListener("change",()=>{
+$("symbol").addEventListener("change",()=>{lastAutoSide=null;lastAutoOptionKey=null;
   optionChainRows=[];chainLotSize=null;chartFitKey=null;lastDerivatives=null;
   $("chainRows").innerHTML='<tr><td colspan="8" class="empty">Loading expiries for this underlying…</td></tr>';
   renderLiveTicks([]);connectLiveSocket();refresh();
@@ -842,7 +848,7 @@ function renderLiveTicks(ticks){
   });
 }
 // ---------------- Real-time index price (V3 WebSocket tick -> forming candle) ----------------
-let liveTickMap={},lastChainPaint=0,lastIdxTick=null,restPriceBusy=false;
+let optionChainAt=0,liveTickMap={},lastChainPaint=0,lastIdxTick=null,restPriceBusy=false;
 function setLivePrice(ltp,closePrice,ageText,srcText,netChange=null,netChangePercent=null){
   if($("chartView").value!=="index")return;
   $("lastPrice").textContent=fmt(ltp);
@@ -873,6 +879,12 @@ function applyIndexTick(t){
   try{candleSeries.update(c)}catch{}
 }
 // Selected option on the chart: every WebSocket tick of that contract moves the last premium candle (no REST wait).
+// v1.20.2: in the option view the REST candles can lag the live tick by up to a minute; the header price must not jump back to them.
+function liveOptLtp(){
+  if(!(chartSource==="option"&&$("chartView").value==="option"&&paperSelected))return null;
+  const t=liveTickMap[paperSelected.instrument_key];
+  return t&&t.fresh&&Number(t.ltp)>0&&Date.now()-(t._rx||0)<5000?Number(t.ltp):null;
+}
 function applyOptionTick(t){
   if(!t||!t.fresh||!Number.isFinite(Number(t.ltp))||!currentCandles.length||!marketOpen)return;
   if(chartSource!=="option"||$("chartView").value!=="option"||!paperSelected||t.instrument_key!==paperSelected.instrument_key)return;
@@ -977,14 +989,14 @@ function connectLiveSocket(){
     try{
       const m=JSON.parse(ev.data);
       if(m.type==="index"){applyIndexTick(m.index);liveStamp();return}
-      if(m.type==="opt"){(m.ticks||[]).forEach(t=>{t={...t,fresh:!!t.fresh};if(t.instrument_key)liveTickMap[t.instrument_key]=t;if(paperSelected&&t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});liveStamp();return}
+      if(m.type==="opt"){(m.ticks||[]).forEach(t=>{t={...t,fresh:!!t.fresh,_rx:Date.now()};if(t.instrument_key)liveTickMap[t.instrument_key]=t;if(paperSelected&&t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});liveStamp();return}
       if(m.type==="bars"){if(m.interval===getInterval()){wsBarsAt=Date.now();mergeLiveBars(m);liveStamp()}return}
       if(m.type==="analysis"){onLiveAnalysis(m);return}
       const ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));
       renderLiveTicks(ticks);
       applyIndexTick(m.index);
       if(paperSelected)ticks.forEach(t=>{if(t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});
-      ticks.forEach(t=>{if(t.instrument_key)liveTickMap[t.instrument_key]=t});
+      ticks.forEach(t=>{if(t.instrument_key){t._rx=Date.now();liveTickMap[t.instrument_key]=t}});
       const nowMs=Date.now();if(nowMs-lastChainPaint>2000&&optionChainRows.length){lastChainPaint=nowMs;renderFilteredChain({scroll:false})}
       if(m.stream==="LIVE"){$("streamStatus").textContent="LIVE TICKS";$("streamStatus").className="pill live"}
       else{$("streamStatus").textContent=m.stream||"CONNECTING";$("streamStatus").className="pill stale"}

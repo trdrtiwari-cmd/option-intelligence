@@ -7,7 +7,9 @@ blocks a trade: suggestions are stored for the owner to accept or ignore.
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+IST = timezone(timedelta(hours=5, minutes=30))     # v1.20.2: stamps in IST (the server runs in UTC, which showed 05:31 for 11:01)
 
 MIN_SL_ATR = 1.5
 
@@ -87,7 +89,7 @@ def _conn(db_path):
 def add_event(db_path, ev, lock=None):
     """Insert one finding. The same (day, dedupe) is stored once, so a problem that persists is not repeated. Returns the new id or None."""
     row = {c: ev.get(c) for c, _ in EVENT_COLS}
-    row["created_at"] = row["created_at"] or datetime.now().astimezone().isoformat(timespec="seconds")
+    row["created_at"] = row["created_at"] or datetime.now(IST).isoformat(timespec="seconds")
     if isinstance(row["detail"], (dict, list)):
         row["detail"] = json.dumps(row["detail"], default=str)
 
@@ -115,7 +117,7 @@ def set_note(db_path, event_id, note, model, lock=None):
 
 def add_review(db_path, rv, lock=None):
     row = {c: rv.get(c) for c, _ in REVIEW_COLS}
-    row["created_at"] = row["created_at"] or datetime.now().astimezone().isoformat(timespec="seconds")
+    row["created_at"] = row["created_at"] or datetime.now(IST).isoformat(timespec="seconds")
     for k in ("suggestions", "context"):
         if isinstance(row[k], (dict, list)):
             row[k] = json.dumps(row[k], default=str)
@@ -264,6 +266,9 @@ def check_trades(rows, min_sl_atr=MIN_SL_ATR, squareoff="15:20"):
                             "title": f"{name} {t}: premium moved {actual:+.1f} vs {expected:+.1f} expected from delta {abs(dl):.2f}",
                             "detail": {"trade_id": rid, "index_move": round(idx_move, 1), "premium_move": round(actual, 1), "expected": round(expected, 1)},
                             "dedupe": f"opt-delta-{rid}"})
+    sym = {r.get("id"): r.get("symbol") for r in rows}
+    for f in out:
+        f["symbol"] = sym.get(f["detail"].get("trade_id"))
     return out
 
 
@@ -307,7 +312,7 @@ def losses(rows):
             c = loss_causes(r)
             name = r.get("option_name") or f"{r.get('symbol')} {r.get('side')}"
             t = str(r.get("generated_at") or "")[11:16]
-            out.append({"kind": "LOSS", "severity": "medium", "title": f"Loss {net:+.1f} pts: {name} {t} - " + (c[0]["cause"] if c else "see detail"),
+            out.append({"kind": "LOSS", "severity": "medium", "symbol": r.get("symbol"), "title": f"Loss {net:+.1f} pts: {name} {t} - " + (c[0]["cause"] if c else "see detail"),
                         "detail": {"trade_id": r.get("id"), "net_points": net, "net_rs": _f(r.get("net_pnl_rs")), "causes": c,
                                    "peak": _f(r.get("peak_points")), "worst": _f(r.get("worst_points")), "atr": _f(r.get("atr_at_entry")),
                                    "score": r.get("score"), "regime": r.get("regime"), "pattern": r.get("pattern")},
@@ -337,9 +342,10 @@ def missed_from_board(board_rows):
         if r.get("stage") not in ("WATCH", "SETUP", "NO BUY", "FAILED"):
             continue
         best = _f(r.get("best_pct_60"))
-        if r.get("test_result") == "TARGET" or (best is not None and best >= 30):
+        # v1.20.2: a +4 % premium is not a missed trade - need the test target AND a real premium gain, or +30 %
+        if best is not None and ((r.get("test_result") == "TARGET" and best >= 15) or best >= 30):
             t = str(r.get("created_at") or "")[11:16]
-            out.append({"kind": "MISSED", "severity": "info",
+            out.append({"kind": "MISSED", "severity": "info", "symbol": r.get("symbol"),
                         "title": f"{r.get('stage')} {r.get('option_name') or r.get('side')} {t} not bought - option then went +{best or 0:.0f}% in 60 min",
                         "detail": {"board_id": r.get("id"), "stage": r.get("stage"), "reason": r.get("reason"), "score": r.get("score"),
                                    "best_pct_60": best, "test_result": r.get("test_result")},
