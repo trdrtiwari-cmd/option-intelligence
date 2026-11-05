@@ -226,7 +226,8 @@ def signal_age_limits(rules, interval):
     return fresh, max(expire, fresh)
 
 
-def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard", reconfirm=None, daily_losses=None, max_daily_losses=0):
+def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard", reconfirm=None, daily_losses=None, max_daily_losses=0,
+         side_buys=None, current_bar=None):
     """Combine technical analysis `a` (indicators.analyze output) with the dashboard final signal `dash`
     (dashboard_data.final_signal output). `reconfirm` = {"tracker", "name", "window", "price", "ts"} switches on the hold-and-recheck
     step: a setup that passes every other gate is PENDING until the tracker has seen it hold for `window` seconds. Returns {"gates": [...extra hard gates...], "final": {...}, "timing": {...}, "dashboard": {...}}."""
@@ -330,6 +331,15 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
         # period's profit; stopping after 2 losses cut that day's damage and lifted the 11-day total from +63 to +140 pts (scalp).
         gates.append({"label": f"Daily loss limit (max {max_daily_losses} stop-outs per day)", "pass": daily_losses < max_daily_losses,
                       "detail": f"{daily_losses} stop-out(s) logged today" + ("" if daily_losses < max_daily_losses else " — no more entries today; the market is not paying this setup")})
+    if side and side_buys is not None:
+        # v1.20.23: only the first BUY per side per day. Replay (6 Oct - 5 Nov, NIFTY 5m standard): 1st same-side signal 9 trades 89% / +21.5 pts,
+        # 2nd or later 5 trades 40% / -4.0. The bar that produced today's first BUY still passes, so that BUY is not cancelled after it is logged.
+        got = side_buys.get(side) or {}
+        n_ = int(got.get("count") or 0)
+        same_bar = bool(current_bar) and n_ == 1 and str(got.get("first") or "") == str(current_bar)
+        gates.append({"label": "One trade per side per day", "pass": n_ == 0 or same_bar,
+                      "detail": (f"no {side} BUY yet today" if n_ == 0 else "this is today's first " + side + " BUY") if (n_ == 0 or same_bar)
+                                else f"{n_} {side} BUY already taken today (first at {got.get('first')}) — later same-side signals lost in the replay"})
     rc = None
     cand = bool(side) and tech_level == "CONFIRMED" and all(g["pass"] for g in gates)
     if reconfirm:

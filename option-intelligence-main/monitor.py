@@ -431,7 +431,7 @@ def board_gate_stats(board_rows):
 # ---------------------------------------------------------------- 5. drift and suggestions from the recent replay
 def drift(today_stats, rep):
     """Today's live result versus the recent replay. Only flagged with 3+ closed trades today."""
-    le = rep.get("live_exit") or {}
+    le = rep.get("live_trail") or rep.get("live_exit") or {}
     n, win = today_stats.get("closed", 0), today_stats.get("win_rate")
     if n < 3 or win is None or not le.get("n"):
         return []

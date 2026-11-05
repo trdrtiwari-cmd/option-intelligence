@@ -169,3 +169,23 @@ def test_signal_age_limits_per_timeframe():
     assert sf_.signal_age_limits(std, 5) == (15, 60) and sf_.signal_age_limits(scalp, 5) == (10, 30)     # 5-minute: unchanged
     assert sf_.signal_age_limits(std, 15) == (30, 60) and sf_.signal_age_limits(scalp, 15) == (30, 60)   # 15-minute: 2 / 4 bars
     assert sf_.signal_age_limits(std, 1) == (3, 12)
+
+
+def test_one_trade_per_side_per_day():
+    # off (None) never blocks; no BUY yet passes
+    assert sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, side_buys=None)["final"]["level"] == "CONFIRMED"
+    side = F.tech().get("side")
+    ok = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, side_buys={})
+    assert ok["final"]["level"] == "CONFIRMED" and any(g["label"] == "One trade per side per day" and g["pass"] for g in ok["gates"])
+    # a BUY on the same side already taken today blocks a later bar
+    blocked = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5,
+                      side_buys={side: {"count": 1, "first": "2026-11-05 09:50"}}, current_bar="2026-11-05 10:40")
+    assert blocked["final"]["level"] != "CONFIRMED"
+    # the bar that produced today's first BUY keeps passing (the BUY is not cancelled after it is logged)
+    same = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5,
+                   side_buys={side: {"count": 1, "first": "2026-11-05 09:50"}}, current_bar="2026-11-05 09:50")
+    assert same["final"]["level"] == "CONFIRMED"
+    # the other side is not limited
+    other = "PE" if side == "CE" else "CE"
+    assert sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5,
+                   side_buys={other: {"count": 3, "first": "x"}}, current_bar="y")["final"]["level"] == "CONFIRMED"

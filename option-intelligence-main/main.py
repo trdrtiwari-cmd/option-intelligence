@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.22"
+APP_VERSION = "1.20.23"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1012,6 +1012,7 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
             rep = dgn.run(result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw, htf_interval=htf_interval,
                           volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop, score_min=score_min,
                           pattern_minutes=pattern_minutes or None,
+                          live_plan=OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
                           progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
             rep["params"]["volume_source"] = result.get("volume_source")
             job.update(status="done", report=rep, progress=1.0, stage="Done")
@@ -1634,6 +1635,28 @@ def stopouts_today(symbol):
         return int(row[0] or 0)
     except Exception as exc:
         logger.debug("stopouts_today failed: %s", str(exc)[:120])
+        return None
+
+
+ONE_TRADE_PER_SIDE_DEFAULT = os.getenv("ONE_TRADE_PER_SIDE", "off").strip().lower() in ("1", "on", "true", "yes")
+
+
+def one_per_side_on():
+    """v1.20.23: Signals-page setting (owner) wins; else the ONE_TRADE_PER_SIDE env (default off)."""
+    v = OPTION_OVERRIDES.get("one_per_side")
+    return ONE_TRADE_PER_SIDE_DEFAULT if v in (None, "") else str(v).lower() == "on"
+
+
+def side_buys_today(symbol, interval, mode):
+    """{side: count} of BUY signals logged today for this symbol / timeframe / mode (the 'one trade per side per day' rule)."""
+    try:
+        today = datetime.now(IST).date().isoformat()
+        with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+            rows = db.execute("SELECT side, COUNT(*), MIN(candle_time) FROM signal_log WHERE session_date=? AND symbol=? AND interval=? AND mode=? GROUP BY side",
+                              (today, symbol, int(interval), mode)).fetchall()
+        return {str(r[0]).upper(): {"count": int(r[1] or 0), "first": r[2]} for r in rows}
+    except Exception as exc:
+        logger.debug("side_buys_today failed: %s", str(exc)[:120])
         return None
 
 
@@ -2899,7 +2922,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side")
 
 
 def _set_option_overrides(d):
@@ -2955,6 +2978,7 @@ async def signal_log_config():
             "min_sl_atr": op.MIN_SL_ATR, "entry_windows": sf.entry_windows_text(),
             "exit_plans": {k: v["label"] for k, v in op.EXIT_PLANS.items()},
             "leading_trigger": __import__("leading").LEADING_TRIGGER, "chart_pattern_mode": __import__("indicators").CHART_PATTERN_MODE,
+            "one_per_side": "on" if one_per_side_on() else "off",
             "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
             "option": {"steps": oc["steps"], "moneyness": oc["moneyness"], "lots": oc["lots"], "charges_rs": oc["charges_rs"], "min_rr": oc["min_rr"],
                        "custom": bool(OPTION_OVERRIDES)}}
@@ -2971,6 +2995,7 @@ class SignalLogConfig(BaseModel):
     opt_min_rr: Optional[float] = None      # minimum index reward : risk for a BUY
     opt_exit_plan: Optional[str] = None     # v1.19.1: balanced | winrate
     opt_pattern_minutes: Optional[int] = None   # v1.20.18: chart-pattern window 60-120 min
+    opt_one_per_side: Optional[str] = None      # v1.20.23: "on" | "off" - only the first BUY per side per day
 
 
 @app.post("/api/signals/config")
@@ -3011,6 +3036,10 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         if payload.opt_exit_plan not in op.EXIT_PLANS:
             raise HTTPException(400, "Exit plan must be one of: " + ", ".join(op.EXIT_PLANS))
         new["opt_exit_plan"] = payload.opt_exit_plan
+    if payload.opt_one_per_side:
+        if payload.opt_one_per_side.lower() not in ("on", "off"):
+            raise HTTPException(400, "One trade per side must be on or off")
+        new["opt_one_per_side"] = payload.opt_one_per_side.lower()
     import chart_patterns as _cpm
     if payload.opt_pattern_minutes is not None:
         if payload.opt_pattern_minutes not in _cpm.ALLOWED_MINUTES:
@@ -3267,7 +3296,9 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
         live_px = _live_index_price(sym) or (_float_or_none(result["candles"][-1].get("close")) if result.get("candles") else None)
         fused = sf.fuse(a, dash, replay, track, datetime.now(IST), market["open"], interval, mode=mode,
                         reconfirm={"tracker": RECONFIRM, "name": rc_name, "window": reconfirm, "price": live_px, "ts": time.time()} if sym in INDEX_KEYS else None,
-                        daily_losses=stopouts_today(sym) if MAX_DAILY_LOSSES else None, max_daily_losses=MAX_DAILY_LOSSES)
+                        daily_losses=stopouts_today(sym) if MAX_DAILY_LOSSES else None, max_daily_losses=MAX_DAILY_LOSSES,
+                        side_buys=side_buys_today(sym, interval, mode) if (one_per_side_on() and sym in INDEX_KEYS) else None,
+                        current_bar=str(a.get("last_closed_bar") or ""))
         a["reconfirm"] = fused.get("reconfirm")
         final = fused["final"]
         # v1.19: WATCH / PENDING / CONFIRMED -> the option 2 strikes from ATM on the trade side (the terminal switches its chart to it)

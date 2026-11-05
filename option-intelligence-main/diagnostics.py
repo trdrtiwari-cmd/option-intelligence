@@ -801,8 +801,17 @@ def orb_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop):
                 v["second"] = stats(tr([r for r in rows if r["day"] >= cut]))
             e, f_, s_ = v["trail"], v.get("first") or {}, v.get("second") or {}
             both = bool(f_.get("n")) and bool(s_.get("n")) and f_.get("avg", 0) > 0 and s_.get("avg", 0) > 0
+            fx = v.get("fixed_atr") or {}
+            solid = (e.get("se") or 0) > 0 and e.get("avg", 0) >= e["se"] and fx.get("avg", -1) > 0
+            # v1.20.23: "works" now also needs the average to clear 1 standard error AND the fixed 1.5 / 1.5 ATR exit to be positive -
+            # otherwise the profit comes from one or two big trailing winners and would vanish with a slightly different exit.
             v["verdict"] = ("no trades" if not e.get("n") else
-                            "works - positive in both halves with 15+ trades; worth a live paper test" if both and e["n"] >= 15 and e["avg"] > 0 else
+                            "works - positive in both halves, 15+ trades, beats its noise and also wins with a fixed exit; worth a live paper test"
+                            if both and e["n"] >= 15 and e["avg"] > 0 and solid else
+                            "fragile - positive in both halves with 15+ trades, but " + (
+                                f"the fixed 1.5/1.5 ATR exit loses ({fx.get('avg', 0):+.1f} pts) and " if fx.get("avg", -1) <= 0 else "") +
+                            f"the average ({e['avg']:+.1f}) is inside its noise (±{e.get('se') or 0:.1f}); a few big winners carry it - do not switch on"
+                            if both and e["n"] >= 15 and e["avg"] > 0 else
                             "positive, not proven (need 15+ trades, positive in both halves)" if e.get("avg", 0) > 0 else
                             "loses in this period")
             out["variants"].append(v)
@@ -959,7 +968,7 @@ def window_slots(cs, near, interval, horizon, cost, target, stop):
 
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70, live_window=True, pattern_minutes=None):
+        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70, live_window=True, pattern_minutes=None, live_plan=None):
     cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress, score_min=score_min,
                           live_window=live_window, pattern_minutes=pattern_minutes)
     confirmed, near = events_from(replayed)
@@ -993,15 +1002,32 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                     halves = f" First half {h1['win_rate']}% / {h1['avg']:+.1f}, second half {h2['win_rate']}% / {h2['avg']:+.1f}."
             rep["live_exit"] = {"plan": plan_key, "stop_atr": sl_m, "target_atr": tg_m, **a_}
             rep["verdict"].insert(0, {"level": "good" if a_["avg"] > 0 else "bad",
-                                      "text": f"Live exit plan (stop {sl_m:g} ATR / target {tg_m:g} ATR, square-off 15:20): {a_['n']} trades, {a_['win_rate']}% winners, "
+                                      "text": f"Fixed exit (stop {sl_m:g} ATR / target {tg_m:g} ATR, square-off 15:20): {a_['n']} trades, {a_['win_rate']}% winners, "
                                               f"{a_['avg']:+.1f} pts per trade ({a_['total']:+.0f} total).{halves}"})
+            # v1.20.23: the live default is the trailing plan - report it as the live result, with both halves
+            tv = [r["strat"][TRAIL_NAME] for r in conf_rows if TRAIL_NAME in (r.get("strat") or {})]
+            if tv:
+                t_ = stats(tv)
+                th = ""
+                if cut:
+                    t1 = stats([r["strat"][TRAIL_NAME] for r in conf_rows if r["day"] < cut and TRAIL_NAME in (r.get("strat") or {})])
+                    t2 = stats([r["strat"][TRAIL_NAME] for r in conf_rows if r["day"] >= cut and TRAIL_NAME in (r.get("strat") or {})])
+                    if t1.get("n") and t2.get("n"):
+                        th = f" First half {t1['win_rate']}% / {t1['avg']:+.1f}, second half {t2['win_rate']}% / {t2['avg']:+.1f}."
+                rep["live_trail"] = {"plan": "trail", **t_}
+                is_live = (live_plan or "trail") == "trail"
+                rep["verdict"].insert(0, {"level": "good" if t_["avg"] > 0 else "bad",
+                                          "text": ("Live exit plan" if is_live else "Trailing plan (not your live plan)")
+                                                  + f" (stop 1.5 ATR, trail 0.75 ATR once +1.2 ATR, square-off 15:20): {t_['n']} trades, {t_['win_rate']}% winners, "
+                                                    f"{t_['avg']:+.1f} pts per trade ({t_['total']:+.0f} total).{th}"
+                                                  + ("" if is_live else " Your Signals page is set to a fixed exit - the trailing plan did better here.")})
             atr_st = [x for x in rep.get("strategies", []) if x["name"].startswith("ATR ") and x.get("n", 0) >= MIN_N]
             if atr_st:
                 top = max(atr_st, key=lambda x: x["avg"])
                 better = top["avg"] > a_["avg"] + 1.0
                 rep["verdict"].insert(1, {"level": "action" if better else "info",
                                           "text": f"Same 1.5 ATR stop, managed exit: “{top['name']}” → {top['win_rate']}% winners, {top['avg']:+.1f} pts per trade "
-                                                  f"(n={top['n']}) versus {a_['avg']:+.1f} for the live 1.5/1.5 ATR plan. "
+                                                  f"(n={top['n']}) versus {a_['avg']:+.1f} for the fixed 1.5/1.5 ATR plan. "
                                                   + ("Letting winners run with a trailing stop beats the fixed target here — re-check on the next run before switching."
                                                      if better else "The fixed 1.5 ATR target is as good or better — keep it.")})
     except Exception:
