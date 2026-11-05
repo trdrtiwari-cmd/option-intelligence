@@ -679,6 +679,14 @@ def pattern_rule_compare(cs, replayed, interval, horizon, cost, target, stop, mo
                                                              "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r in added][:30]}
     out["removed"] = {"trail": stats(tr(removed)), "trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pattern": r.get("pattern"),
                                                                  "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r in removed][:30]}
+    # why the rule did (not) add trades: how many bars had a pattern breakout on the engine's side, and what else blocked them
+    pbars = [r for r in replayed if (r.get("pe") or {}).get("pattern_ok")]
+    blk = {}
+    for r in pbars:
+        for f_ in [x for x in (_pattern_failed(r, mode, "new") or [])]:
+            blk[f_] = blk.get(f_, 0) + 1
+    out["pattern_bars"] = len(pbars)
+    out["pattern_blockers"] = sorted(({"gate": k, "bars": v} for k, v in blk.items()), key=lambda x: -x["bars"])[:8]
     o, n = out["old"]["trail"], out["new"]["trail"]
     nf, ns = out["new"].get("first") or {}, out["new"].get("second") or {}
     of, os_ = out["old"].get("first") or {}, out["old"].get("second") or {}
@@ -687,6 +695,45 @@ def pattern_rule_compare(cs, replayed, interval, horizon, cost, target, stop, mo
                       "pattern rule better in both halves - keep it" if both_better and n.get("total", 0) > o.get("total", 0) else
                       "pattern rule worse - set CHART_PATTERN_MODE=info" if n.get("total", 0) < o.get("total", 0) else
                       "mixed - keep watching")
+    return out
+
+
+# ---------------------------------------------------------------- v1.20.20 leading triggers instead of the pullback trigger
+def leading_compare(cs, replayed, interval, horizon, cost, target, stop, mode):
+    """For each leading trigger (leading.py): entries where it fires on a bar whose ONLY missing piece (old rules) was the entry trigger
+    ('strict'), and entries where it fires with just the engine's side, the score and the entry window ('loose'). Live trailing exit."""
+    import leading as _ld
+    days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    tr = lambda rows: [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
+    base = evaluate(cs, _run_starts(replayed, lambda r: (lambda f: f is not None and not f)(_pattern_failed(r, mode, "old"))),
+                    interval, horizon, cost, target, stop, with_extras=True)
+    base_keys = {(r["i"], r["side"]) for r in base}
+    out = {"baseline": stats(tr(base)), "baseline_total": round(sum(tr(base)), 1), "kinds": []}
+    for kind in _ld.KINDS:
+        for variant in ("strict", "loose"):
+            def ok(r, kind=kind, variant=variant):
+                f = _pattern_failed(r, mode, "old")
+                if f is None or not _ld.fires(cs, r["i"], r["side"], kind):
+                    return False
+                rest = [x for x in f if x not in TRIG_LABELS]
+                if variant == "loose":
+                    rest = [x for x in rest if x.startswith(("Score", "Entry time window"))]
+                return not rest
+            rows = evaluate(cs, _run_starts(replayed, ok), interval, horizon, cost, target, stop, with_extras=True)
+            extra = [r for r in rows if (r["i"], r["side"]) not in base_keys]
+            d = {"kind": kind, "label": _ld.LABELS[kind], "variant": variant, "entries": stats(tr(rows)), "extra": stats(tr(extra)),
+                 "combined_total": round(sum(tr(base)) + sum(tr(extra)), 1)}
+            if cut:
+                d["extra_first"] = stats(tr([r for r in extra if r["day"] < cut]))
+                d["extra_second"] = stats(tr([r for r in extra if r["day"] >= cut]))
+            e, f_, s_ = d["extra"], d.get("extra_first") or {}, d.get("extra_second") or {}
+            both = bool(f_.get("n")) and bool(s_.get("n")) and f_.get("avg", 0) > 0 and s_.get("avg", 0) > 0
+            d["verdict"] = ("no extra entries" if not e.get("n") else
+                            "adds profit in both halves (15+ trades) - candidate for LEADING_TRIGGER" if both and e["n"] >= 15 and e["avg"] > 0 else
+                            "positive, not proven yet (need 15+ extra trades, positive in both halves)" if e.get("avg", 0) > 0 else
+                            "loses - do not use")
+            out["kinds"].append(d)
     return out
 
 
@@ -911,9 +958,23 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                   "text": f"Chart-pattern rule (pattern breakout can confirm, opposite breakout blocks) vs old rule, live trailing exit: "
                                           f"{n_.get('n', 0)} trades {n_.get('avg', 0):+.1f} pts each ({n_.get('total', 0):+.0f} total) vs {o.get('n', 0)} trades "
                                           f"{o.get('avg', 0):+.1f} ({o.get('total', 0):+.0f}); added {pr['added']['trail'].get('n', 0)}, removed {pr['removed']['trail'].get('n', 0)}. "
-                                          f"Verdict: {pr['verdict']}."})
+                                          f"Verdict: {pr['verdict']}. Bars with a pattern breakout on the engine's side: {pr.get('pattern_bars', 0)}"
+                                          + (f"; what else blocked them: " + ", ".join(f"{b['gate']} ({b['bars']})" for b in pr.get('pattern_blockers', [])[:3]) if pr.get("pattern_blockers") else "") + "."})
     except Exception as exc:
         rep["pattern_rule"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    try:                       # v1.20.20: leading triggers instead of the lagging pullback trigger
+        ld = leading_compare(cs, replayed, interval, horizon, cost, target, stop, mode)
+        rep["leading"] = ld
+        best = max((k for k in ld["kinds"] if k["extra"].get("n")), key=lambda k: k["combined_total"], default=None)
+        if best:
+            rep["verdict"].insert(1, {"level": "action" if best["verdict"].startswith("adds") else "info",
+                                      "text": f"Best leading trigger: {best['label']} ({best['variant']}) adds {best['extra']['n']} trades, "
+                                              f"{best['extra']['win_rate']}% winners, {best['extra']['avg']:+.1f} pts each (live trailing exit); "
+                                              f"total {best['combined_total']:+.0f} vs {ld['baseline_total']:+.0f} now. Verdict: {best['verdict']}."})
+        else:
+            rep["verdict"].insert(1, {"level": "info", "text": "Leading triggers (RSI divergence, Stochastic, MACD turn) added no entries in this period."})
+    except Exception as exc:
+        rep["leading"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.13: entries at support / resistance reversals (the owner's idea), measured
         sv = sr_reversal_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop, symbol)
         rep["sr_reversal"] = sv

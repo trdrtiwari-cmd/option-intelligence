@@ -105,6 +105,7 @@ LAG_RELIEF = _os.getenv("LAG_RELIEF", "1") != "0"
 # the last-candle confirmation / the pullback trigger) and a pattern breakout AGAINST the side blocks it; info = shown and recorded only.
 CHART_PATTERN_MODE = (_os.getenv("CHART_PATTERN_MODE", "include").strip().lower() or "include")
 import chart_patterns as _cp
+import leading as _lead
 RSI_MOMENTUM = float(_os.getenv("RSI_MOMENTUM", "40"))
 
 
@@ -680,13 +681,23 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
                 ok_mc, mc_detail = micro_continuation(cs, atr, side)
                 old = ok_pb or ok_mc
                 pattern_effects["trigger_old_ok"] = bool(old)
-                gates.append({"label": "Entry trigger (EMA 9 retest resumes, or break of the last pause)", "pass": old or (pat_on and pat_ok),
+                lead_ok = _lead.LEADING_TRIGGER != "off" and _lead.fires(cs, len(cs) - 1, side, _lead.LEADING_TRIGGER)
+                pattern_effects["leading_ok"] = lead_ok
+                if lead_ok and not old and not (pat_on and pat_ok):
+                    pb_detail = f"Leading trigger: {_lead.LABELS[_lead.LEADING_TRIGGER]}"
+                    old_disp = True
+                else:
+                    old_disp = False
+                gates.append({"label": "Entry trigger (EMA 9 retest resumes, or break of the last pause)", "pass": old or (pat_on and pat_ok) or lead_ok,
                               "detail": ("Retest: " + pb_detail) if ok_pb else ("Pause break: " + mc_detail) if ok_mc else
-                                        ("Chart pattern: " + pat_txt) if (pat_on and pat_ok) else f"{mc_detail} · {pb_detail}"})
+                                        ("Chart pattern: " + pat_txt) if (pat_on and pat_ok) else pb_detail if old_disp else f"{mc_detail} · {pb_detail}"})
             else:
                 pattern_effects["trigger_old_ok"] = bool(ok_pb)
-                gates.append({"label": "Pullback-and-resume trigger (retest holds)", "pass": ok_pb or (pat_on and pat_ok),
-                              "detail": pb_detail if ok_pb or not (pat_on and pat_ok) else "Chart pattern: " + pat_txt})
+                lead_ok = _lead.LEADING_TRIGGER != "off" and _lead.fires(cs, len(cs) - 1, side, _lead.LEADING_TRIGGER)
+                pattern_effects["leading_ok"] = lead_ok
+                gates.append({"label": "Pullback-and-resume trigger (retest holds)", "pass": ok_pb or (pat_on and pat_ok) or lead_ok,
+                              "detail": pb_detail if ok_pb else ("Chart pattern: " + pat_txt) if (pat_on and pat_ok) else
+                                        f"Leading trigger: {_lead.LABELS[_lead.LEADING_TRIGGER]}" if lead_ok else pb_detail})
     failed = [g for g in gates if not g["pass"]]
     if side and not failed:
         signal = f"CONFIRMED_{side}"

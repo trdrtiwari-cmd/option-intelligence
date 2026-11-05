@@ -1,5 +1,12 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.20 - leading triggers tested against the lagging pullback trigger; why the pattern rule adds nothing
+
+* **Pattern rule explained in Diagnostics:** the verdict now says how many bars had a pattern breakout on the engine's side and which other rules blocked them (e.g. "Not a fresh breakout bar", "Not sideways"), so "added 0" can be read.
+* **New `leading.py`** with three leading entry triggers that turn before the moving averages: RSI divergence, Stochastic cross out of oversold / overbought, MACD histogram turn (no look-ahead).
+* **Diagnostics "Leading triggers" table:** for each trigger, *strict* (fires when every other rule already passed) and *loose* (only side + score + entry window), the extra trades over the current rules, first / second half on the live trailing exit, total, verdict.
+* **Live switch (off by default):** `LEADING_TRIGGER=rsi_div | stoch | macd_turn` on Render makes that trigger an alternative to the pullback trigger. Turn it on only for a trigger whose extra trades are positive in both halves with 15+ trades.
+
 ## v1.20.19 - pattern breakouts count during the retest
 
 The first 30-day check of the chart-pattern rule showed "added 0, removed 0": a pattern counted only ON the breakout candle, and that is exactly the candle the "Not a fresh breakout bar (wait for the retest)" and "Not chasing" rules block - so it could never confirm anything. A breakout now stays valid for up to 6 candles (`CHART_PATTERN_HOLD_BARS`) while every close holds beyond the trigger (a retest may dip 0.25 ATR back) and the invalidation level is never crossed - the classic "break, retest, go" entry. Shown as e.g. "Bull flag breakout (retest holding) · broke 3 candles ago, holding above 24515". If the latest breakout fails its retest, older ones are not used.

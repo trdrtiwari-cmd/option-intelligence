@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.19"
+APP_VERSION = "1.20.20"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2954,6 +2954,7 @@ async def signal_log_config():
             "exit_plan": OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
             "min_sl_atr": op.MIN_SL_ATR, "entry_windows": sf.entry_windows_text(),
             "exit_plans": {k: v["label"] for k, v in op.EXIT_PLANS.items()},
+            "leading_trigger": __import__("leading").LEADING_TRIGGER, "chart_pattern_mode": __import__("indicators").CHART_PATTERN_MODE,
             "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
             "option": {"steps": oc["steps"], "moneyness": oc["moneyness"], "lots": oc["lots"], "charges_rs": oc["charges_rs"], "min_rr": oc["min_rr"],
                        "custom": bool(OPTION_OVERRIDES)}}

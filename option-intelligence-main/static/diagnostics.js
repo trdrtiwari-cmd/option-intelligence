@@ -95,6 +95,14 @@
       table($("wfTable"), ["Exit (target / stop)", "All: win · avg", "First half", "Second half"], rows.map(x => [`${x.target}${u(x)} / ${x.stop}${u(x)}`,
         `${x.all.win_rate}% · ${num(x.all.avg)}`, `${x.first.win_rate}% · ${num(x.first.avg)}`, `${x.second.win_rate}% · ${num(x.second.avg)}`]));
     }
+    const ld = rep.leading;
+    if (ld && $("leadTable")) {
+      const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";
+      if (ld.error) table($("leadTable"), ["Leading triggers"], [["Could not run: " + ld.error]]);
+      else table($("leadTable"), ["Trigger", "Variant", "All entries", "Extra trades", "Extra 1st half", "Extra 2nd half", "Total with extra", "Verdict"],
+        [["Current rules", "", sc(ld.baseline), "", "", "", num(ld.baseline_total, 0), ""]].concat(ld.kinds.map(k => [k.label, k.variant, sc(k.entries), sc(k.extra),
+          sc(k.extra_first), sc(k.extra_second), num(k.combined_total, 0), { text: k.verdict, cls: k.verdict.startsWith("adds") ? "green" : k.verdict.startsWith("loses") ? "red" : "" }])));
+    }
     const srv = rep.sr_reversal;
     if (srv && $("srTable")) {
       const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";

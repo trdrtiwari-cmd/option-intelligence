@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.19">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.19">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.20">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.20">
 </head>
 <body>
 <header class="topbar">
@@ -42,6 +42,7 @@
       <h3 class="dg-sub">How sensitive is the result to your cost allowance?</h3><div class="table-wrap"><table id="costTable"></table></div></section>
     <section class="panel"><h2>Where it wins and loses</h2><div id="groups" class="dg-groups"></div></section>
     <section class="panel"><div class="section-head"><div><h2>Win-rate finder — exits with ≥ 70 % winners in BOTH halves</h2><p id="wfNote">An exit only counts when it wins ≥ 70 % of trades with a positive average in the first half AND the second half of the period.</p></div></div><div class="table-wrap"><table id="wfTable" class="cardify"></table></div></section>
+    <section class="panel"><div class="section-head"><div><h2>Leading triggers instead of the pullback trigger</h2><p>Three triggers that turn before the moving averages: RSI divergence, Stochastic cross out of oversold / overbought, MACD histogram turn. <b>Strict</b>: fires on a bar where every other rule already passed. <b>Loose</b>: fires with only the engine's side, the score and the entry window. "Extra" = trades the current rules did not take. Judged on the live trailing exit, by half. Set the winner live with LEADING_TRIGGER on Render only if it adds profit in both halves with 15+ trades.</p></div></div><div class="table-wrap"><table id="leadTable"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>What-if: buy at support / sell at resistance reversals</h2><p>Entries where a bar touched a Medium / Strong support (CE) or resistance (PE) known before that bar, and closed back away from it as a reversal candle, inside the entry windows; one trade per level per day. Results with the live trailing exit, compared with the current signals. The "Distance from support" table in the groups below shows the same question for the signals actually taken.</p></div></div><div class="table-wrap"><table id="srTable"></table></div><div class="table-wrap" style="margin-top:10px"><table id="srTrades"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>Entry time window by slot</h2><p>Setups blocked ONLY by the entry window (every other gate passed), split by when they happened. Judge each slot on the live trailing exit, in both halves of the period. A slot is worth opening only with 15+ setups positive in both halves.</p></div></div><div class="table-wrap"><table id="wsTable"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>What-if: trend-day entries (test only - live signals unchanged)</h2><p id="tdNote">On a one-way day the price never pulls back, so the pullback trigger and the 12:00-14:30 gap block every entry. This replays a stricter "trend-day" rule: same side, score ≥ 70 and every other gate passing, only after 2+ earlier same-side setups of that day had already hit their 1.5 ATR target (no stop since), one trade at a time, max 3 a day. Results use the live 1.5 / 1.5 ATR exit. Only worth switching on if it is positive in BOTH halves with 15+ trades.</p></div></div><div class="table-wrap"><table id="tdTable"></table></div><div class="table-wrap" style="margin-top:10px"><table id="tdTrades"></table></div></section>
@@ -51,6 +52,6 @@
   </div>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/savefile.js?v=1.20.19"></script><script src="/static/sync.js?v=1.20.19" data-next="/static/diagnostics.js?v=1.20.19"></script>
-<script src="/static/mobile.js?v=1.20.19" defer></script>
+<script src="/static/savefile.js?v=1.20.20"></script><script src="/static/sync.js?v=1.20.20" data-next="/static/diagnostics.js?v=1.20.20"></script>
+<script src="/static/mobile.js?v=1.20.20" defer></script>
 </body></html>
