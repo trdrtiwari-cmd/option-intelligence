@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.17";
+const FRONTEND_VERSION="1.20.18";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1621,3 +1621,13 @@ function pageSnapshot(){
 });})();
 
 function escapeHtml(t){return String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+
+// v1.20.18: Pattern window (1-2 hours) - a server setting shared by live signals, alerts and the monitor (owner can change it)
+(function(){const sel=$("patternMin");if(!sel)return;
+  fetch("/api/signals/config",{credentials:"same-origin"}).then(r=>r.ok?r.json():null).then(c=>{if(c&&c.pattern_minutes)sel.value=String(c.pattern_minutes)}).catch(()=>{});
+  sel.addEventListener("change",async()=>{
+    try{const r=await fetch("/api/pattern-window",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({minutes:Number(sel.value)})});
+      if(!r.ok)throw Error(r.status===403?"only the owner account can change it":(await r.text()).slice(0,120));
+      const d=await r.json();toast(`Chart patterns now read the last ${d.pattern_minutes} minutes - signals recompute now`);lastAnalysisAt=0;runAnalysis(true);
+    }catch(e){toast("Pattern window not changed: "+e.message)}
+  });})();

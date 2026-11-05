@@ -47,9 +47,16 @@ def test_not_enough_data():
     assert cp.detect(candles([100.0] * 50), None)["name"] == "None"
 
 
-def test_window_is_time_based():
-    assert cp.window_bars(5) == 40 and cp.window_bars(1) == 80 and cp.window_bars(3) == 67 and cp.window_bars(15) == 24
-    # a double bottom whose first low is 6+ hours old is not reported on a 5-minute chart
-    old = [120.0] * 5 + [100, 99, 100, 106, 112, 114, 112] + [113 + (k % 3) for k in range(60)] + [100.2, 101, 105, 110, 116]
-    p = cp.detect(candles(old, 0.5), 3.0, 5)
-    assert not (p["name"].startswith("Double bottom"))
+def test_window_is_selectable_1_to_2_hours():
+    assert cp.window_bars(5, 60) == 12 and cp.window_bars(5, 90) == 18 and cp.window_bars(5, 120) == 24
+    assert cp.window_bars(1, 120) == 80 and cp.window_bars(3, 90) == 30 and cp.window_bars(15, 120) == 12     # min 12 candles
+    assert cp._clean(100) == 105 and cp._clean("x") == 90 and cp._clean(45) == 60
+    old = cp.PATTERN_MINUTES
+    try:
+        assert cp.set_minutes(120) == 120 and cp.window_bars(5) == 24
+    finally:
+        cp.set_minutes(old)
+    # a double bottom whose first low is 3+ hours old is not reported with a 2-hour window on a 5-minute chart
+    old_path = [120.0] * 5 + [100, 99, 100, 106, 112, 114, 112] + [113 + (k % 3) for k in range(40)] + [100.2, 101, 105, 110, 116]
+    p = cp.detect(candles(old_path, 0.5), 3.0, 5, minutes=120)
+    assert not p["name"].startswith("Double bottom")

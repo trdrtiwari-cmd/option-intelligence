@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.18 - selectable chart-pattern window (1 to 2 hours)
+
+New **Pattern window** selector on the terminal (owner) and in Diagnostics: 1 h, 1 h 15, 1 h 30 (default), 1 h 45, 2 h. A pattern (flag, double bottom / top, triangle, range) must have formed inside that time to confirm or block a signal. On 5-minute charts that is 12-24 candles; at least 12 candles on any timeframe (3 hours on 15-minute charts). The terminal setting is saved with the other signal settings, applies at once to live signals, alerts, the signal log and the monitor (analysis cache cleared), and Diagnostics starts with the same value so you can compare windows on the same 30 days. Env default: `CHART_PATTERN_MINUTES=90`.
+
 ## v1.20.17 - chart patterns read about the last 3 hours, not 80 candles
 
 80 candles was 6h40m on a 5-minute chart (older than one session) and 20 hours on a 15-minute chart. Patterns now come from about the last **200 minutes**: 40 candles on 5 min, 67 on 3 min, 80 on 1 min, and at least 24 on 15 min (6 hours, the minimum room for a double bottom / triangle). Inside that window: flags look for an impulse in the last 20 candles, ranges use up to 30 candles.

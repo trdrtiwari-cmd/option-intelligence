@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.17"
+APP_VERSION = "1.20.18"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -962,7 +962,7 @@ async def diagnostics_page():
 
 @app.post("/api/diagnostics/start")
 async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 15, mode: str = "scalp",
-                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 70):
+                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 70, pattern_minutes: int = 0):
     """Replays the technical engine over the last `days` of candles and measures what happened after every signal.
     Runs in a background thread (a 20-day replay takes several seconds locally and longer on a free instance)."""
     _need_user(request)
@@ -1011,6 +1011,7 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
         try:
             rep = dgn.run(result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw, htf_interval=htf_interval,
                           volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop, score_min=score_min,
+                          pattern_minutes=pattern_minutes or None,
                           progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
             rep["params"]["volume_source"] = result.get("volume_source")
             job.update(status="done", report=rep, progress=1.0, stage="Done")
@@ -2898,7 +2899,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes")
 
 
 def _set_option_overrides(d):
@@ -2908,6 +2909,37 @@ def _set_option_overrides(d):
         if v not in (None, ""):
             OPTION_OVERRIDES[k] = v
     _PICK_CACHE.clear()
+    import chart_patterns as _cpm
+    if _cpm.set_minutes(OPTION_OVERRIDES.get("pattern_minutes") or os.getenv("CHART_PATTERN_MINUTES", "90")) != _PAT_MIN[0]:
+        _PAT_MIN[0] = _cpm.PATTERN_MINUTES
+        _AN_CACHE.clear()                                   # recompute with the new pattern window at once
+
+
+_PAT_MIN = [None]
+
+
+class PatternWindow(BaseModel):
+    minutes: int
+
+
+@app.post("/api/pattern-window")
+async def pattern_window_set(payload: PatternWindow, request: Request):
+    """v1.20.18: the terminal's "Pattern window" selector (owner). Keeps every other saved signal / option setting."""
+    _require_admin(request)
+    import chart_patterns as _cpm
+    if payload.minutes not in _cpm.ALLOWED_MINUTES:
+        raise HTTPException(400, "Pattern window must be one of: " + ", ".join(map(str, _cpm.ALLOWED_MINUTES)) + " minutes")
+    try:
+        saved = json.loads(await asyncio.to_thread(acc.meta_get, "signal_log_config") or "{}")
+    except Exception:
+        saved = {}
+    saved["opt_pattern_minutes"] = int(payload.minutes)
+    _set_option_overrides(saved)
+    try:
+        await asyncio.to_thread(acc.meta_set, "signal_log_config", json.dumps(saved))
+    except Exception as exc:
+        logger.warning("Pattern window not saved: %s", str(exc)[:140])
+    return {"pattern_minutes": _cpm.PATTERN_MINUTES}
 
 
 @app.get("/api/signals/config")
@@ -2922,6 +2954,7 @@ async def signal_log_config():
             "exit_plan": OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
             "min_sl_atr": op.MIN_SL_ATR, "entry_windows": sf.entry_windows_text(),
             "exit_plans": {k: v["label"] for k, v in op.EXIT_PLANS.items()},
+            "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
             "option": {"steps": oc["steps"], "moneyness": oc["moneyness"], "lots": oc["lots"], "charges_rs": oc["charges_rs"], "min_rr": oc["min_rr"],
                        "custom": bool(OPTION_OVERRIDES)}}
 
@@ -2936,6 +2969,7 @@ class SignalLogConfig(BaseModel):
     opt_charges_rs: Optional[float] = None  # round-trip charges per trade (Rs)
     opt_min_rr: Optional[float] = None      # minimum index reward : risk for a BUY
     opt_exit_plan: Optional[str] = None     # v1.19.1: balanced | winrate
+    opt_pattern_minutes: Optional[int] = None   # v1.20.18: chart-pattern window 60-120 min
 
 
 @app.post("/api/signals/config")
@@ -2976,6 +3010,13 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         if payload.opt_exit_plan not in op.EXIT_PLANS:
             raise HTTPException(400, "Exit plan must be one of: " + ", ".join(op.EXIT_PLANS))
         new["opt_exit_plan"] = payload.opt_exit_plan
+    import chart_patterns as _cpm
+    if payload.opt_pattern_minutes is not None:
+        if payload.opt_pattern_minutes not in _cpm.ALLOWED_MINUTES:
+            raise HTTPException(400, "Pattern window must be one of: " + ", ".join(map(str, _cpm.ALLOWED_MINUTES)) + " minutes")
+        new["opt_pattern_minutes"] = int(payload.opt_pattern_minutes)
+    elif OPTION_OVERRIDES.get("pattern_minutes"):
+        new["opt_pattern_minutes"] = int(OPTION_OVERRIDES["pattern_minutes"])     # the Signals page does not send it: keep it
     sx.set_overrides(new)
     _set_option_overrides(new)
     try:

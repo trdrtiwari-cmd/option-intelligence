@@ -36,7 +36,7 @@ MIN_N = 8          # fewer samples than this are shown but never used to draw a 
 
 # ---------------------------------------------------------------- replay
 def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None, first_bar=40,
-           window=None, progress=None, score_min=70, live_window=True):
+           window=None, progress=None, score_min=70, live_window=True, pattern_minutes=None):
     """One record per closed bar from `first_bar` on: the technical signal as it stood when that bar closed.
     live_window (v1.19.1): apply the live app's entry-time window (ENTRY_START_MIN..ENTRY_CUTOFF) so the replay only counts
     entries the app would actually have signalled. Before this, entries at 09:15-09:45 and after 13:30 were counted too."""
@@ -52,7 +52,7 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
             h += 1
         sub = htf[:h]
         a = analyze(cs[max(0, i + 1 - window):i + 1], symbol, interval, htf_raw=sub or None, htf_interval=htf_interval if sub else None,
-                    volume_source=volume_source, now=close_dt, mode=mode, score_min=score_min)
+                    volume_source=volume_source, now=close_dt, mode=mode, score_min=score_min, pattern_minutes=pattern_minutes)
         if a.get("status") != "ok":
             continue
         side, atr = a.get("side"), a.get("atr")
@@ -840,15 +840,17 @@ def window_slots(cs, near, interval, horizon, cost, target, stop):
 
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70, live_window=True):
+        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70, live_window=True, pattern_minutes=None):
     cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress, score_min=score_min,
-                          live_window=live_window)
+                          live_window=live_window, pattern_minutes=pattern_minutes)
     confirmed, near = events_from(replayed)
     conf_rows = evaluate(cs, confirmed, interval, horizon, cost, target, stop, with_extras=True)
     near_rows = evaluate(cs, near, interval, horizon, cost, target, stop)
     days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
     random_stats = random_entry_baseline(cs, interval, horizon, cost, target, stop)
+    import chart_patterns as _cpm
     params = {"symbol": symbol, "interval": interval, "mode": mode, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
+              "pattern_minutes": _cpm._clean(pattern_minutes or _cpm.PATTERN_MINUTES),
               "days": days, "bars_evaluated": len(replayed)}
     try:
         sr_features(cs, conf_rows, interval, symbol)

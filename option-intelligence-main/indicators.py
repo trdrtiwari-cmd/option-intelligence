@@ -485,7 +485,8 @@ def breakout_quality(cs, atr, side, n=20):
                 f"{beyond:+.2f} ATR beyond the prior {n}-bar range (≤ 1.0)")
 
 
-def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard", score_min=70):
+def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard", score_min=70,
+            pattern_minutes=None):
     rules = mode_rules(mode)
     mode = mode if mode in MODES else "standard"
     cs, forming_dropped = drop_forming(normalize_candles(raw_candles), interval, now)
@@ -502,7 +503,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     rsi = rsi_wilder(closes)
     rsi_prev = rsi_wilder(closes[:-1]) if len(closes) > 16 else None
     atr = atr_wilder(cs)
-    chart_pattern = _cp.detect(cs, atr, interval)           # v1.20.17: the shape of about the last 3h20m of closed candles
+    chart_pattern = _cp.detect(cs, atr, interval, minutes=pattern_minutes)    # v1.20.18: the selected 1-2 hour pattern window
     pattern_effects = None
     vwap, vwap_source = session_vwap(cs)
     mc = macd(closes)

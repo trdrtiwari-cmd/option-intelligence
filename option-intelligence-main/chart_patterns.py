@@ -1,8 +1,8 @@
 """Chart patterns from closed candles (v1.20.16) - pure Python, no I/O.
 
 The engine used to confirm an entry with the LAST CANDLE only (bullish close above the previous close). This module reads the
-SHAPE of the recent candles instead - about the last 3 hours 20 minutes (40 five-minute candles; at least 24 candles on slow
-timeframes, see window_bars):
+SHAPE of the recent candles instead - the selected pattern window, 1 to 2 hours (default 90 minutes = 18 five-minute candles;
+at least 12 candles, see window_bars):
 
   * Range (consolidation) and its breakout / breakdown
   * Bull / bear flag: a strong impulse, a shallow counter-move, then a break of the flag
@@ -35,13 +35,34 @@ def _mk(name, side, stage, trigger, invalid, target, detail, bars_ago=0):
             "detail": detail, "bars_ago": bars_ago}
 
 
-PATTERN_MINUTES = 200            # v1.20.17: ~3h20m of price action (was a fixed 80 candles = 6h40m on 5-minute charts, older than a session)
+import os as _os
+
+# v1.20.18: how far back a pattern may start - selectable 1 to 2 hours (terminal "Pattern window", Diagnostics, CHART_PATTERN_MINUTES).
+ALLOWED_MINUTES = (60, 75, 90, 105, 120)
+MIN_BARS = 12                    # a double bottom / triangle needs about 12 candles; on 15-minute charts this means 3 hours
 
 
-def window_bars(interval):
-    """Candles to read: 200 minutes of them, at least 24 (so a 15-minute chart still has room for a double bottom) and at most 80."""
+def _clean(m):
+    try:
+        m = int(m)
+    except (TypeError, ValueError):
+        return 90
+    return m if m in ALLOWED_MINUTES else min(ALLOWED_MINUTES, key=lambda a: abs(a - m))
+
+
+PATTERN_MINUTES = _clean(_os.getenv("CHART_PATTERN_MINUTES", "90"))
+
+
+def set_minutes(m):
+    global PATTERN_MINUTES
+    PATTERN_MINUTES = _clean(m)
+    return PATTERN_MINUTES
+
+
+def window_bars(interval, minutes=None):
+    """Candles to read for `minutes` (default: the selected window) on this timeframe; at least MIN_BARS, at most 80."""
     iv = max(1, int(interval or 5))
-    return max(24, min(80, round(PATTERN_MINUTES / iv)))
+    return max(MIN_BARS, min(80, round(_clean(minutes or PATTERN_MINUTES) / iv)))
 
 
 def _range(cs, atr, look=30, max_atr=2.5, min_bars=8):
@@ -77,7 +98,7 @@ def _flag(cs, atr, side):
     """Impulse >= 3 ATR in <= 12 bars, then a 3-15 bar counter-move retracing 15-60 %, then a close beyond the flag."""
     n = len(cs)
     up = side == "CE"
-    for end in range(n - 4, max(n - 20, 12, 3), -1):         # impulse top (bull) / bottom (bear), newest first
+    for end in range(n - 4, max(n - 20, 3), -1):             # impulse top (bull) / bottom (bear), newest first
         top = cs[end]["high"] if up else cs[end]["low"]
         seg = cs[max(0, end - 12):end + 1]
         base = min(c["low"] for c in seg) if up else max(c["high"] for c in seg)
@@ -164,11 +185,11 @@ def _triangle(cs, atr, side):
                f"flat {'top' if asc else 'bottom'} {top:.0f} with {'higher lows' if asc else 'lower highs'} - trigger {top:.0f}")
 
 
-def detect(cs, atr, interval=5, look=None):
+def detect(cs, atr, interval=5, look=None, minutes=None):
     """Most relevant chart pattern on closed candles, or {"name": "None", ...}. cs: dicts with open/high/low/close, oldest first.
     Only the last window_bars(interval) candles are read, so a pattern must have formed within about the last 3 hours."""
-    look = look or window_bars(interval)
-    if not atr or len(cs) < min(30, look):
+    look = look or window_bars(interval, minutes)
+    if not atr or len(cs) < look:
         return _mk("None", None, "none", None, None, None, "not enough candles")
     cs = cs[-look:]
     found = []

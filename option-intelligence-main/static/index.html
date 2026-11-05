@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.17">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.17">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.18">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.18">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -28,7 +28,7 @@
     <label>Chart view<select id="chartView"><option value="index">Underlying index</option><option value="option">Selected option premium</option></select></label>
     <label title="On WATCH / confirmed CE or PE the chart switches to the option 2 strikes in the money on that side (strike offset is set on the Signals page)">Signal option<select id="autoOption"><option value="on" selected>Auto-switch chart</option><option value="off">Keep my selection</option></select></label>
     <label>Auto refresh<select id="refreshEvery" title="Live price / chart update rate. Below 2 s the live connection is used; the full reload runs every 2 s only if it drops."><option value="0.1" selected>0.1 s (live)</option><option value="0.25">0.25 s (live)</option><option value="0.5">0.5 s (live)</option><option value="1">1 s (live)</option><option value="2">2 s</option><option value="3">3 s</option><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></label>
-    <label>Reconfirm hold<select id="reconfirmSec" title="A new CE/PE setup stays PENDING until it has held this long with price not moving against it"><option value="0">Off</option><option value="30">30 s</option><option value="60" selected>60 s</option><option value="90">90 s</option><option value="120">2 min</option><option value="180">3 min</option><option value="300">5 min</option></select></label>
+    <label title="How far back a chart pattern may start before it can confirm a signal (owner setting)">Pattern window<select id="patternMin"><option value="60">1 hour</option><option value="75">1 h 15 min</option><option value="90" selected>1 h 30 min</option><option value="105">1 h 45 min</option><option value="120">2 hours</option></select></label><label>Reconfirm hold<select id="reconfirmSec" title="A new CE/PE setup stays PENDING until it has held this long with price not moving against it"><option value="0">Off</option><option value="30">30 s</option><option value="60" selected>60 s</option><option value="90">90 s</option><option value="120">2 min</option><option value="180">3 min</option><option value="300">5 min</option></select></label>
     <label>Alert sound<select id="alertSound"><option value="1" selected>On</option><option value="0">Off</option></select></label>
     <button id="enablePush" class="secondary" type="button">Enable push alerts</button><label>Notify me for<select id="pushType"><option value="all">All signal changes</option><option value="confirmed">Confirmed buy signals only</option></select></label><a class="button secondary" href="/notifications">Notification history</a>
     <button id="claudeExport" class="secondary" title="Download the terminal state, today's signals, findings and the 10-day replay for a Claude review">Download for Claude</button><button id="testAlert" class="secondary" title="Plays the beep, asks for browser notifications and sends a test message to Telegram / ntfy / email if configured">Test alert</button>
@@ -251,6 +251,6 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/trendlines.js?v=1.20.17"></script><script src="/static/savefile.js?v=1.20.17"></script><script src="/static/boot.js?v=1.20.17"></script><script src="/static/sync.js?v=1.20.17" data-next="/static/app.js?v=1.20.17"></script>
-<script src="/static/mobile.js?v=1.20.17" defer></script>
+<script src="/static/trendlines.js?v=1.20.18"></script><script src="/static/savefile.js?v=1.20.18"></script><script src="/static/boot.js?v=1.20.18"></script><script src="/static/sync.js?v=1.20.18" data-next="/static/app.js?v=1.20.18"></script>
+<script src="/static/mobile.js?v=1.20.18" defer></script>
 </body></html>

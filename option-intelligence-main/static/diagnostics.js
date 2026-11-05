@@ -16,7 +16,8 @@
   $("runBtn").addEventListener("click", async () => {
     fail(""); $("results").hidden = true;
     const p = new URLSearchParams({ symbol: $("symbol").value, interval: $("interval").value, days: $("days").value, mode: $("mode").value,
-      target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value, score_min: $("scoreMin") ? $("scoreMin").value : 70 });
+      target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value, score_min: $("scoreMin") ? $("scoreMin").value : 70,
+      pattern_minutes: $("patternMin") ? $("patternMin").value : 90 });
     $("runBtn").disabled = true; $("progressBox").hidden = false; $("progressBar").style.width = "2%"; $("progressText").textContent = "Fetching candles…";
     try {
       const { job_id } = await api("/api/diagnostics/start?" + p, { method: "POST" });
@@ -148,3 +149,8 @@
   const apply = () => { if (!touched && H[iv.value]) hz.value = H[iv.value]; };
   iv.addEventListener("change", apply); apply();
 })();
+
+// v1.20.18: start with the live pattern window
+fetch("/api/signals/config", { credentials: "same-origin" }).then(r => r.ok ? r.json() : null).then(c => {
+  if (c && c.pattern_minutes && document.getElementById("patternMin")) document.getElementById("patternMin").value = String(c.pattern_minutes);
+}).catch(() => {});
