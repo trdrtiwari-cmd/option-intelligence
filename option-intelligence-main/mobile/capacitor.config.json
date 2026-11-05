@@ -4,7 +4,7 @@
   "webDir": "www",
   "backgroundColor": "#0b1220",
   "server": {
-    "url": "https://YOUR-SERVICE.onrender.com",
+    "url": "https://option-intelligence-vqtl.onrender.com",
     "cleartext": false,
     "allowNavigation": [
       "*.upstox.com",
