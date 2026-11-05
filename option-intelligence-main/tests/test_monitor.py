@@ -189,3 +189,31 @@ def test_gemini_retry_and_fallback():
         assert t == "OK" and e is None and m == mon.GEMINI_FALLBACK and len(calls) == 3
     finally:
         mon.gemini_call = old; asyncio.sleep = oldsleep; os.environ.pop("GEMINI_API_KEY", None)
+
+
+def test_blocked_by_and_gate_stats():
+    import signal_board as sb
+    a = {"gates": [{"label": "Score ≥ 70", "pass": True}, {"label": "Not sideways / not in a range", "pass": False},
+                   {"label": "Closed-candle price-action confirmation", "pass": False}]}
+    final = {"blockers": ["Entry time window (live app): 12:40 is outside 09:45-12:00, 14:30-15:00", "Profit check: R:R: 0.8 < 1.5"]}
+    b = sb.blocked_by(a, final)
+    assert b == "Not sideways / not in a range · Closed-candle price-action confirmation · Entry time window (live app) · Profit check: R:R"
+    rows = [
+        {"stage": "WATCH", "symbol": "NIFTY", "option_name": "N 24350 CE", "created_at": "2026-11-05T12:40:00", "test_result": "TARGET", "test_points": 30, "blocked_by": b, "best_pct_60": 45},
+        {"stage": "WATCH", "symbol": "NIFTY", "option_name": "N 24350 CE", "created_at": "2026-11-05T12:40:30", "test_result": "TARGET", "test_points": 30, "blocked_by": b, "best_pct_60": 45},  # same setup, other mode
+        {"stage": "WATCH", "symbol": "NIFTY", "option_name": "N 24400 CE", "created_at": "2026-11-05T10:05:00", "test_result": "STOP", "test_points": -38, "blocked_by": "Not sideways / not in a range"},
+    ]
+    st = {g["gate"]: g for g in mon.board_gate_stats(rows)}
+    assert st["Not sideways / not in a range"]["setups"] == 2 and st["Not sideways / not in a range"]["target"] == 1
+    assert st["Entry time window (live app)"]["win_rate"] == 100.0
+    m = mon.missed_from_board(rows)
+    assert len(m) == 1 and m[0]["detail"]["blocked_by"][0] == "Not sideways / not in a range"
+
+
+def test_init_removes_duplicate_board_findings():
+    d = tempfile.mkdtemp(); db = os.path.join(d, "t.sqlite3")
+    mon.init(db)
+    for i in (381, 40):
+        mon.add_event(db, {"day": "2026-11-05", "kind": "MISSED", "severity": "info", "title": "WATCH NIFTY 24450 CE 13:38 not bought", "dedupe": f"board-missed-{i}"})
+    mon.init(db)
+    assert len(mon.events(db, "2026-11-05", "2026-11-05")) == 1

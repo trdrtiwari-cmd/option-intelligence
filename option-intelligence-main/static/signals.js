@@ -125,7 +125,7 @@ async function loadBoard() {
         `<td>${num(r.opt_sl) === null ? '—' : fmt(r.opt_sl) + ' / ' + fmt(r.opt_target)}${sub(num(r.idx_sl) === null ? 'no plan (test uses 1.5 / 1.5 ATR)' : 'index ' + fmt(r.idx_sl) + ' / ' + fmt(r.idx_target))}</td>` +
         `<td>${done ? (num(r.opt_30) === null ? '—' : fmt(r.opt_30)) + ' / ' + (num(r.opt_60) === null ? '—' : fmt(r.opt_60) + chg(r.opt_60)) : '<span class="sub">after 60 min</span>'}</td>` +
         `<td>${done && num(r.best_pct_60) !== null ? `<span style="color:var(--green)">${pc(r.best_pct_60)}</span> / <span style="color:var(--red)">${pc(r.worst_pct_60)}</span>` : (done ? esc(r.outcome_note || '—') : '<span class="sub">pending</span>')}</td>` +
-        `<td style="${tone(r.test_points)}">${r.test_result ? esc(r.test_result) + ' ' + signed(r.test_points, 1) : '—'}</td><td class="wrap">${esc(r.reason || '')}</td></tr>`;
+        `<td style="${tone(r.test_points)}">${r.test_result ? esc(r.test_result) + ' ' + signed(r.test_points, 1) : '—'}</td><td class="wrap">${esc(r.reason || '')}${r.blocked_by ? `<div class="sig-sub">Blocked by: ${esc(r.blocked_by)}</div>` : ''}</td></tr>`;
     }).join('') : '<tr><td colspan="8" class="empty">No option signals recorded for these filters yet. They are added automatically during market hours.</td></tr>';
   } catch (e) { $('boardRows').innerHTML = `<tr><td colspan="8" class="empty">Could not load the signal board: ${esc(e.message)}</td></tr>`; }
 }

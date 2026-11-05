@@ -116,6 +116,10 @@ def init(db_path):
         db.execute("CREATE TABLE IF NOT EXISTS monitor_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                    + ", ".join(f"{c} {t}" for c, t in REVIEW_COLS) + ")")
         db.execute("CREATE INDEX IF NOT EXISTS monitor_events_day ON monitor_events(day)")
+        # v1.20.6: board findings used to be keyed by the board row id, which changes when the board is restored after a restart,
+        # and the same setup is recorded once per mode / timeframe - so one setup showed up 2-3 times. Keep the first of each.
+        db.execute("DELETE FROM monitor_events WHERE kind='MISSED' AND dedupe LIKE 'board-missed-%' AND id NOT IN "
+                   "(SELECT MIN(id) FROM monitor_events WHERE kind='MISSED' AND dedupe LIKE 'board-missed-%' GROUP BY day, title)")
         db.commit()
 
 
@@ -376,7 +380,7 @@ def missed_from_replay(rep, day):
 
 def missed_from_board(board_rows):
     """Signal-board setups that were NOT bought but whose option then paid (target reached in the 60-min test, or +30 % premium)."""
-    out = []
+    out, seen = [], set()
     for r in board_rows:
         if r.get("stage") not in ("WATCH", "SETUP", "NO BUY", "FAILED"):
             continue
@@ -384,11 +388,43 @@ def missed_from_board(board_rows):
         # v1.20.2: a +4 % premium is not a missed trade - need the test target AND a real premium gain, or +30 %
         if best is not None and ((r.get("test_result") == "TARGET" and best >= 15) or best >= 30):
             t = str(r.get("created_at") or "")[11:16]
+            k = (r.get("symbol"), r.get("option_name"), str(r.get("created_at") or "")[:16], r.get("stage"))
+            if k in seen:
+                continue
+            seen.add(k)
+            gates = [g for g in str(r.get("blocked_by") or "").split(" · ") if g]
             out.append({"kind": "MISSED", "severity": "info", "symbol": r.get("symbol"),
                         "title": f"{r.get('stage')} {r.get('option_name') or r.get('side')} {t} not bought - option then went +{best or 0:.0f}% in 60 min",
                         "detail": {"board_id": r.get("id"), "stage": r.get("stage"), "reason": r.get("reason"), "score": r.get("score"),
-                                   "best_pct_60": best, "test_result": r.get("test_result")},
-                        "dedupe": f"board-missed-{r.get('id')}"})
+                                   "best_pct_60": best, "test_result": r.get("test_result"), "blocked_by": gates},
+                        # stable across restarts and across modes / timeframes recording the same setup
+                        "dedupe": f"board-missed-{r.get('symbol')}-{r.get('option_name')}-{str(r.get('created_at') or '')[:16]}-{r.get('stage')}"})
+    return out
+
+
+def board_gate_stats(board_rows):
+    """For every rule that blocked today's not-bought setups: how many of them the 1.5 ATR test trade would have won / lost.
+    One row per setup (duplicates across modes / timeframes merged). This is the evidence for relaxing or keeping a rule."""
+    seen, per = set(), {}
+    for r in board_rows:
+        if r.get("stage") not in ("WATCH", "SETUP", "NO BUY", "FAILED") or not r.get("test_result"):
+            continue
+        k = (r.get("symbol"), r.get("option_name"), str(r.get("created_at") or "")[:16])
+        if k in seen:
+            continue
+        seen.add(k)
+        for g in [g for g in str(r.get("blocked_by") or "").split(" · ") if g] or ["(not recorded - before v1.20.6)"]:
+            d = per.setdefault(g, {"gate": g, "setups": 0, "target": 0, "stop": 0, "other": 0, "points": 0.0})
+            d["setups"] += 1
+            res = r.get("test_result")
+            d["target" if res == "TARGET" else "stop" if res == "STOP" else "other"] += 1
+            d["points"] += _f(r.get("test_points")) or 0.0
+    out = sorted(per.values(), key=lambda x: -x["setups"])
+    for d in out:
+        closed = d["target"] + d["stop"]
+        d["win_rate"] = round(100.0 * d["target"] / closed, 1) if closed else None
+        d["avg_points"] = round(d["points"] / d["setups"], 1) if d["setups"] else None
+        d.pop("points")
     return out
 
 
@@ -457,7 +493,8 @@ SYSTEM_NOTE = ("You monitor an intraday NIFTY / BANKNIFTY options signal app for
                "numbers given. Do not invent data. Never tell the user to place or exit a trade; this is analysis only.")
 SYSTEM_REVIEW = ("You are reviewing an intraday options signal strategy (NIFTY/BANKNIFTY, ITM options 2 strikes in the money, stop at least "
                  "1.5 ATR, entry windows 09:45-12:00 and 14:30-15:00, square-off 15:20). You get JSON with today's live trades, losses with "
-                 "code-detected causes, missed moves with the gates that blocked them, signal-board setups that were not bought, feed/rule "
+                 "code-detected causes, missed moves with the gates that blocked them, signal-board setups that were not bought, "
+                 "today_blocking_rules (for each rule: setups it blocked and how many of those the 1.5 ATR test trade won / lost), feed/rule "
                  "discrepancies, and a replay of the last days with code-generated suggestions. Write for the owner, in plain English:\n"
                  "1. What happened today (2-3 sentences, numbers).\n2. Why moves were missed (which gates, and whether relaxing them would "
                  "have paid according to the near-miss data).\n3. What caused the losses (patterns, not single trades).\n4. Suggested changes, "
@@ -575,7 +612,7 @@ def note_prompt(ev):
                       default=str, ensure_ascii=False)
 
 
-def review_context(day, symbol, trades, findings, board_missed, rep, sugg):
+def review_context(day, symbol, trades, findings, board_missed, rep, sugg, gate_stats=None):
     """Compact JSON for the review (keeps the request small and cheap)."""
     def tr(r):
         return {k: r.get(k) for k in ("generated_at", "side", "option_name", "score", "regime", "pattern", "entry", "stop_loss", "target",
@@ -584,8 +621,10 @@ def review_context(day, symbol, trades, findings, board_missed, rep, sugg):
     return {
         "day": day, "symbol": symbol,
         "live_trades": [tr(r) for r in trades][:30],
-        "findings": [{"kind": f.get("kind"), "title": f.get("title"), "detail": f.get("detail")} for f in findings][:40],
-        "not_bought_but_paid": board_missed[:15],
+        "findings": [{"kind": f.get("kind"), "title": f.get("title"), "detail": f.get("detail")} for f in findings
+                     if f.get("kind") != "MISSED" or not str(f.get("dedupe") or "").startswith("board-missed")][:40],
+        "not_bought_but_paid": [{"title": m["title"], "blocked_by": (m.get("detail") or {}).get("blocked_by")} for m in board_missed][:15],
+        "today_blocking_rules": (gate_stats or [])[:12],
         "replay": {"params": {k: (rep.get("params") or {}).get(k) for k in ("mode", "interval", "days")},
                    "live_exit": rep.get("live_exit"), "confirmed": (rep.get("confirmed") or {}).get("stats"),
                    "missed_moves": {k: (rep.get("missed_moves") or {}).get(k) for k in ("moves", "caught", "missed", "blockers")},

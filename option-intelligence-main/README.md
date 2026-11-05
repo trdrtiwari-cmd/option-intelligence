@@ -1,5 +1,11 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.6 - which rule blocked each setup, no duplicate findings
+
+* **Signal board "Blocked by"**: every WATCH / SETUP / NO BUY / FAILED row now stores the exact rules that failed (technical gates, entry window, dashboard, reconfirmation, profit check), shown under "Why". The monitor review gets `today_blocking_rules`: for each rule, how many of today's setups it blocked and how many of those the 1.5 ATR test trade won / lost - the evidence for relaxing or keeping it.
+* **Duplicate findings removed**: "not bought but paid" findings were keyed by the board row id (which changes when the board is restored after a Render restart) and the same setup is recorded once per mode / timeframe, so one setup appeared 2-3 times. They are now keyed by symbol + option + minute; existing duplicates are deleted on start-up.
+* Download for Claude: compact JSON so the copied text fits a paste.
+
 ## v1.20.2 - option last price fixes, monitor times
 
 * **Option price jumping between strikes:** the automatic "2 strikes ITM" pick moves with every 50-pt index move, and the chart followed it, so the last price jumped between contracts with very different premiums. The chart now stays on the contract chosen for a setup; it switches only when the side changes (CE↔PE) or a new setup starts after WAIT.

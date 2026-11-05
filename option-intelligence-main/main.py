@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.5"
+APP_VERSION = "1.20.6"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2117,7 +2117,8 @@ async def monitor_review(kind="intraday", force=False):
         _SMON["status"] = "review"
         text, err, model = None, None, None
         all_today = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 200, SIGNAL_LOG_LOCK)
-        ctx = mon.review_context(day, sym, log, [e for e in all_today if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep, sugg)
+        ctx = mon.review_context(day, sym, log, [e for e in all_today if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep, sugg,
+                                 mon.board_gate_stats(board))
         if mon.provider():
             if force or await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK) < mon.SETTINGS["max_calls"]:
                 text, err, model = await mon.ai_call(mon.SYSTEM_REVIEW, json.dumps(ctx, default=str, ensure_ascii=False), kind, max_tokens=1200, timeout=90.0)
@@ -2128,7 +2129,10 @@ async def monitor_review(kind="intraday", force=False):
             text = ("No AI connected - code findings only. Free option: press 'Download for Claude' and upload the file in your Claude chat."
                     if not mon.provider()
                     else f"Claude review unavailable: {err or 'daily call limit reached'}") + "\n\n" + "\n".join(
-                f"- [{x['area']}] {x['title']}: {x['evidence']}" + (f" ({x['caution']})" if x.get("caution") else "") for x in sugg)
+                f"- [{x['area']}] {x['title']}: {x['evidence']}" + (f" ({x['caution']})" if x.get("caution") else "") for x in sugg) + (
+                "\n\nRules that blocked today's setups (1.5 ATR test trade result):\n" + "\n".join(
+                    f"- {g['gate']}: {g['setups']} setups, {g['target']} target / {g['stop']} stop" for g in ctx.get("today_blocking_rules", [])[:8])
+                if ctx.get("today_blocking_rules") else "")
         rid = await asyncio.to_thread(mon.add_review, SIGNAL_LOG_DB, {"day": day, "symbol": sym, "kind": kind, "model": model, "text": text,
                                                                        "suggestions": sugg, "context": ctx}, SIGNAL_LOG_LOCK)
         _SMON["last_review_at"] = time.time()
@@ -2268,8 +2272,8 @@ async def monitor_export(request: Request, day: str = "", fresh: int = 0):
         board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, day, day, "", "", 2000, SIGNAL_LOG_LOCK)
         evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 300, SIGNAL_LOG_LOCK)
         ctx = mon.review_context(day, sym, log, [e for e in evs if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep,
-                                 mon.suggestions(rep) if rep else [])
-    blob = json.dumps(mon.chat_bundle(ctx), default=str, ensure_ascii=False, indent=1)
+                                 mon.suggestions(rep) if rep else [], mon.board_gate_stats(board))
+    blob = json.dumps(mon.chat_bundle(ctx), default=str, ensure_ascii=False, separators=(",", ":"))   # compact: fits a paste
     return Response(blob, media_type="application/json",
                     headers={"Content-Disposition": f"attachment; filename=strategy-review-{day}.json", "Cache-Control": "no-store"})
 

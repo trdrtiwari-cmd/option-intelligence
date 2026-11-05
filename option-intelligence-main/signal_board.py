@@ -23,7 +23,8 @@ COLUMNS = [("created_at", "TEXT"), ("session_date", "TEXT"), ("symbol", "TEXT"),
            ("option_label", "TEXT"), ("option_ltp", "REAL"), ("index_price", "REAL"), ("atr", "REAL"), ("score", "REAL"), ("regime", "TEXT"),
            ("reason", "TEXT"), ("idx_sl", "REAL"), ("idx_target", "REAL"), ("opt_entry", "REAL"), ("opt_sl", "REAL"), ("opt_target", "REAL"),
            ("rr", "REAL"), ("opt_30", "REAL"), ("opt_60", "REAL"), ("opt_max_60", "REAL"), ("opt_min_60", "REAL"), ("best_pct_60", "REAL"),
-           ("worst_pct_60", "REAL"), ("test_result", "TEXT"), ("test_points", "REAL"), ("outcome_at", "TEXT"), ("outcome_note", "TEXT")]
+           ("worst_pct_60", "REAL"), ("test_result", "TEXT"), ("test_points", "REAL"), ("outcome_at", "TEXT"), ("outcome_note", "TEXT"),
+           ("blocked_by", "TEXT")]     # v1.20.6: the exact rules that failed (technical gates + entry window / dashboard / reconfirm / profit check)
 FIELDS = [c for c, _ in COLUMNS]
 
 
@@ -56,6 +57,20 @@ def stage_of(final, rc):
     return None
 
 
+def blocked_by(a, final):
+    """Names of every rule that stopped this signal from being a BUY (short labels, ' · ' separated, max 400 chars)."""
+    out = []
+    for g in (a or {}).get("gates") or []:
+        if isinstance(g, dict) and not g.get("pass") and g.get("label"):
+            out.append(str(g["label"]))
+    for b in (final or {}).get("blockers") or []:
+        parts = str(b).split(": ")
+        lab = (": ".join(parts[:2]) if str(b).startswith("Profit check:") else parts[0]).strip()
+        if lab and lab not in out:
+            out.append(lab)
+    return " · ".join(out)[:400]
+
+
 def make_row(now, symbol, interval, mode, a, final, rc, pick, timing):
     """Row dict for the board, or None. `now` is an aware IST datetime."""
     stage = stage_of(final, rc)
@@ -80,7 +95,7 @@ def make_row(now, symbol, interval, mode, a, final, rc, pick, timing):
             "option_ltp": op.get("entry") or pick.get("ask") or pick.get("ltp"), "index_price": ix.get("entry") or a.get("last_close"),
             "atr": a.get("atr"), "score": a.get("score"), "regime": a.get("regime_label") or a.get("regime"), "reason": str(reason)[:400],
             "idx_sl": ix.get("stop"), "idx_target": ix.get("target"), "opt_entry": op.get("entry"), "opt_sl": op.get("stop"),
-            "opt_target": op.get("target"), "rr": ix.get("rr")}
+            "opt_target": op.get("target"), "rr": ix.get("rr"), "blocked_by": blocked_by(a, final) if stage != "BUY" else ""}
 
 
 def insert(db_path, row, lock=None):
