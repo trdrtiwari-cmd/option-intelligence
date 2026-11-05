@@ -1,5 +1,9 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.15 - missed moves: newest first
+
+The missed-big-move examples kept only the FIRST 25 of the period, so the latest days (e.g. the 5 Nov rally) never appeared in Diagnostics, and the strategy monitor - which picks today's examples from that list - could not report today's missed moves. Now the 40 most recent are kept, newest first.
+
 ## v1.20.14 - Claude review covers the whole terminal
 
 * The review file (Download for Claude on the Signals page, the new **Download for Claude** button on the terminal, and the automatic Gemini/Claude reviews) now includes a `terminal` block: app version, market / token state, settings (background-alert symbols / timeframe / mode / score, signal config incl. exit plan and entry windows, monitor), the live analysis of every symbol / timeframe in use (score, regime, failed gates, final decision and blockers, timing, reconfirmation, option pick, buy plan with S/R and failed profit checks), feed state per index, today's signal log and signal board summary.

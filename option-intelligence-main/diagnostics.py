@@ -500,10 +500,11 @@ def missed_moves(cs, replayed, horizon=12, move_atr=2.5, max_adverse_atr=0.75, b
             gates = {"Engine leaned the other way / no side (score)"}
         for g in gates:
             blockers[g] = blockers.get(g, 0) + 1
-        if len(examples) < 25:
+        if True:                    # v1.20.15: keep every example, then the MOST RECENT 40 (the first 25 used to hide the latest days)
             dt = cs[m["i"]]["_dt"].astimezone(IST)
             examples.append({"day": dt.strftime("%Y-%m-%d"), "time": dt.strftime("%H:%M"), "side": side, "points": m["points"],
                              "atr_move": round(m["points"] / m["atr"], 1), "blocked_by": sorted(gates)})
+    examples = examples[-40:][::-1]                                   # newest first
     missed = len(moves) - caught
     rows = sorted(({"gate": g, "moves": n, "pct": round(100.0 * n / missed, 1) if missed else 0.0} for g, n in blockers.items()), key=lambda x: -x["moves"])
     return {"moves": len(moves), "caught": caught, "missed": missed, "blockers": rows, "examples": examples,
