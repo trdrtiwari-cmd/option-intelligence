@@ -1,0 +1,29 @@
+name: Build Windows desktop
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "desktop/windows/**"
+      - "option-intelligence-main/**"
+      - ".github/workflows/windows-desktop.yml"
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend and desktop dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r option-intelligence-main/requirements.txt
+          pip install -r desktop/windows/requirements.txt
+      - name: Build desktop app
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name "Option Intelligence" --collect-all PySide6 --collect-all uvicorn --collect-all psycopg --hidden-import=main --hidden-import=accounts --hidden-import=indicators --hidden-import=instruments --hidden-import=feed_parser --hidden-import=dashboard_data --hidden-import=diagnostics --hidden-import=signal_fusion --hidden-import=signal_exits --hidden-import=notifier --hidden-import=option_plan --hidden-import=signal_board --hidden-import=monitor --add-data "option-intelligence-main;option-intelligence-main" --add-data "option-intelligence-main/static;static" desktop/windows/launcher.py
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Option-Intelligence-Windows
+          path: dist/Option Intelligence/
