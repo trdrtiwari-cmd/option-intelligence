@@ -25,6 +25,8 @@
       st: { on: false, len: 10, mult: 3, up: "#25c58a", down: "#ff667a" },
       vol: { on: true, up: "#25c58a", down: "#ff667a" },
       lvl: { on: true, color: "#f3c969" },
+      sr: { on: true, sup: "#25c58a", res: "#ff4d5e" },
+      tl: { on: true, sup: "#3fd0c9", res: "#ffb547" },
       rsi: { on: true, len: 14, color: "#c792ea", ob: 70, os: 30 },
       macd: { on: false, fast: 12, slow: 26, sig: 9, line: "#5aa7ff", signal: "#ff9f43", up: "#25c58a", down: "#ff667a" },
     },
@@ -40,6 +42,8 @@
       ["st", "Supertrend", "ATR length and multiplier", [["len", "ATR", 2, 100], ["mult", "Mult", 0.5, 10, 0.1]]],
       ["vol", "Volume", "Bars at the bottom of the chart", []],
       ["lvl", "Key levels", "Previous day high / low / close, today's open", []],
+      ["sr", "Auto support / resistance", "Nearest 3 zones each side (S1-S3, R1-R3) of what is on the chart - index or option", []],
+      ["tl", "Auto trendlines", "Support and resistance trendlines; dashed with ✕ when broken", []],
     ],
     low: [
       ["rsi", "RSI", "Pane with overbought / oversold lines", [["len", "Length", 2, 100], ["ob", "Upper", 50, 95], ["os", "Lower", 5, 50]]],
@@ -47,7 +51,7 @@
     ],
   };
   const COLORS = { ema1: ["color"], ema2: ["color"], ema3: ["color"], sma: ["color"], vwap: ["color"], bb: ["color"], st: ["up", "down"], vol: ["up", "down"],
-    lvl: ["color"], rsi: ["color"], macd: ["line", "signal"] };
+    lvl: ["color"], sr: ["sup", "res"], tl: ["sup", "res"], rsi: ["color"], macd: ["line", "signal"] };
 
   // ------------------------------------------------------------------ settings
   const clone = o => JSON.parse(JSON.stringify(o));
@@ -150,6 +154,7 @@
   const mk = id => LightweightCharts.createChart($(id), { ...base(), width: $(id).clientWidth || 300, height: $(id).clientHeight || 200 });
   const C = { main: mk("mainChart"), rsi: mk("rsiChart"), macd: mk("macdChart") };
   let ser = {}, plines = [], cs = [], IND = null, A = null, tick = null, syncing = false;
+  let autoSer = [], autoLines = [], autoKey = "", SR = null, TL = null;
 
   // keep the three panes on the same bars
   Object.entries(C).forEach(([k, ch]) => ch.timeScale().subscribeVisibleLogicalRangeChange(r => {
@@ -159,8 +164,9 @@
   }));
 
   function clearSeries() {
+    autoSer.forEach(s => { try { C.main.removeSeries(s); } catch { } });
     Object.values(ser).forEach(s => { for (const ch of Object.values(C)) { try { ch.removeSeries(s); } catch { } } });
-    ser = {}; plines = [];
+    ser = {}; plines = []; autoSer = []; autoLines = []; autoKey = "";
   }
   function line(chart, color, width = 2, extra = {}) { return chart.addLineSeries({ color, lineWidth: width, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...extra }); }
   function build() {
@@ -205,6 +211,7 @@
       ser.mh.setData(cs.map((c, i) => IND.macd.hist[i] == null ? { time: c.time } : { time: c.time, value: IND.macd.hist[i], color: (IND.macd.hist[i] >= 0 ? I.macd.up : I.macd.down) + "aa" }));
     }
     levels();
+    autoLevels();
     if (fit) { const n = cs.length, show = Math.min(n, isPhone() ? 70 : 160); C.main.timeScale().setVisibleLogicalRange({ from: n - show, to: n + 3 }); }
     legend(null);
     panel();
@@ -226,6 +233,45 @@
     if (!S.ind.lvl.on || !ser.price) return;
     const d = dayStats(), c = S.ind.lvl.color, add = (price, title, style = 2) => { if (Number.isFinite(price)) plines.push(ser.price.createPriceLine({ price, color: c, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title })); };
     add(d.ph, "PDH"); add(d.pl, "PDL"); add(d.pc, "PDC", 3); add(d.open, "Open", 1);
+  }
+
+  // v1.20.47: automatic support / resistance zones and trendlines, from the candles on the chart (the option's own levels when the
+  // chart shows an option). Same code as the old Terminal chart (static/sr.js, static/trendlines.js). Recomputed when a candle closes
+  // (or every 20 s), not on every tick.
+  let autoAt = 0;
+  function autoLevels(force) {
+    if (!ser.price || !cs.length) return;
+    const key = `${cs.length}|${cs[0].time}|${OPT ? OPT.key : S.sym}|${S.ind.sr.on}|${S.ind.tl.on}|${S.ind.sr.sup}${S.ind.sr.res}${S.ind.tl.sup}${S.ind.tl.res}`;
+    if (!force && key === autoKey && Date.now() - autoAt < 20000) return;
+    autoKey = key; autoAt = Date.now();
+    autoSer.forEach(s => { try { C.main.removeSeries(s); } catch { } }); autoSer = [];
+    autoLines.forEach(l => { try { ser.price.removePriceLine(l); } catch { } }); autoLines = [];
+    const LS = LightweightCharts.LineStyle, lastTime = cs.at(-1).time, noScale = () => null;
+    SR = null; TL = null;
+    if (S.ind.sr.on && window.OISR) {
+      try { SR = window.OISR.computeSR(cs, S.tf, S.sym, !OPT); } catch { SR = null; }
+      const styles = [LS.Solid, LS.Dashed, LS.Dotted];
+      const one = (lv, i, sup) => {
+        const color = sup ? S.ind.sr.sup : S.ind.sr.res;
+        if (lv.originTime < lastTime) {
+          const s = C.main.addLineSeries({ color, lineWidth: lv.strength === "Strong" ? 3 : lv.strength === "Medium" ? 2 : 1, lineStyle: styles[i] ?? LS.Dotted,
+            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: noScale });
+          s.setData([{ time: lv.originTime, value: lv.price }, { time: lastTime, value: lv.price }]); autoSer.push(s);
+        }
+        autoLines.push(ser.price.createPriceLine({ price: lv.price, lineVisible: false, axisLabelVisible: true, title: (sup ? "S" : "R") + (i + 1), axisLabelColor: color, axisLabelTextColor: "#0b1220" }));
+      };
+      if (SR) { SR.supports.forEach((l, i) => one(l, i, true)); SR.resistances.forEach((l, i) => one(l, i, false)); }
+    }
+    if (S.ind.tl.on && window.OITrendlines) {
+      try { TL = window.OITrendlines.computeTrendlines(cs); } catch { TL = null; }
+      for (const t of TL ? [TL.support, TL.resistance] : []) {
+        if (!t) continue;
+        const sup = t.kind === "support";
+        const s = C.main.addLineSeries({ color: sup ? S.ind.tl.sup : S.ind.tl.res, lineWidth: 2, lineStyle: t.broken ? LS.Dashed : LS.Solid, priceLineVisible: false,
+          lastValueVisible: true, title: (sup ? "TL S" : "TL R") + (t.broken ? " ✕" : ""), crosshairMarkerVisible: false, autoscaleInfoProvider: noScale });
+        s.setData([{ time: t.from.time, value: t.from.value }, { time: t.to.time, value: t.to.value }]); autoSer.push(s);
+      }
+    }
   }
 
   // ------------------------------------------------------------------ legend (crosshair) and data panel
@@ -272,6 +318,12 @@
         [`MACD hist (${I.macd.fast},${I.macd.slow},${I.macd.sig})`, fmt(h), col(h)], ["ATR (14)", at == null ? "—" : `${fmt(at)} pts (${fmt(at / last * 100, 2)}%)`],
         ["Bollinger %B (engine)", a.bollinger ? `${fmt(a.bollinger.percent_b, 2)}${a.bollinger.squeeze ? " · squeeze" : ""}` : "—"],
         ["Relative volume", a.relative_volume != null ? fmt(a.relative_volume, 2) + "×" : "—"]]),
+      rows("Support / resistance", [
+        ...(SR ? [...SR.resistances.map((l, i) => ["R" + (i + 1) + " · " + l.strength, `${fmt(l.price)} (+${fmt(l.distance)} · ${l.atrMult == null ? "—" : fmt(l.atrMult, 1) + " ATR"})`, "color:var(--red)"]).reverse(),
+          ...SR.supports.map((l, i) => ["S" + (i + 1) + " · " + l.strength, `${fmt(l.price)} (−${fmt(l.distance)} · ${l.atrMult == null ? "—" : fmt(l.atrMult, 1) + " ATR"})`, "color:var(--green)"])] : [["Auto S/R", S.ind.sr.on ? "not enough candles" : "off"]]),
+        ...(S.ind.tl.on ? [TL && TL.support, TL && TL.resistance].map((t, k) => [k ? "Resistance trendline" : "Support trendline",
+          !t ? "none clear" : `${fmt(t.value)} ${t.direction === "rising" ? "↗" : t.direction === "falling" ? "↘" : "→"}${t.broken ? (k ? " · BROKEN above" : " · BROKEN below") : ` · ${t.touches} touches`}`,
+          t && t.broken ? "color:var(--yellow)" : ""]) : [])]),
       rows("Room", [["To day high", d.high ? `${fmt(d.high - last)} (${atrX(d.high - last)})` : "—"], ["To day low", d.low ? `${fmt(last - d.low)} (${atrX(last - d.low)})` : "—"],
         ["Recent high / low (engine)", a.breakout_high ? `${fmt(a.breakout_high)} / ${fmt(a.breakdown_low)}` : "—"],
         ["Chart pattern", a.chart_pattern && a.chart_pattern.name && a.chart_pattern.name !== "None" ? esc(a.chart_pattern.name) : "—"]]),
@@ -279,7 +331,7 @@
     $("groups").innerHTML = html.join("");
     $("strip").innerHTML = [["Signal", esc(act), `color:${sigCol}`], ["Last", fmt(last), col(chg)], ["Chg", chg == null ? "—" : sgn(chg), col(chg)], ["RSI", fmt(r, 1)], ["ATR", fmt(at)],
       ["VWAP", vw == null ? "—" : sgn(last - vw), vw == null ? "" : col(last - vw)], ["EMA", e1 == null || e2 == null ? "—" : e1 > e2 ? "Up" : "Down", e1 != null && e2 != null ? col(e1 - e2) : ""],
-      ["ST", st.dir[n] == null ? "—" : st.dir[n] === 1 ? "Up" : "Down"], ["Score", a.status === "ok" ? a.score : "—"], ["Day H/L", `${fmt(d.high, 0)} / ${fmt(d.low, 0)}`]]
+      ["ST", st.dir[n] == null ? "—" : st.dir[n] === 1 ? "Up" : "Down"], ["Score", a.status === "ok" ? a.score : "—"], ["S1", SR && SR.supports[0] ? fmt(SR.supports[0].price) : "—", "color:var(--green)"], ["R1", SR && SR.resistances[0] ? fmt(SR.resistances[0].price) : "—", "color:var(--red)"], ["Day H/L", `${fmt(d.high, 0)} / ${fmt(d.low, 0)}`]]
       .map(([k, v, s]) => `<div><span>${k}</span><b style="${s || ""}">${v}</b></div>`).join("");
   }
 
