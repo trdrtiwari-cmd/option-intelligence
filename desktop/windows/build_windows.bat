@@ -13,6 +13,7 @@ pyinstaller --noconfirm --clean --windowed --name "Option Intelligence" ^
   --collect-all PySide6 ^
   --collect-all uvicorn ^
   --collect-all psycopg ^
+  --hidden-import=sqlite3 --hidden-import=sqlite3.dbapi2 --hidden-import=_sqlite3 ^
   --hidden-import=main --hidden-import=accounts --hidden-import=indicators ^
   --hidden-import=instruments --hidden-import=feed_parser --hidden-import=dashboard_data ^
   --hidden-import=diagnostics --hidden-import=signal_fusion --hidden-import=signal_exits ^
