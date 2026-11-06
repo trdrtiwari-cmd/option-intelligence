@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.49";
+const FRONTEND_VERSION="1.20.50";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1785,3 +1785,16 @@ function renderDecisionFlow(a){
   if(tab){tab.click();return}
   const w=window.open(url,"oi-chart","width=1400,height=880");if(!w)location.href=url;else try{w.focus()}catch{}
 })})();
+
+// v1.20.50: large live chart inside Signal confirmation (computers / web app only - phones have the Chart tab). It is the chart window
+// in compact form and follows this Terminal's index and timeframe.
+(function(){
+  const slot=$("confirmChartSlot");if(!slot)return;let fr=null;
+  const want=()=>!window.matchMedia("(max-width:820px)").matches;
+  const send=()=>{try{fr&&fr.contentWindow&&fr.contentWindow.postMessage({oiChartSync:{symbol:getSymbol(),interval:getInterval()}},location.origin)}catch{}};
+  const mount=()=>{if(fr||!want())return;fr=document.createElement("iframe");fr.title="Live chart";fr.loading="lazy";
+    fr.src=`/chart?embed=1&symbol=${encodeURIComponent(getSymbol())}&interval=${getInterval()}`;fr.addEventListener("load",send);slot.appendChild(fr)};
+  setTimeout(mount,1500);window.addEventListener("resize",()=>{if(want())mount()});
+  ["symbol","interval"].forEach(id=>$(id)&&$(id).addEventListener("change",send));
+  const pop=$("ccPop");if(pop)pop.addEventListener("click",()=>{const b=$("chartWindowBtn");if(b)b.click()});
+})();

@@ -9,11 +9,13 @@
   const LS_KEY = "oi-chart-v1";
   const isPhone = () => window.matchMedia("(max-width:820px), (max-height:520px) and (pointer:coarse)").matches;
   const isLandscape = () => isPhone() && window.innerWidth > window.innerHeight;
+  const EMBED = new URLSearchParams(location.search).get("embed") === "1";     // v1.20.50: inside the Terminal's Signal confirmation
+  if (EMBED) document.documentElement.classList.add("cw-embed");
   const DEF = {
     sym: "NIFTY", tf: 5, days: 5,
     view: "auto",
-    layout: { desktop: "side", mobile: "below", landscape: "side" }, paneH: { desktop: "0.22", mobile: "0.16", landscape: "0.2" },
-    dataSize: { desktop: "m", mobile: "m", landscape: "s" },
+    layout: { desktop: "side", mobile: "below", landscape: "side", embed: "strip" }, paneH: { desktop: "0.22", mobile: "0.16", landscape: "0.2", embed: "0.18" },
+    dataSize: { desktop: "m", mobile: "m", landscape: "s", embed: "s" },
     candle: "candle", up: "#25c58a", down: "#ff667a",
     ind: {
       ema1: { on: true, len: 9, color: "#25c58a", width: 2 },
@@ -64,8 +66,14 @@
   const q = new URLSearchParams(location.search);
   if (["NIFTY", "BANKNIFTY"].includes((q.get("symbol") || "").toUpperCase())) S.sym = q.get("symbol").toUpperCase();
   if ([1, 3, 5, 15, 30].includes(Number(q.get("interval")))) S.tf = Number(q.get("interval"));
-  const save = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch { } };
-  const dev = () => isLandscape() ? "landscape" : isPhone() ? "mobile" : "desktop";
+  const save = () => {
+    try {
+      let o = S;
+      if (EMBED) { const cur = JSON.parse(localStorage.getItem(LS_KEY) || "{}"); o = { ...S, sym: cur.sym ?? DEF.sym, tf: cur.tf ?? DEF.tf, days: cur.days ?? DEF.days }; }   // the Terminal's chart follows the Terminal, never the chart window's own choice
+      localStorage.setItem(LS_KEY, JSON.stringify(o));
+    } catch { }
+  };
+  const dev = () => EMBED ? "embed" : isLandscape() ? "landscape" : isPhone() ? "mobile" : "desktop";
 
   function toast(msg) { const el = $("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(() => el.classList.remove("show"), 4000); }
   async function api(url) {
@@ -342,7 +350,7 @@
     document.body.classList.add("l-" + L);
     $("layout").value = L;
     const data = $("data");
-    data.style.width = L === "side" ? (dev() === "mobile" ? { s: "34%", m: "42%", l: "52%" } : dev() === "landscape" ? { s: "28%", m: "34%", l: "42%" } : { s: "260px", m: "330px", l: "430px" })[size] : "";
+    data.style.width = L === "side" ? (dev() === "mobile" || dev() === "embed" ? { s: "34%", m: "42%", l: "52%" } : dev() === "landscape" ? { s: "28%", m: "34%", l: "42%" } : { s: "260px", m: "330px", l: "430px" })[size] : "";
     data.style.maxHeight = L === "below" ? { s: "28vh", m: "40vh", l: "55vh" }[size] : "";
     const H = $("charts").clientHeight || 500;
     $("rsiPane").style.display = S.ind.rsi.on ? "" : "none"; $("macdPane").style.display = S.ind.macd.on ? "" : "none";
@@ -362,7 +370,7 @@
 
   // ------------------------------------------------------------------ settings drawer
   function renderSettings() {
-    $("devNote").textContent = { mobile: "(phone upright - sideways and computer layouts are kept separately)", landscape: "(phone sideways - upright and computer layouts are kept separately)", desktop: "(computer layout - phones keep their own)" }[dev()];
+    $("devNote").textContent = { embed: "(chart inside the Terminal - the chart window and phones keep their own)", mobile: "(phone upright - sideways and computer layouts are kept separately)", landscape: "(phone sideways - upright and computer layouts are kept separately)", desktop: "(computer layout - phones keep their own)" }[dev()];
     $("sLayout").value = S.layout[dev()]; $("sPaneH").value = String(S.paneH[dev()]); $("sDataSize").value = S.dataSize[dev()]; $("sCandle").value = S.candle;
     $("cUp").value = S.up; $("cDown").value = S.down;
     const row = ([k, name, note, params]) => {
@@ -538,6 +546,14 @@
   // ------------------------------------------------------------------ toolbar
   $("sym").value = S.sym; $("tf").value = String(S.tf); $("days").value = String(S.days); $("view").value = S.view;
   const reload = () => { S.sym = $("sym").value; S.tf = Number($("tf").value); S.days = Number($("days").value); save(); A = null; OPT = null; lastSide = null; showOpt(); load(); };
+  window.addEventListener("message", e => {
+    const m = e.origin === location.origin && e.data && e.data.oiChartSync; if (!m || !EMBED) return;
+    const sym = String(m.symbol || "").toUpperCase(), tf = Number(m.interval);
+    if ((sym === S.sym || !["NIFTY", "BANKNIFTY"].includes(sym)) && (tf === S.tf || ![1, 3, 5, 15, 30].includes(tf))) return;
+    if (["NIFTY", "BANKNIFTY"].includes(sym)) $("sym").value = sym;
+    if ([1, 3, 5, 15, 30].includes(tf)) $("tf").value = String(tf);
+    reload();
+  });
   ["sym", "tf", "days"].forEach(id => $(id).onchange = reload);
   $("view").onchange = () => { S.view = $("view").value; save(); if (S.view === "index") toIndex("Index only: the chart stays on the index"); else if (A) autoView(A); };
   if (window.opener || window.self !== window.top) $("back").addEventListener("click", e => { if (window.opener) { e.preventDefault(); try { window.opener.focus(); } catch { } window.close(); } });
