@@ -33,7 +33,6 @@ jobs:
       - name: Point the app at the site
         run: |
           node -e "require('fs').writeFileSync('app-url.json', JSON.stringify({url: process.env.APP_URL.replace(/[/]+$/, '')}) + '\n')"
-          cat app-url.json
       - run: npm install --no-audit --no-fund
       - run: npx electron-builder --win nsis portable --x64 --publish never
         env:
@@ -57,4 +56,4 @@ jobs:
           gh release delete windows-latest --yes --cleanup-tag || true
           gh release create windows-latest OptionIntelligence-Setup.exe OptionIntelligence-Portable.exe --target "$GITHUB_SHA" \
             --title "Windows app (latest)" \
-            --notes "Option Intelligence for Windows 10 / 11 (64-bit) - opens $APP_URL in its own window, so website updates arrive by themselves. OptionIntelligence-Setup.exe installs it with Start-menu and desktop shortcuts; OptionIntelligence-Portable.exe runs without installing. Not code-signed: if Windows SmartScreen says 'Windows protected your PC', click More info -> Run anyway. Built from ${GITHUB_SHA::7}."
+            --notes "Option Intelligence for Windows 10 / 11 (64-bit) - opens your live terminal in its own window, so website updates arrive by themselves. OptionIntelligence-Setup.exe installs it with Start-menu and desktop shortcuts; OptionIntelligence-Portable.exe runs without installing. Not code-signed: if Windows SmartScreen says 'Windows protected your PC', click More info -> Run anyway. Built from ${GITHUB_SHA::7}."
