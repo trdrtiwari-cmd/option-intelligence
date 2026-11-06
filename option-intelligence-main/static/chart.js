@@ -25,7 +25,7 @@
       vwap: { on: true, color: "#ffffff", width: 2 },
       bb: { on: false, len: 20, mult: 2, color: "#5aa7ff" },
       st: { on: false, len: 10, mult: 3, up: "#25c58a", down: "#ff667a" },
-      vol: { on: true, up: "#25c58a", down: "#ff667a" },
+      vol: { on: true, up: "#25c58a", down: "#ff667a", ma: 20, maColor: "#f3c969" },
       lvl: { on: true, color: "#f3c969" },
       sr: { on: true, sup: "#25c58a", res: "#ff4d5e" },
       tl: { on: true, sup: "#3fd0c9", res: "#ffb547" },
@@ -42,7 +42,7 @@
       ["vwap", "VWAP", "Resets each session (futures volume)", []],
       ["bb", "Bollinger Bands", "Band = SMA ± multiplier × st.dev", [["len", "Length", 2, 200], ["mult", "Mult", 0.5, 5, 0.1]]],
       ["st", "Supertrend", "ATR length and multiplier", [["len", "ATR", 2, 100], ["mult", "Mult", 0.5, 10, 0.1]]],
-      ["vol", "Volume", "Bars at the bottom of the chart", []],
+      ["vol", "Volume", "Bars at the bottom of the chart, with a moving average line (MA 0 = no line)", [["ma", "MA", 0, 200]]],
       ["lvl", "Key levels", "Previous day high / low / close, today's open", []],
       ["sr", "Auto support / resistance", "Nearest 3 zones each side (S1-S3, R1-R3) of what is on the chart - index or option", []],
       ["tl", "Auto trendlines", "Support and resistance trendlines; dashed with ✕ when broken", []],
@@ -52,7 +52,7 @@
       ["macd", "MACD", "Pane: line, signal and histogram", [["fast", "Fast", 2, 100], ["slow", "Slow", 3, 200], ["sig", "Signal", 2, 50]]],
     ],
   };
-  const COLORS = { ema1: ["color"], ema2: ["color"], ema3: ["color"], sma: ["color"], vwap: ["color"], bb: ["color"], st: ["up", "down"], vol: ["up", "down"],
+  const COLORS = { ema1: ["color"], ema2: ["color"], ema3: ["color"], sma: ["color"], vwap: ["color"], bb: ["color"], st: ["up", "down"], vol: ["up", "down", "maColor"],
     lvl: ["color"], sr: ["sup", "res"], tl: ["sup", "res"], rsi: ["color"], macd: ["line", "signal"] };
 
   // ------------------------------------------------------------------ settings
@@ -173,6 +173,7 @@
 
   function clearSeries() {
     autoSer.forEach(s => { try { C.main.removeSeries(s); } catch { } });
+    drawSer.forEach(s => { try { C.main.removeSeries(s); } catch { } }); drawSer = []; drawLines = [];
     Object.values(ser).forEach(s => { for (const ch of Object.values(C)) { try { ch.removeSeries(s); } catch { } } });
     ser = {}; plines = []; autoSer = []; autoLines = []; autoKey = "";
   }
@@ -183,7 +184,11 @@
     if (S.candle === "bar") ser.price = m.addBarSeries({ upColor: S.up, downColor: S.down, thinBars: false });
     else if (S.candle === "line") ser.price = m.addLineSeries({ color: "#5aa7ff", lineWidth: 2 });
     else ser.price = m.addCandlestickSeries({ upColor: S.candle === "hollow" ? "rgba(0,0,0,0)" : S.up, downColor: S.down, borderUpColor: S.up, borderDownColor: S.down, wickUpColor: S.up, wickDownColor: S.down });
-    if (I.vol.on) { ser.vol = m.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false }); m.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } }); }
+    if (I.vol.on) {
+      ser.vol = m.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
+      m.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+      if (I.vol.ma > 0) ser.volMa = m.addLineSeries({ priceScaleId: "vol", color: I.vol.maColor, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: { type: "volume" } });
+    }
     if (I.bb.on) { ser.bbU = line(m, I.bb.color, 1); ser.bbM = line(m, I.bb.color, 1, { lineStyle: 2 }); ser.bbL = line(m, I.bb.color, 1); }
     ["ema3", "sma", "ema2", "ema1"].forEach(k => { if (I[k].on) ser[k] = line(m, I[k].color, I[k].width); });
     if (I.vwap.on) ser.vwap = line(m, I.vwap.color, I.vwap.width);
@@ -198,6 +203,7 @@
     }
     applyLayout();
     draw(true);
+    renderDrawings();
   }
   const pts = (arr, f) => cs.map((c, i) => arr[i] == null || !Number.isFinite(arr[i]) ? { time: c.time } : { time: c.time, value: f ? f(arr[i]) : arr[i] });
   function draw(fit) {
@@ -206,6 +212,7 @@
     const I = S.ind;
     ser.price.setData(S.candle === "line" ? cs.map(c => ({ time: c.time, value: c.close })) : cs.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
     if (ser.vol) ser.vol.setData(cs.map(c => ({ time: c.time, value: c.volume || 0, color: (c.close >= c.open ? I.vol.up : I.vol.down) + "66" })));
+    if (ser.volMa) ser.volMa.setData(pts(sma(cs.map(c => c.volume || 0), I.vol.ma)));
     ["ema1", "ema2", "ema3", "sma", "vwap"].forEach(k => { if (ser[k]) ser[k].setData(pts(IND[k])); });
     if (ser.bbU) { ser.bbU.setData(pts(IND.bb.up)); ser.bbM.setData(pts(IND.bb.mid)); ser.bbL.setData(pts(IND.bb.lo)); }
     if (ser.stU) {
@@ -282,6 +289,56 @@
     }
   }
 
+  // v1.20.51: drawing tools - trend line, ray, horizontal line, price zone. Saved on the account per chart (index, or each option
+  // contract), so they come back on every device. Tap / click points on the price chart.
+  const DKEY = "oi-chart-draw-v1";
+  let drawMode = null, drawPend = null, drawSer = [], drawLines = [];
+  const dKey = () => `${S.sym}|${OPT ? OPT.key : "index"}`;
+  const dAll = () => { try { const o = JSON.parse(localStorage.getItem(DKEY) || "{}"); return o && typeof o === "object" ? o : {}; } catch { return {}; } };
+  const dGet = () => dAll()[dKey()] || [];
+  const dSet = list => { const o = dAll(); if (list.length) o[dKey()] = list.slice(-60); else delete o[dKey()]; try { localStorage.setItem(DKEY, JSON.stringify(o)); } catch { } };
+  function renderDrawings() {
+    drawSer.forEach(s => { try { C.main.removeSeries(s); } catch { } }); drawSer = [];
+    drawLines.forEach(l => { try { ser.price.removePriceLine(l); } catch { } }); drawLines = [];
+    if (!ser.price || !cs.length) return;
+    const lastT = cs.at(-1).time, LS = LightweightCharts.LineStyle, noScale = () => null;
+    for (const d of dGet()) {
+      if (d.t === "hline" || d.t === "zone") {
+        (d.t === "hline" ? [d.p] : [d.p, d.p2]).forEach((p, k) => drawLines.push(ser.price.createPriceLine({ price: p, color: d.c, lineWidth: 2, lineStyle: d.t === "zone" ? LS.Dashed : LS.Solid, axisLabelVisible: true, title: d.t === "zone" ? (k ? "zone" : "zone") : "" })));
+        continue;
+      }
+      let a = d.a, b = d.b;
+      if (!a || !b || a.time === b.time) continue;
+      if (a.time > b.time) [a, b] = [b, a];
+      const pts_ = [a, b];
+      if (d.t === "ray" && lastT > b.time) { const slope = (b.value - a.value) / (b.time - a.time); pts_.push({ time: lastT, value: b.value + slope * (lastT - b.time) }); }
+      const s = C.main.addLineSeries({ color: d.c, lineWidth: 2, priceLineVisible: false, lastValueVisible: d.t === "ray", crosshairMarkerVisible: false, autoscaleInfoProvider: noScale });
+      try { s.setData(pts_); drawSer.push(s); } catch { try { C.main.removeSeries(s); } catch { } }
+    }
+  }
+  function setTool(t) {
+    drawMode = drawMode === t ? null : t; drawPend = null;
+    document.querySelectorAll("#drawBar [data-tool]").forEach(b => b.classList.toggle("on", b.dataset.tool === drawMode));
+    $("drawHint").textContent = !drawMode ? "" : drawMode === "hline" ? "Tap a price" : drawMode === "zone" ? "Tap the top, then the bottom of the zone" : "Tap the first point";
+  }
+  document.querySelectorAll("#drawBar [data-tool]").forEach(b => b.onclick = () => setTool(b.dataset.tool));
+  $("drawUndo").onclick = () => { const l = dGet(); l.pop(); dSet(l); renderDrawings(); };
+  $("drawClear").onclick = () => { if (dGet().length && confirm("Remove all drawings on this chart?")) { dSet([]); renderDrawings(); } };
+  C.main.subscribeClick(param => {
+    if (!drawMode || !param || !param.point || !ser.price) return;
+    const price = ser.price.coordinateToPrice(param.point.y);
+    let time = param.time != null ? param.time : C.main.timeScale().coordinateToTime(param.point.x);
+    if (time == null && cs.length) time = cs.at(-1).time;
+    if (!Number.isFinite(price)) return;
+    const c = $("drawColor").value || "#5aa7ff", p = Math.round(price * 100) / 100;
+    if (drawMode === "hline") { dSet([...dGet(), { t: "hline", p, c }]); setTool(null); renderDrawings(); return; }
+    if (!drawPend) { drawPend = { time, value: p }; $("drawHint").textContent = drawMode === "zone" ? "Now tap the bottom of the zone" : "Now tap the second point"; return; }
+    const item = drawMode === "zone" ? { t: "zone", p: drawPend.value, p2: p, c } : { t: drawMode, a: drawPend, b: { time, value: p }, c };
+    if (drawMode !== "zone" && item.a.time === item.b.time) { $("drawHint").textContent = "Pick a second point on another candle"; return; }
+    dSet([...dGet(), item]); setTool(null); renderDrawings();
+  });
+  window.addEventListener("storage", e => { if (e.key === DKEY) renderDrawings(); });
+
   // ------------------------------------------------------------------ legend (crosshair) and data panel
   function legend(param) {
     let i = cs.length - 1;
@@ -294,7 +351,7 @@
     if (I.st.on && IND) items.push(`<span style="color:${IND.st.dir[i] === 1 ? I.st.up : I.st.down}">ST ${fmt(IND.st.line[i])}</span>`);
     if (I.bb.on && IND) items.push(`<span style="color:${I.bb.color}">BB ${fmt(IND.bb.up[i])} / ${fmt(IND.bb.lo[i])}</span>`);
     $("legend").innerHTML = `<div><b>${esc(OPT ? OPT.name : S.sym)}</b> ${S.tf}m · ${crossFmt(c.time)}</div>` +
-      `<div>O <b>${fmt(c.open)}</b> H <b>${fmt(c.high)}</b> L <b>${fmt(c.low)}</b> C <b style="${col(ch)}">${fmt(c.close)}</b> <span style="${col(ch)}">${sgn(ch)}</span>${c.volume ? ` · Vol ${Number(c.volume).toLocaleString("en-IN")}` : ""}</div>` +
+      `<div>O <b>${fmt(c.open)}</b> H <b>${fmt(c.high)}</b> L <b>${fmt(c.low)}</b> C <b style="${col(ch)}">${fmt(c.close)}</b> <span style="${col(ch)}">${sgn(ch)}</span>${c.volume ? ` · Vol ${Number(c.volume).toLocaleString("en-IN")}${I.vol.on && I.vol.ma > 0 && i >= I.vol.ma - 1 ? ` (avg ${Math.round(cs.slice(i - I.vol.ma + 1, i + 1).reduce((a, x) => a + (x.volume || 0), 0) / I.vol.ma).toLocaleString("en-IN")})` : ""}` : ""}</div>` +
       `<div class="ind">${items.join("")}</div>`;
     if (I.rsi.on) $("rsiTag").textContent = `RSI ${I.rsi.len}: ${fmt(v("rsi"), 1)}`;
     if (I.macd.on && IND) $("macdTag").textContent = `MACD ${I.macd.fast},${I.macd.slow},${I.macd.sig}: ${fmt(IND.macd.line[i])} · signal ${fmt(IND.macd.sig[i])} · hist ${fmt(IND.macd.hist[i])}`;
@@ -467,7 +524,7 @@
       if (g !== loadGen) return;
       cs = prep(d.candles); tick = null;
       if (!cs.length) { $("live").textContent = "No candles yet"; return; }
-      draw(true);
+      draw(true); renderDrawings();
       $("live").textContent = `${cs.length} candles · ${OPT ? "option premium" : d.volume_source ? "volume: " + d.volume_source : "no volume"}`;
     } catch (e) { $("live").textContent = "Candles unavailable: " + e.message; }
   }

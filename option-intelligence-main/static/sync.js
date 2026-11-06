@@ -23,7 +23,8 @@
     "oi-sig-qty": "pref-sig-qty",
     "oi-sig-delta": "pref-sig-delta",
     "oi-settings-v1": "settings",
-    "oi-chart-v1": "pref-chart",                  // v1.20.43 chart window: indicators, colours, layouts                 // symbol, timeframe, chart overlays, paper-trade form, filters... (see prefs.js)
+    "oi-chart-v1": "pref-chart",
+    "oi-chart-draw-v1": "pref-chart-draw",       // v1.20.51 lines drawn on the charts                  // v1.20.43 chart window: indicators, colours, layouts                 // symbol, timeframe, chart overlays, paper-trade form, filters... (see prefs.js)
   };
   const REV = Object.fromEntries(Object.entries(MAP).map(([l, s]) => [s, l]));
   const META_KEY = "oi-sync-meta";
