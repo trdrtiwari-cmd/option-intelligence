@@ -1,7 +1,7 @@
 {
   "name": "option-intelligence-desktop",
   "productName": "Option Intelligence",
-  "version": "1.20.42",
+  "version": "1.20.43",
   "description": "Option Intelligence for Windows - opens the live terminal",
   "main": "main.js",
   "author": "Option Intelligence",

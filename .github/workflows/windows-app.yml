@@ -21,7 +21,7 @@ jobs:
   windows:
     runs-on: windows-latest
     env:
-      APP_URL: ${{ inputs.app_url || 'https://option-intelligence-vqtl.onrender.com' }}
+      APP_URL: ${{ inputs.app_url || secrets.APP_URL || 'https://option-intelligence-vqtl.onrender.com' }}
     defaults:
       run:
         shell: bash

@@ -1,4 +1,4 @@
-// Option Intelligence for Windows (v1.20.42).
+// Option Intelligence for Windows (v1.20.43).
 // A desktop window around the live terminal on Render - the same app as the website and the Android APK, so every website update
 // arrives without a new download and there is no local engine (no Python, no database on this PC) to break.
 const { app, BrowserWindow, Menu, shell, Notification, ipcMain } = require("electron");
