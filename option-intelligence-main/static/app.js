@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.29";
+const FRONTEND_VERSION="1.20.30";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -349,14 +349,14 @@ function renderBuyPlan(a){
   $("bpNote").textContent=ok?"Paper signal, recorded in the Daily Signal Log with these levels. Index levels decide the exit; the premium levels are delta/gamma estimates.":
     plan?("No buy: "+bad.map(c=>`${c.label} — ${c.detail}`).join(" · ")):"Strike chosen automatically (2 strikes in the money on the signal side, by default). Stop-loss and target are set when the signal is confirmed and passes the profit check.";
 }
-let lastAutoOptionKey=null,lastAutoSide=null,autoIdleSince=null;
+let lastAutoOptionKey=null,lastAutoSide=null,autoIdleSince=null,autoPicking=false;
 try{lastAutoOptionKey=sessionStorage.getItem("oiAutoPick")||null}catch{}
-// v1.20.29: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
+// v1.20.30: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
 // morning while NIFTY rallied to 25,030). If the contract on screen was picked automatically (not by you) and there has been no
 // setup for 10 minutes - or 2 minutes when the engine now leans the other side - the chart goes back to the index.
 function autoRevertOption(a){
   if(($("autoOption")&&$("autoOption").value)==="off"||$("chartView").value!=="option"||!paperSelected||!lastAutoOptionKey||paperSelected.instrument_key!==lastAutoOptionKey){autoIdleSince=null;return}
-  if(!autoIdleSince){autoIdleSince=Date.now();return}
+  if(!autoIdleSince){autoIdleSince=Date.now();if(!marketOpen&&a&&a.side&&a.side!==paperSelected.type)autoIdleSince-=11*60000;else return}
   const opposite=!!(a&&a.side&&a.side!==paperSelected.type),idle=Date.now()-autoIdleSince;
   if(idle<(opposite?2:10)*60000)return;
   autoIdleSince=null;lastAutoSide=null;lastAutoOptionKey=null;try{sessionStorage.removeItem("oiAutoPick")}catch{}   // the next setup may pick again
@@ -376,7 +376,7 @@ function autoSwitchOption(a){
   lastAutoSide=pk.type;
   lastAutoOptionKey=pk.instrument_key;try{sessionStorage.setItem("oiAutoPick",pk.instrument_key)}catch{}
   if(pk.lot_size)chainLotSize=pk.lot_size;
-  if(!(paperSelected&&paperSelected.instrument_key===pk.instrument_key))selectPaperContract(pk.type,pk.strike,pk.instrument_key,pk.ltp,pk.expiry,null);
+  if(!(paperSelected&&paperSelected.instrument_key===pk.instrument_key)){autoPicking=true;try{selectPaperContract(pk.type,pk.strike,pk.instrument_key,pk.ltp,pk.expiry,null)}finally{autoPicking=false}}
   if($("chartView").value!=="option"){$("chartView").value="option";try{$("chartView").dispatchEvent(new Event("change"))}catch{refreshChartSource()}}
   toast(`${lvl} ${pk.type}: chart switched to ${pk.name||pk.strike+" "+pk.type} (${pk.label}) @ ${fmt(pk.ltp)}`);
 }
@@ -1068,7 +1068,7 @@ function paperSelectedLabel(){return paperSelected?`${paperSelected.symbol} ${pa
 function selectPaperContract(type,strike,instrumentKey,ltp,expiry,button){
   if(!instrumentKey){toast("This option has no instrument key in the chain response.");return}
   paperSelected={symbol:getSymbol(),type,strike:Number(strike),instrument_key:instrumentKey,expiry:String(expiry||$("expiry").value),ltp:Number(ltp)||null,quoteStatus:"CHAIN_SNAPSHOT",lot:chainLotSize||null};
-  try{const c=paperSelected;window.OIPrefs&&window.OIPrefs.set("terminal.contract",{symbol:c.symbol,type:c.type,strike:c.strike,instrument_key:c.instrument_key,expiry:c.expiry,lot:c.lot})}catch{}   // remembered so "Selected option premium" survives a reload
+  try{const c=paperSelected;window.OIPrefs&&window.OIPrefs.set("terminal.contract",{symbol:c.symbol,type:c.type,strike:c.strike,instrument_key:c.instrument_key,expiry:c.expiry,lot:c.lot,auto:!!autoPicking})}catch{}   // remembered so "Selected option premium" survives a reload
   {const lot=paperSelected.lot||1;$("paperQty").value=String(lot);$("paperQty").step=String(lot);$("paperLotHint").textContent=paperSelected.lot?` · 1 lot = ${paperSelected.lot}`:""}
   paperAtr=null;$("paperAtrValue").textContent="UNAVAILABLE";
   api(`/api/pin-option?symbol=${encodeURIComponent(paperSelected.symbol)}&instrument_key=${encodeURIComponent(instrumentKey)}`).catch(()=>{}); // put it on the live WebSocket now
@@ -1411,7 +1411,8 @@ function restoreSavedContract(){try{
   if(!c||!c.instrument_key||c.symbol!==getSymbol())return;
   if(/^\d{4}-\d{2}-\d{2}$/.test(String(c.expiry))&&c.expiry<new Date().toISOString().slice(0,10))return;   // expired contract: do not revive
   if(paperSelected&&paperSelected.instrument_key===c.instrument_key)return;                               // already selected
-  selectPaperContract(c.type,c.strike,c.instrument_key,null,c.expiry,null);
+  autoPicking=c.auto!==false;try{selectPaperContract(c.type,c.strike,c.instrument_key,null,c.expiry,null)}finally{autoPicking=false}
+  if(c.auto!==false){lastAutoOptionKey=c.instrument_key;lastAutoSide=null;autoIdleSince=Date.now()-11*60000;try{sessionStorage.setItem("oiAutoPick",c.instrument_key)}catch{}}
   if(c.lot&&paperSelected){paperSelected.lot=c.lot;$("paperQty").value=String(c.lot);$("paperQty").step=String(c.lot);$("paperLotHint").textContent=` · 1 lot = ${c.lot}`}
 }catch(e){console.warn("contract restore failed",e)}}
 restoreSavedContract();
@@ -1647,7 +1648,7 @@ function escapeHtml(t){return String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;",
   });})();
 
 
-// v1.20.29: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
+// v1.20.30: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
 // The server dedupes moments across tabs/phones and caps calls per day; the AI never changes the signal.
 const aiLive={busy:false,lastKey:"",combo:""};
 function aiLiveCombo(){return `${getSymbol()}|${getInterval()}|${getMode()}`}
