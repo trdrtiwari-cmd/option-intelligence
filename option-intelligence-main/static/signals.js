@@ -147,6 +147,7 @@ async function loadConfig() {
     if ($('optRulesNow') && cfg.decision_rules_now) $('optRulesNow').textContent = Object.entries(cfg.decision_rules_now).map(([k, v]) => `${k}: ${v.note}`).join(' · ');
     if ($('optStratNifty')) $('optStratNifty').value = cfg.strategy_nifty || 'pullback';
     if ($('optStratBank')) $('optStratBank').value = cfg.strategy_banknifty || 'off';
+    if ($('optPaperMacd')) $('optPaperMacd').value = cfg.paper_macd || 'on';
     $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · stop at least ${cfg.min_sl_atr ?? 1.5} ATR (${cfg.min_sl_points ?? 20} pts) · entries ${cfg.entry_windows || ''} IST${cfg.one_per_side === 'on' ? ' · only the first BUY per side each day' : ''}${cfg.daily_target_rs ? ` · stop for the day at ₹${Number(cfg.daily_target_rs).toLocaleString('en-IN')} profit` : ''}${cfg.trend_entry && cfg.trend_entry !== 'off' ? ' · strong-trend entries: ' + cfg.trend_entry : ''}.`;
   }
 }
@@ -190,7 +191,8 @@ async function saveAtr(reset) {
                           ...($('optTrendEntry') ? {opt_trend_entry: $('optTrendEntry').value} : {}),
                           ...($('optRules') ? {opt_decision_rules: $('optRules').value} : {}),
                           ...($('optStratNifty') ? {opt_strategy_nifty: $('optStratNifty').value} : {}),
-                          ...($('optStratBank') ? {opt_strategy_banknifty: $('optStratBank').value} : {})});
+                          ...($('optStratBank') ? {opt_strategy_banknifty: $('optStratBank').value} : {}),
+                          ...($('optPaperMacd') ? {opt_paper_macd: $('optPaperMacd').value} : {})});
   const keepAtr = cfg.custom ? {sl_atr: cfg.sl_atr, target_atr: cfg.target_atr} : {};
   const keepCost = $('costPts').value === '' ? {} : {cost_points: Number($('costPts').value)};
   const body = reset === 'opt' ? {...optBody(), ...keepAtr, ...keepCost} : reset ? optBody() : {...optBody(), sl_atr: $('slAtr').value === '' ? null : Number($('slAtr').value), target_atr: $('tgtAtr').value === '' ? null : Number($('tgtAtr').value),
@@ -358,3 +360,21 @@ $('monReport').onclick = async () => {
   try { $('monSaved').textContent = window.oiSave ? await window.oiSave(name, lines.join('\n'), 'text/plain') : 'Saving is not available on this page.'; }
   catch (e) { $('monSaved').textContent = 'Could not save the report: ' + e.message; }
 };
+
+// ---- v1.20.41 paper test (MACD turn, loose) - logged and scored only, never a BUY
+async function loadPaper() {
+  if (!$('paperRows')) return;
+  try {
+    const r = await fetch('/api/paper-tests?symbol=NIFTY&days=30', {credentials: 'same-origin'});
+    if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch {} throw Error(d || r.status); }
+    const d = await r.json(), a = d.all || {}, h = x => x && x.n ? `${x.n} trades, ${x.win_rate}% won, ${signed(x.avg, 1)} pts each` : '—';
+    $('paperVerdict').innerHTML = `${d.on ? '' : '<b>Switched off</b> (Signals settings) · '}Last 30 days: <b>${a.n ? `${a.n} closed trades, ${a.win_rate}% won, ${signed(a.avg, 1)} pts each (${signed(a.total, 1)} total)` : 'no closed trades yet'}</b>` +
+      (d.first ? ` · first half ${h(d.first)} · second half ${h(d.second)}` : '') + ` · Verdict: <b>${esc(d.verdict || '')}</b>`;
+    $('paperRows').innerHTML = (d.trades || []).length ? d.trades.map(t =>
+      `<tr><td>${esc(t.day)}</td><td>${esc(t.bar_time)} <span class="sig-sub">score ${t.score ?? '—'}</span></td><td><b>${esc(t.side)}</b></td><td>${t.entry != null ? fmt(t.entry) : '—'}</td>` +
+      `<td style="${tone(t.pts)}"><b>${t.pts == null ? '—' : signed(t.pts, 1)}</b></td><td>${t.mfe != null ? '+' + fmt(t.mfe, 1) + ' / −' + fmt(t.mae, 1) : '—'}</td><td>${esc(t.status)}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="empty">No paper entries yet - they are logged during market hours (09:45 onwards, inside the entry windows).</td></tr>';
+  } catch (e) { $('paperVerdict').textContent = 'Could not load the paper test: ' + e.message; $('paperRows').innerHTML = ''; }
+}
+if ($('paperRefresh')) $('paperRefresh').addEventListener('click', loadPaper);
+loadPaper(); setInterval(loadPaper, 120000);

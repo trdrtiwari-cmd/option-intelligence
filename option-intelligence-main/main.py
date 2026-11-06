@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.40"
+APP_VERSION = "1.20.41"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -968,6 +968,17 @@ async def diagnostics_live_settings(request: Request):
     return {"interval": iv, "mode": mode, "score_min": score_min}
 
 
+@app.get("/api/paper-tests")
+async def paper_tests_api(request: Request, symbol: str = "NIFTY", days: int = 30):
+    """v1.20.41: forward (paper) results of the loose MACD-turn test - logged live, scored like Diagnostics. Never a BUY."""
+    _need_user(request)
+    if symbol.upper() not in ptest.SYMBOLS:
+        raise HTTPException(400, "Paper test runs on NIFTY only")
+    if not 1 <= days <= 30:
+        raise HTTPException(400, "days must be 1-30")
+    return await _paper_results(symbol.upper(), days)
+
+
 @app.post("/api/diagnostics/start")
 async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 30, mode: str = "standard",
                             cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 60, pattern_minutes: int = 0,
@@ -1736,6 +1747,47 @@ async def _store_rules_advice(sym, rep):
         logger.warning("Rules advice not saved: %s", str(exc)[:120])
 
 
+PAPER_MACD_DEFAULT = os.getenv("PAPER_MACD", "on").strip().lower()
+
+
+def paper_macd_on():
+    """v1.20.41: the loose MACD-turn paper test (NIFTY) - on by default; Signals page setting wins, then PAPER_MACD env."""
+    return (OPTION_OVERRIDES.get("paper_macd") or PAPER_MACD_DEFAULT) == "on"
+
+
+async def _paper_check(sym, interval, mode, score_min, a, raw_candles):
+    """Log a paper entry when the loose MACD rule fires on the last closed candle. Only for the live setting (ALERT_INTERVAL /
+    ALERT_MODE / ALERT_SCORE_MIN) so other terminals do not log copies; never touches the live signal, alerts or BUY."""
+    if sym not in ptest.SYMBOLS or not paper_macd_on() or not in_session():
+        return
+    _s, l_iv, l_mode, l_score, _d = _poller_cfg()
+    if (interval, mode, score_min) != (l_iv, l_mode, l_score):
+        return
+    try:
+        cs_closed, _ = drop_forming(normalize_candles(raw_candles), interval)
+        entry = ptest.check_macd_loose(a, cs_closed, interval, sf.in_entry_window)
+        if entry and await asyncio.to_thread(ptest.record, SIGNAL_LOG_DB, sym, interval, entry, SIGNAL_LOG_LOCK):
+            logger.info("Paper test %s: %s %s at %s", entry["strategy"], sym, entry["side"], entry["bar_time"])
+            data = await asyncio.to_thread(ptest.dump, SIGNAL_LOG_DB, 90, SIGNAL_LOG_LOCK)
+            await asyncio.to_thread(acc.meta_set, "paper_trades", json.dumps(data))
+    except Exception as exc:
+        logger.warning("Paper test check failed for %s: %s", sym, str(exc)[:160])
+
+
+async def _paper_results(sym="NIFTY", days=30):
+    _s, iv, _m, _sc, _d = _poller_cfg()
+    end = ist_now().date()
+    start = (end - timedelta(days=days)).isoformat()
+    logged = await asyncio.to_thread(ptest.rows, SIGNAL_LOG_DB, "macd_loose", sym, start, end.isoformat(), SIGNAL_LOG_LOCK)
+    raw = []
+    if logged:
+        span = (end - datetime.strptime(logged[0]["day"], "%Y-%m-%d").date()).days + 2
+        raw = (await candles(symbol=sym, interval=iv, days=max(2, min(30, span))))["candles"]
+    res = await asyncio.to_thread(ptest.results, logged, raw, iv)
+    return {"strategy": "macd_loose", "label": ptest.STRATEGIES["macd_loose"], "symbol": sym, "interval": iv, "on": paper_macd_on(),
+            "from": start, "to": end.isoformat(), **res}
+
+
 STRATEGY_DEFAULTS = {"NIFTY": os.getenv("STRATEGY_NIFTY", "pullback"), "BANKNIFTY": os.getenv("STRATEGY_BANKNIFTY", "off")}
 
 
@@ -1804,6 +1856,8 @@ def _float_or_none(value):
 
 init_signal_log()
 sb.init(SIGNAL_LOG_DB)          # v1.19.5 signal board (every option signal, same file)
+import paper_tests as ptest
+ptest.init(SIGNAL_LOG_DB)       # v1.20.41 paper-only strategy tests (same file)
 mon.init(SIGNAL_LOG_DB)         # v1.20.0 strategy monitor findings + Claude reviews (same file)
 
 
@@ -2035,6 +2089,9 @@ async def _restore_signal_log_and_config():
         ra = await asyncio.to_thread(acc.meta_get, "rules_advice")
         if ra:
             RULES_ADVICE.update(json.loads(ra))
+        pt = await asyncio.to_thread(acc.meta_get, "paper_trades")
+        if pt:
+            await asyncio.to_thread(ptest.load, SIGNAL_LOG_DB, json.loads(pt), SIGNAL_LOG_LOCK)
         n = await asyncio.to_thread(restore_signal_log)
         _SIGNAL_LOG_DIRTY.set()          # first mirror of anything already in the local file
         if n:
@@ -2528,6 +2585,11 @@ async def _period_export(request, day, period, client):
     rvs = await asyncio.to_thread(mon.reviews, SIGNAL_LOG_DB, start, day, 200, SIGNAL_LOG_LOCK)
     ctx = mon.period_context(period, start, day, rows, sx.summarize, [e for e in evs if e["kind"] != "SUGGESTION"], rvs,
                              mon.board_gate_stats(board), mon.missed_from_board(board), _latest_diagnostics_summary())
+    try:
+        pr_ = await _paper_results("NIFTY", 7 if period == "week" else 30)
+        ctx["paper_test"] = {k: pr_.get(k) for k in ("label", "on", "all", "first", "second", "verdict")} | {"trades": (pr_.get("trades") or [])[:40]}
+    except Exception as exc:
+        ctx["paper_test"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:
         ctx["terminal"] = await _terminal_snapshot(ist_now().date().isoformat())
     except Exception as exc:
@@ -3248,7 +3310,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols", "strategy_nifty", "strategy_banknifty", "decision_rules")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols", "strategy_nifty", "strategy_banknifty", "decision_rules", "paper_macd")
 
 
 def _set_option_overrides(d):
@@ -3358,6 +3420,7 @@ async def signal_log_config():
             "buy_symbols": ",".join(buy_symbols()),
             "strategy_nifty": strategy_for("NIFTY"), "strategy_banknifty": strategy_for("BANKNIFTY"),
             "decision_rules": OPTION_OVERRIDES.get("decision_rules") or DECISION_RULES_DEFAULT,
+            "paper_macd": paper_macd_on() and "on" or "off",
             "decision_rules_now": {s_: dict(zip(("mode", "note"), rules_mode(s_))) for s_ in INDEX_KEYS},
             "trend_entry": __import__("trend_entry").TREND_ENTRY,
             "indicator_changes": __import__("indicators").tune_changes(),
@@ -3384,6 +3447,7 @@ class SignalLogConfig(BaseModel):
     opt_strategy_nifty: Optional[str] = None    # v1.20.36: pullback | orb30 | off
     opt_strategy_banknifty: Optional[str] = None
     opt_decision_rules: Optional[str] = None    # v1.20.39: auto | strict | balanced
+    opt_paper_macd: Optional[str] = None        # v1.20.41: on | off - paper test of the loose MACD turn (NIFTY)
 
 
 @app.post("/api/signals/config")
@@ -3441,6 +3505,10 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         if payload.opt_decision_rules not in ("auto", "strict", "balanced"):
             raise HTTPException(400, "Decision rules must be auto, strict or balanced")
         new["opt_decision_rules"] = payload.opt_decision_rules
+    if payload.opt_paper_macd:
+        if payload.opt_paper_macd not in ("on", "off"):
+            raise HTTPException(400, "Paper test must be on or off")
+        new["opt_paper_macd"] = payload.opt_paper_macd
     import orb_live as _orbm
     for k_, v_ in (("opt_strategy_nifty", payload.opt_strategy_nifty), ("opt_strategy_banknifty", payload.opt_strategy_banknifty)):
         if v_:
@@ -3696,6 +3764,7 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
         raise
     if a.get("status") != "ok":
         return a
+    await _paper_check(sym, interval, mode, score_min, a, result.get("candles") or [])
     orb_replay = None
     if sym in INDEX_KEYS and strategy_for(sym) == "orb30":
         try:                       # v1.20.36: this index trades the Opening Range Breakout instead of the pullback engine
