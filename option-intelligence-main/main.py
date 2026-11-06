@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.48"
+APP_VERSION = "1.20.49"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -972,6 +972,28 @@ async def diagnostics_live_settings(request: Request):
     _need_user(request)
     _s, iv, mode, score_min, _d = _poller_cfg()
     return {"interval": iv, "mode": mode, "score_min": score_min}
+
+
+@app.post("/api/client-issues")
+async def client_issues_post(request: Request):
+    """v1.20.49: every page sends the problems it hit (script errors, failed requests, warnings shown) - kept for Download for Claude."""
+    _need_user(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "JSON body expected")
+    rows = cis.clean((body or {}).get("items") if isinstance(body, dict) else None, ist_now())
+    if not rows:
+        return {"ok": True, "saved": 0}
+    n = await asyncio.to_thread(cis.add, SIGNAL_LOG_DB, rows, SIGNAL_LOG_LOCK)
+    if time.time() - _CIS_MIRROR[0] > 120:                 # Render's disk is wiped on restart: keep a copy in the accounts database
+        _CIS_MIRROR[0] = time.time()
+        try:
+            data = await asyncio.to_thread(cis.dump, SIGNAL_LOG_DB, 14, SIGNAL_LOG_LOCK)
+            await asyncio.to_thread(acc.meta_set, "client_issues", cis.to_json(data))
+        except Exception as exc:
+            logger.info("Client issues not mirrored: %s", str(exc)[:120])
+    return {"ok": True, "saved": n}
 
 
 @app.get("/api/paper-tests")
@@ -1864,6 +1886,9 @@ init_signal_log()
 sb.init(SIGNAL_LOG_DB)          # v1.19.5 signal board (every option signal, same file)
 import paper_tests as ptest
 ptest.init(SIGNAL_LOG_DB)       # v1.20.41 paper-only strategy tests (same file)
+import client_issues as cis
+cis.init(SIGNAL_LOG_DB)         # v1.20.49 problems reported by the pages (same file)
+_CIS_MIRROR = [0.0]
 mon.init(SIGNAL_LOG_DB)         # v1.20.0 strategy monitor findings + Claude reviews (same file)
 
 
@@ -2095,6 +2120,9 @@ async def _restore_signal_log_and_config():
         ra = await asyncio.to_thread(acc.meta_get, "rules_advice")
         if ra:
             RULES_ADVICE.update(json.loads(ra))
+        ci = await asyncio.to_thread(acc.meta_get, "client_issues")
+        if ci:
+            await asyncio.to_thread(cis.load, SIGNAL_LOG_DB, json.loads(ci), SIGNAL_LOG_LOCK)
         pt = await asyncio.to_thread(acc.meta_get, "paper_trades")
         if pt:
             await asyncio.to_thread(ptest.load, SIGNAL_LOG_DB, json.loads(pt), SIGNAL_LOG_LOCK)
@@ -2602,10 +2630,13 @@ async def _period_export(request, day, period, client):
         ctx["terminal"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     if client:
         ctx["page"] = json.loads(json.dumps(client, default=str)[:20000]) if len(json.dumps(client, default=str)) <= 20000 else {"note": "page snapshot too large"}
+    ci_rows = await asyncio.to_thread(cis.query, SIGNAL_LOG_DB, start, day, SIGNAL_LOG_LOCK)
+    ctx["client_issues"] = ci_rows
     try:
         checks = mon.consistency_checks(ctx)
     except Exception as exc:
         checks = [f"checks failed: {exc}"[:120]]
+    checks = cis.summary(ci_rows) + list(checks)
     ctx = {"checks": checks, **ctx}
     blob = json.dumps(mon.chat_bundle(ctx, period), default=str, ensure_ascii=False, separators=(",", ":"))
     return Response(blob, media_type="application/json",
@@ -2650,10 +2681,13 @@ async def _monitor_export_impl(request, day="", fresh=0, client=None, period="da
             ctx["terminal"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     if client:
         ctx["page"] = json.loads(json.dumps(client, default=str)[:20000]) if len(json.dumps(client, default=str)) <= 20000 else {"note": "page snapshot too large"}
+    ci_rows = await asyncio.to_thread(cis.query, SIGNAL_LOG_DB, day, day, SIGNAL_LOG_LOCK)
+    ctx["client_issues"] = ci_rows
     try:
         checks = mon.consistency_checks(ctx)
     except Exception as exc:
         checks = [f"checks failed: {exc}"[:120]]
+    checks = cis.summary(ci_rows) + list(checks)
     ctx = {"checks": checks, **{k: v for k, v in ctx.items() if k != "checks"}}      # v1.20.31: issues first in the file
     blob = json.dumps(mon.chat_bundle(ctx), default=str, ensure_ascii=False, separators=(",", ":"))   # compact: fits a paste
     return Response(blob, media_type="application/json",
