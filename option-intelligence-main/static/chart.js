@@ -336,9 +336,19 @@
     save(); build();
   }
   $("set").addEventListener("change", onSet);
-  $("openSet").onclick = () => { renderSettings(); $("set").classList.add("open"); };
-  $("closeSet").onclick = () => $("set").classList.remove("open");
-  $("set").addEventListener("click", e => { if (e.target.id === "set") $("set").classList.remove("open"); });
+  // v1.20.45: "← Back to chart" at the top, Done at the bottom, a tap outside, or the phone's back key all close the drawer
+  const setOpen = () => $("set").classList.contains("open");
+  function closeSet(fromHistory) {
+    if (!setOpen()) return;
+    $("set").classList.remove("open");
+    if (!fromHistory && history.state && history.state.oiChartSet) { try { history.back(); } catch { } }
+  }
+  $("openSet").onclick = () => { renderSettings(); $("set").classList.add("open"); try { history.pushState({ oiChartSet: 1 }, ""); } catch { } };
+  $("closeSet").onclick = () => closeSet(false);
+  $("backSet").onclick = () => closeSet(false);
+  $("set").addEventListener("click", e => { if (e.target.id === "set") closeSet(false); });
+  window.addEventListener("popstate", () => closeSet(true));
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeSet(false); });
   $("resetSet").onclick = () => { const keep = { sym: S.sym, tf: S.tf, days: S.days }; S = { ...clone(DEF), ...keep }; save(); renderSettings(); build(); toast("Chart settings reset"); };
   $("layout").onchange = e => { S.layout[dev()] = e.target.value; save(); applyLayout(); };
 

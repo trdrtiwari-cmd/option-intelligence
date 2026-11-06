@@ -207,6 +207,20 @@
       if (p) { e.preventDefault(); showTab(p, true); }
     }, true);
     window.addEventListener("message", e => { if (e.origin === location.origin && e.data && e.data.oiTab) showTab(e.data.oiTab, true); });
+    // v1.20.45: all tabs live together - each tab is loaded in the background a few seconds after the app opens (one at a time),
+    // then keeps running hidden, so switching tabs shows data that is already loaded and updating.
+    const preload = TAB_PATHS.filter(p => p !== hostPath);
+    const next = () => {
+      const p = preload.shift(); if (!p) return;
+      if (!frames[p]) {
+        const f = document.createElement("iframe");
+        f.className = "oi-tab-frame"; f.title = p; f.src = p;
+        f.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0;z-index:800;background:var(--bg,#0b1420);display:none";
+        document.body.appendChild(f); frames[p] = f;
+        f.addEventListener("load", () => setTimeout(next, 1500), { once: true });
+      } else next();
+    };
+    setTimeout(next, 4000);
     window.addEventListener("popstate", e => showTab((e.state && e.state.oiTab) || (location.pathname.replace(/\/+$/, "") || "/"), false));
     try { history.replaceState({ oiTab: hostPath }, "", location.href); } catch { }
   }
