@@ -1,0 +1,28 @@
+# One-off check: what does the Render address answer? (results appear as notices on the run)
+name: site-check
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/site-check.yml"]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe
+        env:
+          SECRET_URL: ${{ secrets.APP_URL }}
+        run: |
+          for u in "https://option-intelligence-vqtl.onrender.com/" "https://option-intelligence-vqtl.onrender.com/health"; do
+            for k in 1 2 3; do
+              h=$(curl -s -o /tmp/b -D - --max-time 90 "$u" | tr -d '\r' | grep -iE '^(HTTP|x-render|server|location|content-type)' | tr '\n' ' ')
+              echo "::notice::$u try $k -> $h body: $(head -c 120 /tmp/b | tr -d '\n\r')"
+              sleep 10
+            done
+          done
+          if [ -n "$SECRET_URL" ]; then
+            same=no; [ "${SECRET_URL%/}" = "https://option-intelligence-vqtl.onrender.com" ] && same=yes
+            h=$(curl -s -o /tmp/b -D - --max-time 90 "${SECRET_URL%/}/health" | tr -d '\r' | grep -iE '^(HTTP|x-render)' | tr '\n' ' ')
+            echo "::notice::keepalive secret APP_URL set (same as default: $same, host length ${#SECRET_URL}) -> $h body: $(head -c 120 /tmp/b | tr -d '\n\r')"
+          else
+            echo "::notice::keepalive secret APP_URL not set"
+          fi
