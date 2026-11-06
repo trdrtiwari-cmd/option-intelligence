@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.28"
+APP_VERSION = "1.20.29"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -962,7 +962,7 @@ async def diagnostics_page():
 
 @app.post("/api/diagnostics/start")
 async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 15, mode: str = "scalp",
-                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 70, pattern_minutes: int = 0):
+                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 60, pattern_minutes: int = 0):
     """Replays the technical engine over the last `days` of candles and measures what happened after every signal.
     Runs in a background thread (a 20-day replay takes several seconds locally and longer on a free instance)."""
     _need_user(request)
@@ -1289,7 +1289,7 @@ def _ws_sub(msg, cur):
             out["interval"] = iv
         if msg.get("mode") in MODES:
             out["mode"] = msg["mode"]
-        sm = int(msg.get("score_min", out.get("score_min", 70)))
+        sm = int(msg.get("score_min", out.get("score_min", 60)))
         if sm in (60, 65, 70):
             out["score_min"] = sm
         rc = int(msg.get("reconfirm", out.get("reconfirm", -1)))
@@ -1326,7 +1326,7 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
     conn_id = id(websocket)
     _WS_ACTIVE[conn_id] = {"sym": sym, "akey": None, "since": time.time()}     # v1.20.4: the monitor only checks what is open
     send_lock = asyncio.Lock()
-    sub = {"interval": None, "mode": "standard", "score_min": 70, "reconfirm": -1, "view": "index"}
+    sub = {"interval": None, "mode": "standard", "score_min": 60, "reconfirm": -1, "view": "index"}
     sent = {"an": None, "bars": None, "bars_src": None, "idx": None, "opt": {}, "ticks_at": 0.0, "push_at": 0.0}
     pump_task = None
 
@@ -2096,7 +2096,7 @@ def _monitor_combo():
         sym, interval, mode, score_min = max(_USER_COMBOS, key=_USER_COMBOS.get)
         if interval in (1, 3, 5, 15):
             return sym, interval, mode, score_min
-    return "NIFTY", 5, "standard", 70
+    return "NIFTY", 5, "standard", 60
 
 
 async def _monitor_replay(sym, interval, mode, score_min, days=10):
@@ -2457,12 +2457,17 @@ _AI_LIVE = {"day": None, "auto": 0, "manual": 0, "seen": {}, "last_manual": {}, 
 
 AI_LIVE_SYSTEM = (
     "You watch an Indian index-options trading terminal (NIFTY / BANKNIFTY) during the live market and give the trader a short second opinion. "
-    "The app's tested rules decide BUY signals; you never override them, never invent a trade and never promise profit. "
-    "Use only the numbers in the data. Plain, simple English, at most 90 words, no headings, 3-4 short lines:\n"
-    "1) What price is doing now (trend, where it is versus EMA 9 / VWAP / nearest support and resistance).\n"
-    "2) The setup: if a BUY fired, whether the data agrees or what could go wrong; if blocked, which rule blocks it and the price or event that would change that.\n"
+    "You get the last closed candles ('candles': time, open, high, low, close), the app's analysis (indicators, gates, S/R, chart pattern) "
+    "and any open trade. The app's tested rules decide BUY signals; you never override them, never invent a trade and never promise profit. "
+    "Plain, simple English, at most 120 words, no headings, 4-5 short lines:\n"
+    "1) Chart read: the trend and structure from the candles (higher highs / lower lows, pullbacks, range), where price is versus EMA 9, VWAP "
+    "and the nearest support and resistance, and any chart pattern.\n"
+    "2) The setup: if a BUY fired, whether the chart agrees and what could go wrong; if blocked, which rule blocks it and the price or event "
+    "that would change that.\n"
     "3) If a trade is open: the levels to watch (stop, trail, target) and whether price is acting for or against it.\n"
-    "4) One caution if something in the data looks risky (stale data, fresh breakout candle, nearby level, late in the day). Skip it if nothing.\n"
+    "4) Outlook for the next 15-30 minutes: the more likely path and why, the price that would confirm it and the price that would cancel it. "
+    "If the candles are mixed, say 'unclear'. It is a likelihood, not a certainty, and not an instruction to trade.\n"
+    "5) One caution only if something looks risky (stale data, blow-off candle, level just ahead, late in the day).\n"
     "Quote only numbers that are in the data; if something is not there, do not guess it.")
 
 
@@ -2480,7 +2485,7 @@ class AiLiveRequest(BaseModel):
     symbol: str = "NIFTY"
     interval: int = 5
     mode: str = "standard"
-    score_min: int = 70
+    score_min: int = 60
     reconfirm: int = -1
     reason: str = "manual"          # manual | buy | near
     event: Optional[str] = None     # page's key for the moment (dedupe across tabs and phones)
@@ -2537,25 +2542,34 @@ async def ai_live(request: Request, payload: AiLiveRequest):
             _AI_LIVE["manual"] += 1
         else:
             _AI_LIVE["auto"] += 1
-        a = await analysis(sym, iv, mode, payload.score_min if payload.score_min in (60, 65, 70) else 70, payload.reconfirm)
+        a = await analysis(sym, iv, mode, payload.score_min if payload.score_min in (60, 65, 70) else 60, payload.reconfirm)
         day = ist_now().date().isoformat()
         rows = (await get_signal_log(day, day, "", 500))["rows"]
         open_trades = [{k: r.get(k) for k in ("generated_at", "side", "option_name", "entry", "stop_loss", "target", "exit_plan", "trail_start_pts", "trail_pts", "trade_status")}
                        for r in rows if r.get("symbol") == sym and str(r.get("trade_status") or "OPEN") == "OPEN"][:3]
         closed_today = [{k: r.get(k) for k in ("generated_at", "side", "trade_status", "net_pnl_points")}
                         for r in rows if r.get("symbol") == sym and str(r.get("trade_status") or "OPEN") != "OPEN"][:6]
-        ctx = {"moment": {"manual": "the trader pressed Ask AI", "buy": "a BUY signal just fired", "near": "a setup is blocked by only one rule"}[reason],
+        bars = []
+        try:                                   # v1.20.29: the chart itself - last 40 closed candles
+            raw = (await candles(symbol=sym, interval=iv, days=3))["candles"]
+            cs_, _ = drop_forming(normalize_candles(raw), iv)
+            bars = [[c["_dt"].astimezone(IST).strftime("%d %H:%M"), round(c["open"], 1), round(c["high"], 1), round(c["low"], 1), round(c["close"], 1)]
+                    for c in cs_[-40:]]
+        except Exception as exc:
+            logger.info("AI view candles unavailable: %s", str(getattr(exc, "detail", exc))[:120])
+        ctx = {"candles_note": "candles = [day time, open, high, low, close], oldest first, closed bars only", "candles": bars,
+               "moment": {"manual": "the trader pressed Ask AI", "buy": "a BUY signal just fired", "near": "a setup is blocked by only one rule"}[reason],
                "time_ist": ist_now().strftime("%H:%M"), "market": market_status(), "symbol": sym, "interval_min": iv, "mode": mode,
                "analysis": _compact_analysis(a), "open_trades": open_trades, "closed_today": closed_today,
                "your_previous_comments": [c["text"] for c in log[-2:]],
                "page": json.loads(json.dumps(payload.page, default=str)[:6000]) if payload.page and len(json.dumps(payload.page, default=str)) <= 6000 else None}
-        text, err, model = await mon.ai_call(AI_LIVE_SYSTEM, json.dumps(ctx, default=str, separators=(",", ":")), "note", max_tokens=320, timeout=40.0)
+        text, err, model = await mon.ai_call(AI_LIVE_SYSTEM, json.dumps(ctx, default=str, separators=(",", ":")), "note", max_tokens=450, timeout=45.0)
         if not text:
             if reason == "manual":
                 _AI_LIVE["manual"] = max(0, _AI_LIVE["manual"] - 1)
             return skip(f"{mon.ai_label() or 'AI'} did not answer: {err}")
         fin = (a or {}).get("final") or {}
-        item = {"at": ist_now().strftime("%H:%M:%S"), "reason": reason, "text": text.strip()[:900], "model": model, "ai": mon.ai_label(),
+        item = {"at": ist_now().strftime("%H:%M:%S"), "reason": reason, "text": text.strip()[:1400], "model": model, "ai": mon.ai_label(),
                 "signal": f"{fin.get('level') or '—'} {fin.get('side') or ''}".strip(), "price": (a or {}).get("last_close")}
         log.append(item)
         del log[:-20]
@@ -2841,8 +2855,8 @@ def _poller_cfg():
     try: interval = int(os.getenv("ALERT_INTERVAL", "5"))
     except ValueError: interval = 5
     mode = os.getenv("ALERT_MODE", "scalp") if os.getenv("ALERT_MODE", "scalp") in MODES else "scalp"
-    try: score_min = int(os.getenv("ALERT_SCORE_MIN", "70"))
-    except ValueError: score_min = 70
+    try: score_min = int(os.getenv("ALERT_SCORE_MIN", "60"))
+    except ValueError: score_min = 60
     try: delay = max(5, int(os.getenv("ALERT_POLL_SECONDS", "10") or 10))
     except ValueError: delay = 10
     return syms, interval, mode, score_min, delay
@@ -3387,7 +3401,7 @@ async def shared_analysis(key, fn, user_request=True):
 
 
 @app.get("/api/option-analysis")
-async def option_analysis(symbol: str = "NIFTY", instrument_key: str = "", interval: int = 5, mode: str = "standard", score_min: int = 70):
+async def option_analysis(symbol: str = "NIFTY", instrument_key: str = "", interval: int = 5, mode: str = "standard", score_min: int = 60):
     """Trend / score read of the SELECTED option contract's own premium candles (v1.18.11), so the terminal's price, score, trend
     and decision follow the chart view. Index-only parts (dashboard fusion, S/R room, reconfirmation) stay on /api/analysis."""
     sym = symbol.upper()
@@ -3408,14 +3422,14 @@ async def option_analysis(symbol: str = "NIFTY", instrument_key: str = "", inter
 
 
 @app.get("/api/analysis")
-async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70, reconfirm: int = -1):
+async def analysis(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 60, reconfirm: int = -1):
     if symbol.upper() in INDEX_KEYS and mode in MODES and score_min in (60, 65, 70):
         _USER_COMBOS[(symbol.upper(), interval, mode, score_min)] = time.time()
     key = (symbol.upper(), interval, mode, score_min, reconfirm)
     return await shared_analysis(key, lambda: _analysis_compute(symbol, interval, mode, score_min, reconfirm))
 
 
-async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 70, reconfirm: int = -1):
+async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str = "standard", score_min: int = 60, reconfirm: int = -1):
     """Transparent confirmation engine from index candles + a higher-timeframe trend read, fused with the Data Check
     dashboard signal and stamped with the time the signal was generated (v1.9).
     Not a guarantee and not an order instruction."""
@@ -3579,7 +3593,7 @@ async def _buy_plan(sym, interval, mode, score_min, a, raw_candles, pick):
     if pick and pick.get("instrument_key"):
         try:
             ptrend = await asyncio.wait_for(option_analysis(symbol=sym, instrument_key=pick["instrument_key"], interval=interval, mode=mode,
-                                                            score_min=score_min if score_min in (60, 65, 70) else 70), timeout=6)
+                                                            score_min=score_min if score_min in (60, 65, 70) else 60), timeout=6)
         except Exception as exc:
             logger.info("Premium trend unavailable: %s", str(getattr(exc, "detail", exc))[:120])
     plan = op.profit_plan(side, entry, a.get("atr"), sr, pick, ptrend, sl_atr, min_sl, tgt_atr, ocfg)

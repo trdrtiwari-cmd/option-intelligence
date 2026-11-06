@@ -16,7 +16,7 @@
   $("runBtn").addEventListener("click", async () => {
     fail(""); $("results").hidden = true;
     const p = new URLSearchParams({ symbol: $("symbol").value, interval: $("interval").value, days: $("days").value, mode: $("mode").value,
-      target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value, score_min: $("scoreMin") ? $("scoreMin").value : 70,
+      target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value, score_min: $("scoreMin") ? $("scoreMin").value : 60,
       pattern_minutes: $("patternMin") ? $("patternMin").value : 90 });
     $("runBtn").disabled = true; $("progressBox").hidden = false; $("progressBar").style.width = "2%"; $("progressText").textContent = "Fetching candles…";
     try {

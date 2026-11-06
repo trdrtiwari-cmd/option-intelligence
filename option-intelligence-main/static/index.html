@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.28">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.28">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.29">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.29">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -24,7 +24,7 @@
     <label>Underlying<select id="symbol"><option value="NIFTY">NIFTY 50</option><option value="BANKNIFTY">BANK NIFTY</option></select></label>
     <label>Timeframe<select id="interval"><option value="5">5 minutes</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></label>
     <label>Signal mode<select id="signalMode"><option value="scalp">Scalp · 20–40 pt moves</option><option value="standard">Standard · strict</option></select></label>
-    <label>Minimum score<select id="scoreMin"><option value="70" selected>70 · Strict</option><option value="65">65 · Test</option><option value="60">60 · Relaxed test</option></select></label>
+    <label>Minimum score<select id="scoreMin"><option value="60" selected>60 · Default</option><option value="65">65 · Medium</option><option value="70">70 · Strict</option></select></label>
     <label>Chart view<select id="chartView"><option value="index">Underlying index</option><option value="option">Selected option premium</option></select></label>
     <label title="On WATCH / confirmed CE or PE the chart switches to the option 2 strikes in the money on that side (strike offset is set on the Signals page)">Signal option<select id="autoOption"><option value="on" selected>Auto-switch chart</option><option value="off">Keep my selection</option></select></label>
     <label>Auto refresh<select id="refreshEvery" title="Live price / chart update rate. Below 2 s the live connection is used; the full reload runs every 2 s only if it drops."><option value="0.1" selected>0.1 s (live)</option><option value="0.25">0.25 s (live)</option><option value="0.5">0.5 s (live)</option><option value="1">1 s (live)</option><option value="2">2 s</option><option value="3">3 s</option><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></label>
@@ -46,7 +46,7 @@
 
   <section class="layout">
     <div class="panel chart-panel">
-      <div class="section-head chart-section-head"><div><h2>Market candles</h2><p id="chartSubtitle">NIFTY 50 · 5-minute OHLC</p><div class="chart-line-legend"><span class="ema9-legend">━ EMA 9</span><span class="ema21-legend">━ EMA 21</span><span class="vwap-legend">━ VWAP</span><span class="tl-legend-s">╱ Support trendline</span><span class="tl-legend-r">╲ Resistance trendline</span><span class="green">● Bull candle</span><span class="red">● Bear candle</span></div></div><div class="chart-actions"><button type="button" class="secondary" id="chartFit" title="Zoom back to the latest sessions">⤢ Reset view</button><button type="button" class="secondary" id="chartMinimize">− Minimize chart</button><button type="button" id="chartMaximize">⛶ Maximize</button></div></div>
+      <div class="section-head chart-section-head"><div><h2>Market candles</h2><p id="chartSubtitle">NIFTY 50 · 5-minute OHLC</p><div class="chart-line-legend"><span class="ema9-legend">━ EMA 9</span><span class="ema21-legend">━ EMA 21</span><span class="vwap-legend">━ VWAP</span><span class="tl-legend-s">╱ Support trendline</span><span class="tl-legend-r">╲ Resistance trendline</span><span class="green">● Bull candle</span><span class="red">● Bear candle</span></div></div><div class="chart-actions"><button type="button" class="secondary" id="aiChartBtn" title="Gemini reads this chart and gives a short outlook (the answer appears in the AI view box below Signal confirmation)">AI: read chart</button><button type="button" class="secondary" id="chartFit" title="Zoom back to the latest sessions">⤢ Reset view</button><button type="button" class="secondary" id="chartMinimize">− Minimize chart</button><button type="button" id="chartMaximize">⛶ Maximize</button></div></div>
       <div class="chart-tools" aria-label="Chart overlays">
         <label><input type="checkbox" id="showEma" checked> EMA 9/21</label>
         <label><input type="checkbox" id="showVWAP" checked> VWAP</label>
@@ -128,9 +128,9 @@
   </section>
 
   <section class="panel ai-live-panel" id="aiLivePanel">
-    <div class="section-head" style="flex-wrap:wrap"><div><h2>AI view (live)</h2><p id="aiLiveSub">Second opinion on this chart · explains and warns, never creates or cancels a signal</p></div>
+    <div class="section-head" style="flex-wrap:wrap"><div><h2>AI view (live)</h2><p id="aiLiveSub">Chart read and 15-30 min outlook · a second opinion, never creates or cancels a signal</p></div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><label style="display:flex;gap:6px;align-items:center;color:var(--muted);font-size:12px"><input type="checkbox" id="aiLiveAuto" checked> Auto at BUY / near-miss</label><button type="button" id="aiLiveAsk">Ask AI now</button></div></div>
-    <div class="notice" id="aiLiveText" style="white-space:pre-line;overflow-wrap:anywhere">Press "Ask AI now" for a read of this chart. With Auto on, it also comments by itself when a BUY fires or a setup is blocked by only one rule (market hours, limited per day).</div>
+    <div class="notice" id="aiLiveText" style="white-space:pre-line;overflow-wrap:anywhere">Press "Ask AI now" (or "AI: read chart" above the chart) for a read of this chart and a short outlook. With Auto on, it also comments by itself when a BUY fires or a setup is blocked by only one rule (market hours, limited per day).</div>
     <div class="sub small" id="aiLiveMeta"></div>
     <details id="aiLiveOlder" style="margin-top:8px" hidden><summary class="sub" style="cursor:pointer">Earlier comments today</summary><div id="aiLiveList"></div></details>
   </section>
@@ -259,6 +259,6 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/trendlines.js?v=1.20.28"></script><script src="/static/savefile.js?v=1.20.28"></script><script src="/static/boot.js?v=1.20.28"></script><script src="/static/sync.js?v=1.20.28" data-next="/static/app.js?v=1.20.28"></script>
-<script src="/static/mobile.js?v=1.20.28" defer></script>
+<script src="/static/trendlines.js?v=1.20.29"></script><script src="/static/savefile.js?v=1.20.29"></script><script src="/static/boot.js?v=1.20.29"></script><script src="/static/sync.js?v=1.20.29" data-next="/static/app.js?v=1.20.29"></script>
+<script src="/static/mobile.js?v=1.20.29" defer></script><script src="/static/tables.js?v=1.20.29" defer></script>
 </body></html>

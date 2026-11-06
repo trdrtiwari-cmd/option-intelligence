@@ -684,7 +684,7 @@ Checked and deliberately **not** changed: "Not sideways" gate (the 18 / 16 setup
 - Phone alerts default to **CONFIRMED only** (not preliminary STARTED setups). Override with `ALERT_EVENTS` if desired.
 - The server-side poller continues to run with the browser/mobile app closed, but only while the hosted backend process is awake and has a valid Upstox access token.
 - For phone notifications, configure **Telegram** (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) or **ntfy** (`NTFY_TOPIC`) in Render Environment. Then redeploy and use Terminal → **Test alert** to verify delivery.
-- Set `ALERT_BACKGROUND=1`, `ALERT_SYMBOLS=NIFTY,BANKNIFTY`, `ALERT_INTERVAL=5`, `ALERT_MODE=scalp`, `ALERT_SCORE_MIN=70`, `ALERT_EVENTS=CONFIRMED`.
+- Set `ALERT_BACKGROUND=1`, `ALERT_SYMBOLS=NIFTY,BANKNIFTY`, `ALERT_INTERVAL=5`, `ALERT_MODE=scalp`, `ALERT_SCORE_MIN=60`, `ALERT_EVENTS=CONFIRMED`.
 - **Important hosting limitation:** Render's free web service may sleep when idle. No website, PWA, or WebView can reliably execute its JavaScript while the phone OS suspends it, and the server cannot poll while Render is asleep. Reliable closed-app alerts therefore require an always-on backend/worker plus Telegram or ntfy push. Android battery optimization should also be disabled for the ntfy/Telegram app if delivery is delayed.
 - This is alerting/analysis only; it does not place orders. Confirm the live data and risk levels before trading.
 

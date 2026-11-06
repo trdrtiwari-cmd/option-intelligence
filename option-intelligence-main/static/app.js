@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.28";
+const FRONTEND_VERSION="1.20.29";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -11,7 +11,7 @@ function getSymbol(){return $("symbol").value}
 function getInterval(){return Number($("interval").value)}
 function getMode(){const m=$("signalMode");return m?m.value:"standard"}
 function getReconfirm(){const m=$("reconfirmSec");return m?Number(m.value||0):60}
-function getScoreMin(){const m=$("scoreMin");return m?Number(m.value||70):70}
+function getScoreMin(){const m=$("scoreMin");return m?Number(m.value||60):60}
 function initChart(){
   const el=$("chart");
   chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:el.clientHeight,layout:{background:{color:"#121d2d"},textColor:"#91a4ba"},grid:{vertLines:{color:"#1e2d40"},horzLines:{color:"#1e2d40"}},rightPriceScale:{borderColor:"#27384d"},timeScale:{borderColor:"#27384d",timeVisible:true,secondsVisible:false,tickMarkFormatter:istTickMarkFormatter},localization:{timeFormatter:istCrosshairTimeFormatter},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
@@ -351,7 +351,7 @@ function renderBuyPlan(a){
 }
 let lastAutoOptionKey=null,lastAutoSide=null,autoIdleSince=null;
 try{lastAutoOptionKey=sessionStorage.getItem("oiAutoPick")||null}catch{}
-// v1.20.28: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
+// v1.20.29: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
 // morning while NIFTY rallied to 25,030). If the contract on screen was picked automatically (not by you) and there has been no
 // setup for 10 minutes - or 2 minutes when the engine now leans the other side - the chart goes back to the index.
 function autoRevertOption(a){
@@ -783,7 +783,7 @@ $("symbol").addEventListener("change",()=>{lastAutoSide=null;lastAutoOptionKey=n
   loadContracts(true); // expiry list -> chain -> derivatives for that real expiry
 });
 $("interval").addEventListener("change",refresh);
-(function(){const m=$("scoreMin");if(!m)return;try{const v=localStorage.getItem("oi-score-min");if(v&&["60","65","70"].includes(v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-score-min",m.value)}catch{}refresh()})})();
+(function(){const m=$("scoreMin");if(!m)return;try{const v=localStorage.getItem("oi-score-min-v2");if(v&&["60","65","70"].includes(v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-score-min-v2",m.value)}catch{}refresh()})})();
 (function(){const m=$("reconfirmSec");if(!m)return;try{const v=localStorage.getItem("oi-reconfirm");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-reconfirm",m.value)}catch{}runAnalysis(true)})})();
 (function(){const m=$("signalMode");if(!m)return;try{const v=localStorage.getItem("oi-signal-mode");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-signal-mode",m.value)}catch{}refresh()})})();
 $("loadContracts").addEventListener("click",()=>loadContracts(true));
@@ -1647,7 +1647,7 @@ function escapeHtml(t){return String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;",
   });})();
 
 
-// v1.20.28: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
+// v1.20.29: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
 // The server dedupes moments across tabs/phones and caps calls per day; the AI never changes the signal.
 const aiLive={busy:false,lastKey:"",combo:""};
 function aiLiveCombo(){return `${getSymbol()}|${getInterval()}|${getMode()}`}
@@ -1692,6 +1692,7 @@ function aiLiveWatch(a){
     if(failed.length===1&&!/Entry time window|One trade per side|Daily loss/i.test(failed[0].label||"")){reason="near";event=`${side}|${failed[0].label}|${bar}`}}
   if(!reason)return;const key=reason+"|"+event;if(key===aiLive.lastKey)return;aiLive.lastKey=key;aiLiveAsk(reason,event);
 }
+(function(){const c=$("aiChartBtn");if(c)c.addEventListener("click",()=>{const p=$("aiLivePanel");if(p)try{p.scrollIntoView({behavior:"smooth",block:"start"})}catch{}aiLiveAsk("manual",null)});})();
 (function(){const b=$("aiLiveAsk");if(!b)return;b.addEventListener("click",()=>aiLiveAsk("manual",null));
   const au=$("aiLiveAuto");try{const v=localStorage.getItem("aiLiveAuto");if(v!=null)au.checked=v==="1"}catch{}
   au.addEventListener("change",()=>{try{localStorage.setItem("aiLiveAuto",au.checked?"1":"0")}catch{}});

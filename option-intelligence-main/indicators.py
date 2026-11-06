@@ -487,7 +487,7 @@ def breakout_quality(cs, atr, side, n=20):
                 f"{beyond:+.2f} ATR beyond the prior {n}-bar range (≤ 1.0)")
 
 
-def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard", score_min=70,
+def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard", score_min=60,
             pattern_minutes=None, trend_entry_variant=None):
     rules = mode_rules(mode)
     mode = mode if mode in MODES else "standard"

@@ -36,7 +36,7 @@ MIN_N = 8          # fewer samples than this are shown but never used to draw a 
 
 # ---------------------------------------------------------------- replay
 def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None, first_bar=40,
-           window=None, progress=None, score_min=70, live_window=True, pattern_minutes=None):
+           window=None, progress=None, score_min=60, live_window=True, pattern_minutes=None):
     """One record per closed bar from `first_bar` on: the technical signal as it stood when that bar closed.
     live_window (v1.19.1): apply the live app's entry-time window (ENTRY_START_MIN..ENTRY_CUTOFF) so the replay only counts
     entries the app would actually have signalled. Before this, entries at 09:15-09:45 and after 13:30 were counted too."""
@@ -566,7 +566,7 @@ def trend_day_events(cs, replayed, variant="base", min_proofs=2, max_per_day=3, 
             if not side or not r.get("atr"):
                 continue
             d = 1 if side == "CE" else -1
-            if "Score ≥ 70" not in r["failed"] and not any(f.startswith("Engine leaned") for f in r["failed"]) \
+            if not any(f.startswith("Score ≥") for f in r["failed"]) and not any(f.startswith("Engine leaned") for f in r["failed"]) \
                     and i - last_proof_i.get(side, -99) >= 3:
                 res, k = _touch(cs, i, d, r["atr"])
                 proofs.append((side, i, res, k))
@@ -1029,7 +1029,7 @@ def window_slots(cs, near, interval, horizon, cost, target, stop):
 
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=70, live_window=True, pattern_minutes=None, live_plan=None):
+        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=60, live_window=True, pattern_minutes=None, live_plan=None):
     cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress, score_min=score_min,
                           live_window=live_window, pattern_minutes=pattern_minutes)
     confirmed, near = events_from(replayed)
