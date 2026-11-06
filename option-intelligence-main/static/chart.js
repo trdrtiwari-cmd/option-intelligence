@@ -7,10 +7,13 @@
   "use strict";
   const $ = id => document.getElementById(id);
   const LS_KEY = "oi-chart-v1";
-  const isPhone = () => window.matchMedia("(max-width:820px)").matches;
+  const isPhone = () => window.matchMedia("(max-width:820px), (max-height:520px) and (pointer:coarse)").matches;
+  const isLandscape = () => isPhone() && window.innerWidth > window.innerHeight;
   const DEF = {
     sym: "NIFTY", tf: 5, days: 5,
-    layout: { desktop: "side", mobile: "below" }, paneH: { desktop: "0.22", mobile: "0.16" }, dataSize: { desktop: "m", mobile: "m" },
+    view: "auto",
+    layout: { desktop: "side", mobile: "below", landscape: "side" }, paneH: { desktop: "0.22", mobile: "0.16", landscape: "0.2" },
+    dataSize: { desktop: "m", mobile: "m", landscape: "s" },
     candle: "candle", up: "#25c58a", down: "#ff667a",
     ind: {
       ema1: { on: true, len: 9, color: "#25c58a", width: 2 },
@@ -58,7 +61,7 @@
   if (["NIFTY", "BANKNIFTY"].includes((q.get("symbol") || "").toUpperCase())) S.sym = q.get("symbol").toUpperCase();
   if ([1, 3, 5, 15, 30].includes(Number(q.get("interval")))) S.tf = Number(q.get("interval"));
   const save = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch { } };
-  const dev = () => isPhone() ? "mobile" : "desktop";
+  const dev = () => isLandscape() ? "landscape" : isPhone() ? "mobile" : "desktop";
 
   function toast(msg) { const el = $("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(() => el.classList.remove("show"), 4000); }
   async function api(url) {
@@ -236,7 +239,7 @@
     if (I.vwap.on) items.push(`<span style="color:${I.vwap.color}">VWAP ${fmt(v("vwap"))}</span>`);
     if (I.st.on && IND) items.push(`<span style="color:${IND.st.dir[i] === 1 ? I.st.up : I.st.down}">ST ${fmt(IND.st.line[i])}</span>`);
     if (I.bb.on && IND) items.push(`<span style="color:${I.bb.color}">BB ${fmt(IND.bb.up[i])} / ${fmt(IND.bb.lo[i])}</span>`);
-    $("legend").innerHTML = `<div><b>${esc(S.sym)}</b> ${S.tf}m · ${crossFmt(c.time)}</div>` +
+    $("legend").innerHTML = `<div><b>${esc(OPT ? OPT.name : S.sym)}</b> ${S.tf}m · ${crossFmt(c.time)}</div>` +
       `<div>O <b>${fmt(c.open)}</b> H <b>${fmt(c.high)}</b> L <b>${fmt(c.low)}</b> C <b style="${col(ch)}">${fmt(c.close)}</b> <span style="${col(ch)}">${sgn(ch)}</span>${c.volume ? ` · Vol ${Number(c.volume).toLocaleString("en-IN")}` : ""}</div>` +
       `<div class="ind">${items.join("")}</div>`;
     if (I.rsi.on) $("rsiTag").textContent = `RSI ${I.rsi.len}: ${fmt(v("rsi"), 1)}`;
@@ -256,7 +259,7 @@
     const html = [
       `<div><h3>Signal</h3><div class="cw-sig"><div class="act" style="color:${sigCol}">${esc(act)}</div><small>${esc(fin.headline || a.decision || "Waiting for the engine…")}</small>` +
       `<small>Score ${a.status === "ok" ? `${a.score}/100 · bull ${a.bull_score} · bear ${a.bear_score}` : "—"}${a.regime_label ? " · " + esc(a.regime_label) : ""}</small></div></div>`,
-      rows("Price", [["Last", fmt(last), col(chg)], ["Change", chg == null ? "—" : `${sgn(chg)} (${sgn(chg / d.pc * 100)}%)`, col(chg)], ["Day open", fmt(d.open)],
+      rows(OPT ? "Premium · " + esc(OPT.name) : "Price", [["Last", fmt(last), col(chg)], ["Change", chg == null ? "—" : `${sgn(chg)} (${sgn(chg / d.pc * 100)}%)`, col(chg)], ["Day open", fmt(d.open)],
         ["Day high / low", `${fmt(d.high)} / ${fmt(d.low)}`], ["Prev close", fmt(d.pc)], ["Prev day high / low", `${fmt(d.ph)} / ${fmt(d.pl)}`],
         ["Day range", d.high ? `${fmt(d.high - d.low)} (${atrX(d.high - d.low)})` : "—"]]),
       rows("Trend", [[`EMA ${I.ema1.len} / ${I.ema2.len}`, `${fmt(e1)} / ${fmt(e2)}`, e1 != null && e2 != null ? col(e1 - e2) : ""],
@@ -287,7 +290,7 @@
     document.body.classList.add("l-" + L);
     $("layout").value = L;
     const data = $("data");
-    data.style.width = L === "side" ? (isPhone() ? { s: "34%", m: "42%", l: "52%" } : { s: "260px", m: "330px", l: "430px" })[size] : "";
+    data.style.width = L === "side" ? (dev() === "mobile" ? { s: "34%", m: "42%", l: "52%" } : dev() === "landscape" ? { s: "28%", m: "34%", l: "42%" } : { s: "260px", m: "330px", l: "430px" })[size] : "";
     data.style.maxHeight = L === "below" ? { s: "28vh", m: "40vh", l: "55vh" }[size] : "";
     const H = $("charts").clientHeight || 500;
     $("rsiPane").style.display = S.ind.rsi.on ? "" : "none"; $("macdPane").style.display = S.ind.macd.on ? "" : "none";
@@ -307,7 +310,7 @@
 
   // ------------------------------------------------------------------ settings drawer
   function renderSettings() {
-    $("devNote").textContent = isPhone() ? "(this phone layout - computers keep their own)" : "(computer layout - phones keep their own)";
+    $("devNote").textContent = { mobile: "(phone upright - sideways and computer layouts are kept separately)", landscape: "(phone sideways - upright and computer layouts are kept separately)", desktop: "(computer layout - phones keep their own)" }[dev()];
     $("sLayout").value = S.layout[dev()]; $("sPaneH").value = String(S.paneH[dev()]); $("sDataSize").value = S.dataSize[dev()]; $("sCandle").value = S.candle;
     $("cUp").value = S.up; $("cDown").value = S.down;
     const row = ([k, name, note, params]) => {
@@ -361,19 +364,57 @@
       .filter(c => Number.isFinite(c.time) && [c.open, c.high, c.low, c.close].every(Number.isFinite)).sort((a, b) => a.time - b.time);
     const u = []; for (const c of v) { if (!u.length || u.at(-1).time !== c.time) u.push(c); else u[u.length - 1] = c; } return u;
   }
+  // ------------------------------------------------------------------ v1.20.46: what the chart shows - index, or the signal's option
+  // Auto works like the old Terminal chart: on a WATCH / PENDING / CONFIRMED setup it switches to the option the signal picked
+  // (once per setup; it stays on that contract while the side is the same), and goes back to the index after 10 minutes without a
+  // setup - 2 minutes when the engine leans the other side. "Index only" never switches.
+  let OPT = null, autoIdle = null, lastSide = null;
+  const optQ = () => OPT ? `&instrument_key=${encodeURIComponent(OPT.key)}` : "";
+  function showOpt() {
+    $("optBar").hidden = !OPT;
+    if (OPT) $("optText").innerHTML = `Option chart: <b>${esc(OPT.name)}</b> · premium candles${OPT.why ? " · " + esc(OPT.why) : ""}`;
+    document.title = `${OPT ? OPT.name : S.sym} ${S.tf}m · Chart · Option Intelligence`;
+  }
+  function toOption(pk, why) {
+    OPT = { key: pk.instrument_key, type: pk.type, name: pk.name || `${S.sym} ${pk.strike} ${pk.type}`, why };
+    autoIdle = null; showOpt(); loadCandles(); toast(`${why}: chart switched to ${OPT.name}`);
+  }
+  function toIndex(msg) { if (!OPT) return; OPT = null; autoIdle = null; showOpt(); loadCandles(); if (msg) toast(msg); }
+  function autoView(a) {
+    if (S.view !== "auto" || !a) return;
+    const pk = a.option_pick, lvl = a.final && a.final.level;
+    if (pk && pk.instrument_key && ["WATCH", "PENDING", "CONFIRMED"].includes(lvl) && (!pk.symbol || pk.symbol === S.sym)) {
+      autoIdle = null;
+      if (OPT && OPT.key === pk.instrument_key) return;
+      if (OPT && lastSide === pk.type && OPT.type === pk.type) return;      // same setup: stay on the chosen contract
+      lastSide = pk.type; toOption(pk, `${lvl} ${pk.type}`); return;
+    }
+    if (!lvl || lvl === "WAIT") lastSide = null;
+    if (!OPT) return;
+    const opposite = !!(a.side && a.side !== OPT.type);
+    if (!autoIdle) { autoIdle = Date.now(); return; }
+    if (Date.now() - autoIdle >= (opposite ? 2 : 10) * 60000) { lastSide = null; toIndex(opposite ? `Engine now leans ${a.side}: chart back to the index` : "No setup for 10 minutes: chart back to the index"); }
+  }
+  function onAnalysis(a) { A = a; panel(); try { autoView(a); } catch { } }
+  $("optBack").onclick = () => { lastSide = OPT ? OPT.type : null; toIndex(""); };
+
   let loadGen = 0;
-  async function load() {
+  async function loadCandles() {
     const g = ++loadGen;
     $("live").textContent = "Loading candles…";
     try {
-      const d = await api(`/api/candles?symbol=${S.sym}&interval=${S.tf}&days=${S.days}`);
+      const d = await api(`/api/candles?symbol=${S.sym}&interval=${S.tf}&days=${S.days}${optQ()}`);
       if (g !== loadGen) return;
       cs = prep(d.candles); tick = null;
       if (!cs.length) { $("live").textContent = "No candles yet"; return; }
       draw(true);
-      $("live").textContent = `${cs.length} candles · ${d.volume_source ? "volume: " + d.volume_source : "no volume"}`;
+      $("live").textContent = `${cs.length} candles · ${OPT ? "option premium" : d.volume_source ? "volume: " + d.volume_source : "no volume"}`;
     } catch (e) { $("live").textContent = "Candles unavailable: " + e.message; }
-    api(`/api/analysis?symbol=${S.sym}&interval=${S.tf}&mode=${mode()}&score_min=${scoreMin()}&reconfirm=${reconfirm()}`).then(a => { if (g === loadGen) { A = a; panel(); } }).catch(() => { });
+  }
+  async function load() {
+    const g = loadGen + 1;
+    await loadCandles();
+    api(`/api/analysis?symbol=${S.sym}&interval=${S.tf}&mode=${mode()}&score_min=${scoreMin()}&reconfirm=${reconfirm()}`).then(a => { if (g === loadGen) onAnalysis(a); }).catch(() => { });
     connect();
   }
   function mergeBars(list) {
@@ -387,6 +428,16 @@
     draw(false);
     if (appended) C.main.timeScale().scrollToRealTime();
   }
+  function applyTick(p) {
+    const last = cs.at(-1), now = Date.now() / 1000;
+    if (!last || !Number.isFinite(p) || now - last.time >= S.tf * 60) return;          // a new candle comes with the next bars update
+    last.close = p; last.high = Math.max(last.high, p); last.low = Math.min(last.low, p); tick = p;
+    if (Date.now() - lastTickDraw > 400) {
+      lastTickDraw = Date.now();
+      try { ser.price.update(S.candle === "line" ? { time: last.time, value: p } : { time: last.time, open: last.open, high: last.high, low: last.low, close: p }); } catch { }
+      legend(null); panel();
+    }
+  }
   let ws = null, wsGen = 0, lastTickDraw = 0, lastMsg = 0;
   function connect() {
     const g = ++wsGen;
@@ -397,33 +448,47 @@
       if (g !== wsGen) return;
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       lastMsg = Date.now();
-      if (m.type === "bars" && m.interval === S.tf) { mergeBars(m.candles || []); $("live").textContent = "● Live · " + new Date().toLocaleTimeString("en-IN", { hour12: false }); }
-      else if (m.type === "analysis" && m.interval === S.tf && m.data) { A = m.data; panel(); }
-      else if (m.type === "index" && m.index && m.index.fresh && !m.index.rest && cs.length) {
-        const p = Number(m.index.ltp), last = cs.at(-1), now = Date.now() / 1000;
-        if (!Number.isFinite(p) || now - last.time >= S.tf * 60) return;          // a new candle comes with the next "bars" push
-        last.close = p; last.high = Math.max(last.high, p); last.low = Math.min(last.low, p); tick = p;
-        if (Date.now() - lastTickDraw > 400) {
-          lastTickDraw = Date.now();
-          try { ser.price.update(S.candle === "line" ? { time: last.time, value: p } : { time: last.time, open: last.open, high: last.high, low: last.low, close: p }); } catch { }
-          legend(null); panel();
-        }
+      if (m.type === "analysis") { if (m.interval === S.tf && m.data) onAnalysis(m.data); return; }
+      if (m.type === "bars") { if (!OPT && m.interval === S.tf) { mergeBars(m.candles || []); $("live").textContent = "● Live · " + new Date().toLocaleTimeString("en-IN", { hour12: false }); } return; }
+      if (m.type === "index") { if (!OPT && m.index && m.index.fresh && !m.index.rest && cs.length) applyTick(Number(m.index.ltp)); return; }
+      if (OPT && Array.isArray(m.ticks)) {             // option ticks ("opt" messages, and the 1-second tick table)
+        const t = m.ticks.find(x => x.instrument_key === OPT.key);
+        if (t && t.fresh !== false && Number.isFinite(Number(t.ltp))) { applyTick(Number(t.ltp)); $("live").textContent = "● Live option · " + new Date().toLocaleTimeString("en-IN", { hour12: false }); }
       }
     };
     ws.onclose = () => { if (g === wsGen) setTimeout(() => { if (g === wsGen && document.visibilityState === "visible") connect(); }, 4000); };
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && (!ws || ws.readyState > 1)) connect(); });
-  setInterval(() => {                      // REST fallback when the socket is quiet (no token / server busy)
-    if (document.visibilityState !== "visible" || Date.now() - lastMsg < 20000 || !cs.length) return;
-    api(`/api/candles?symbol=${S.sym}&interval=${S.tf}&days=1`).then(d => mergeBars((d.candles || []).slice(-4))).catch(() => { });
-  }, 15000);
+  let lastPoll = 0;
+  setInterval(() => {                      // option candles (the socket only pushes index candles), or the index when the socket is quiet
+    if (document.visibilityState !== "visible" || !cs.length) return;
+    const due = OPT ? Date.now() - lastPoll >= 5000 : Date.now() - lastMsg >= 20000 && Date.now() - lastPoll >= 15000;
+    if (!due) return;
+    lastPoll = Date.now();
+    const key = OPT && OPT.key;
+    api(`/api/candles?symbol=${S.sym}&interval=${S.tf}&days=1${optQ()}`).then(d => { if ((OPT && OPT.key) === key) mergeBars((d.candles || []).slice(-4)); }).catch(() => { });
+  }, 1000);
+
+  // ------------------------------------------------------------------ landscape: full screen, turned sideways
+  async function landscape() {
+    const fs = document.fullscreenElement;
+    try {
+      if (fs) { try { screen.orientation.unlock(); } catch { } await document.exitFullscreen(); $("rotate").textContent = "⟳ Landscape"; return; }
+      await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+      try { await screen.orientation.lock("landscape"); } catch { toast("Full screen on. Turn the phone sideways (switch on auto-rotate) for landscape."); }
+      $("rotate").textContent = "⟲ Exit full screen";
+    } catch { toast("This phone does not allow full screen here - switch on auto-rotate and turn the phone sideways."); }
+  }
+  $("rotate").onclick = landscape;
+  document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) $("rotate").textContent = "⟳ Landscape"; });
 
   // ------------------------------------------------------------------ toolbar
-  $("sym").value = S.sym; $("tf").value = String(S.tf); $("days").value = String(S.days);
-  const reload = () => { S.sym = $("sym").value; S.tf = Number($("tf").value); S.days = Number($("days").value); save(); A = null; load(); };
+  $("sym").value = S.sym; $("tf").value = String(S.tf); $("days").value = String(S.days); $("view").value = S.view;
+  const reload = () => { S.sym = $("sym").value; S.tf = Number($("tf").value); S.days = Number($("days").value); save(); A = null; OPT = null; lastSide = null; showOpt(); load(); };
   ["sym", "tf", "days"].forEach(id => $(id).onchange = reload);
+  $("view").onchange = () => { S.view = $("view").value; save(); if (S.view === "index") toIndex("Index only: the chart stays on the index"); else if (A) autoView(A); };
   if (window.opener || window.self !== window.top) $("back").addEventListener("click", e => { if (window.opener) { e.preventDefault(); try { window.opener.focus(); } catch { } window.close(); } });
-  document.title = `${S.sym} ${S.tf}m · Chart · Option Intelligence`;
+  showOpt();
   build();
   load();
 })();
