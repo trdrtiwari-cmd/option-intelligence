@@ -1,11 +1,11 @@
-const FRONTEND_VERSION="1.20.37";
+const FRONTEND_VERSION="1.20.38";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastOptionAnalysis=null, lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
-// v1.20.37: issue log for "Download for Claude" - page errors, failed requests and the messages shown, last 25 of each
+// v1.20.38: issue log for "Download for Claude" - page errors, failed requests and the messages shown, last 25 of each
 var OIIssueLog={errors:[],requests:[],toasts:[]};
 function oiLog(kind,item){try{const a=OIIssueLog[kind];a.push({t:new Date().toLocaleTimeString("en-IN",{hour12:false}),...item});if(a.length>25)a.shift()}catch{}}
 window.addEventListener("error",e=>oiLog("errors",{msg:String(e.message||e.error||"").slice(0,200),at:String(e.filename||"").split("/").pop().split("?")[0]+":"+(e.lineno||"")}));
@@ -312,7 +312,7 @@ function _renderSignalBase(){
   const tm=a.timing&&a.timing.generated_at_text?a.timing:null;
   if($("decisionSub"))$("decisionSub").textContent=(gstatus==="CONFIRMED"&&fin&&fin.buy?`Buy ${fmt(fin.buy.option.entry)} · SL ${fmt(fin.buy.option.stop)} · target ${fmt(fin.buy.option.target)}`:gstatus==="CONFIRMED"?"Gates pass — enter only on a held retest":fin&&fin.profit_rejected?"No buy — profit check failed":"No entry — hard gates not met")+(tm&&side?` · signal ${tm.generated_at_text}`:"");
   renderSignalTime(a);renderDashChecks(a);renderBuyPlan(a);autoSwitchOption(a);
-  $("finalSignal").textContent=text;$("finalSignal").style.color=color;$("finalSignalSub").textContent=sub;
+  $("finalSignal").textContent=text;$("finalSignal").style.color=color;$("finalSignalSub").textContent=sub;try{renderDecisionFlow(a)}catch(e){console.warn("decision flow",e)}
   $("confirmBadge").textContent=gstatus==="CONFIRMED"&&fin&&fin.buy?"BUY":text.split(" SETUP")[0].split(" —")[0];$("confirmBadge").className="pill "+cls;
   $("decision").textContent=text;$("bigDecision").textContent=text;$("signalExplanation").textContent=sub;
   gates.forEach(g=>{const li=document.createElement("li");li.className=g.pass?"gate-pass":"gate-fail";
@@ -356,7 +356,7 @@ function renderBuyPlan(a){
 }
 let lastAutoOptionKey=null,lastAutoSide=null,autoIdleSince=null,autoPicking=false;
 try{lastAutoOptionKey=sessionStorage.getItem("oiAutoPick")||null}catch{}
-// v1.20.37: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
+// v1.20.38: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
 // morning while NIFTY rallied to 25,030). If the contract on screen was picked automatically (not by you) and there has been no
 // setup for 10 minutes - or 2 minutes when the engine now leans the other side - the chart goes back to the index.
 function autoRevertOption(a){
@@ -1633,7 +1633,7 @@ function pageSnapshot(){
     chart_indicators:{ema9:$("ema9")?.textContent,ema21:$("ema21")?.textContent,vwap:$("vwap")?.textContent,rsi:$("rsi")?.textContent,atr:$("atr")?.textContent,rel_vol:$("relVol")?.textContent},
     page_version:FRONTEND_VERSION,issues:pageIssues(),js_errors:OIIssueLog.errors.slice(-15),failed_requests:OIIssueLog.requests.slice(-15),recent_messages:OIIssueLog.toasts.slice(-15)};
 }
-// v1.20.37: problems only the page can see (what is on screen), collected when the review file is made
+// v1.20.38: problems only the page can see (what is on screen), collected when the review file is made
 function pageIssues(){
   const out=[],add=(level,text)=>out.push({level,text}),a=lastAnalysis||{},sel=paperSelected,view=$("chartView")?.value;
   const idx=Number(a.last_close)||null,today=new Date(Date.now()+330*60000).toISOString().slice(0,10);
@@ -1686,7 +1686,7 @@ function escapeHtml(t){return String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;",
   });})();
 
 
-// v1.20.37: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
+// v1.20.38: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
 // The server dedupes moments across tabs/phones and caps calls per day; the AI never changes the signal.
 const aiLive={busy:false,lastKey:"",combo:""};
 function aiLiveCombo(){return `${getSymbol()}|${getInterval()}|${getMode()}`}
@@ -1736,3 +1736,20 @@ function aiLiveWatch(a){
   const au=$("aiLiveAuto");try{const v=localStorage.getItem("aiLiveAuto");if(v!=null)au.checked=v==="1"}catch{}
   au.addEventListener("change",()=>{try{localStorage.setItem("aiLiveAuto",au.checked?"1":"0")}catch{}});
   aiLiveLoad();setInterval(()=>{if(document.visibilityState==="visible"&&!aiLive.busy)aiLiveLoad()},60000);})();
+
+
+// v1.20.38: two scores (technical confirmation / trade feasibility) and the ordered decision flow
+function renderDecisionFlow(a){
+  const sp=$("scorePair"),ol=$("decisionFlow");if(!sp||!ol)return;
+  const df=a&&a.decision_flow,fe=(a&&a.feasibility)||(df&&df.feasibility);
+  const tech=df?df.technical_score:(a?Math.max(a.bull_score||0,a.bear_score||0):null);
+  if(!a||!a.side&&!df){sp.textContent="";ol.innerHTML="";return}
+  const fcol=fe?(fe.score>=65?"var(--green)":fe.score>=45?"var(--yellow)":"var(--red)"):"";
+  sp.innerHTML=`Technical confirmation <b>${tech??"—"}/100</b> · Trade feasibility <b style="color:${fcol}">${fe?fe.score+"/100 ("+fe.label+")":"—"}</b>`
+    +(fe?` <span class="small">· room ${fe.room_atr==null?"open":fe.room_atr+" ATR"} · ${fe.atr_vs_median?("ATR "+fe.atr_vs_median+"× normal · "):""}${fe.stretch_atr==null?"":"EMA 9 gap "+fe.stretch_atr+" ATR"}</span>`:"");
+  if(!df){ol.innerHTML="";return}
+  ol.innerHTML=df.steps.map(st=>`<li style="margin:2px 0"><span style="color:${st.pass?"var(--green)":"var(--red)"}">${st.pass?"✓":"✗"}</span> ${escapeHtml(st.title)}`
+    +(st.note?` <span class="small">· ${escapeHtml(st.note)}</span>`:"")
+    +(!st.pass&&st.failed.length?`<div class="small" style="color:var(--muted)">${st.failed.map(escapeHtml).join("<br>")}</div>`:"")+"</li>").join("")
+    +`<li style="margin:4px 0;list-style:none"><b>FINAL DECISION: ${escapeHtml(df.final)}</b>${df.stopped_at&&df.final==="WAIT"?` <span class="small">(stopped at step ${df.steps.findIndex(x=>x.step===df.stopped_at)+1})</span>`:""}</li>`;
+}

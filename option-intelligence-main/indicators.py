@@ -601,6 +601,20 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
          "bull": bool(htf and htf["state"] == "BULL"), "bear": bool(htf and htf["state"] == "BEAR"),
          "detail": f"{htf['state']} · EMA {htf['ema9']:,.0f}/{htf['ema21']:,.0f} · ST {htf['supertrend']}" if htf else "Unavailable — excluded"},
     ]
+    # v1.20.38: chart patterns count in the technical score. A confirmed breakout scores, a breakout whose retest is holding scores more,
+    # a FORMING pattern counts in the total but scores nothing (it is not a confirmation). No pattern at all: no change to the score.
+    cp_ = chart_pattern or {}
+    has_cp = cp_.get("stage") in ("breakout", "forming") and cp_.get("side") in ("CE", "PE")
+    retest_ = "retest holding" in str(cp_.get("name") or "")
+    brk_ = cp_.get("stage") == "breakout"
+    checks += [
+        {"key": "pattern_break", "label": "Chart pattern: confirmed breakout", "weight": 6, "ok": has_cp,
+         "bull": brk_ and cp_.get("side") == "CE", "bear": brk_ and cp_.get("side") == "PE",
+         "detail": (cp_.get("name") or "no pattern") + (" - forming, not a confirmation" if cp_.get("stage") == "forming" else "")},
+        {"key": "pattern_retest", "label": "Chart pattern: breakout retest holding", "weight": 6, "ok": has_cp,
+         "bull": brk_ and retest_ and cp_.get("side") == "CE", "bear": brk_ and retest_ and cp_.get("side") == "PE",
+         "detail": "retest holding" if retest_ else ("breakout, no retest yet" if brk_ else "not broken out")},
+    ]
     available = sum(c["weight"] for c in checks if c["ok"])
     bull = round(sum(c["weight"] for c in checks if c["ok"] and c["bull"]) / available * 100)
     bear = round(sum(c["weight"] for c in checks if c["ok"] and c["bear"]) / available * 100)

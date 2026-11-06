@@ -76,6 +76,7 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
         cpat = a.get("chart_pattern") or {}
         out.append({"i": i, "signal": a["signal"], "side": side, "score": a["score"], "regime": a.get("regime_label"), "phase": a.get("regime_phase"),
                     "pattern": cpat.get("name"), "pattern_side": cpat.get("side"), "pattern_stage": cpat.get("stage"), "pe": a.get("pattern_effects"),
+                    "pattern_bars_ago": cpat.get("bars_ago"),
                     "failed": failed, "trigger": trigger, "stretch_atr": stretch, "atr": atr,
                     "rsi_ext": (rsi if side == "PE" else 100 - rsi) if (rsi is not None and side) else None,
                     "rsi": rsi, "vwap": a.get("vwap") if a.get("vwap") is not None else a.get("vwap_approx")})
@@ -1027,6 +1028,46 @@ def window_slots(cs, near, interval, horizon, cost, target, stop):
     return out
 
 
+# ---------------------------------------------------------------- v1.20.38 the live decision-flow rules on the replayed signals
+def decision_flow_whatif(conf_rows):
+    """Applies the live decision-flow rules to the confirmed signals (needs sr_features first): S/R room (< 0.25 ATR blocked, 0.25-0.5
+    only with a retest-holding breakout) and the same-side re-entry rule (a later same-side signal needs a breakout after the previous
+    kept signal whose retest is holding). The Data Check dashboard / data freshness have no history and are not replayed."""
+    import decision_flow as dfl
+    kept, removed, last_kept = [], [], {}
+    for r in sorted(conf_rows, key=lambda x: x["i"]):
+        name = str(r.get("pattern") or "")
+        q = dfl.pattern_quality({"side": r.get("pattern_side"), "stage": r.get("pattern_stage"), "name": name}, r["side"])
+        why = None
+        if not dfl.room_gate(r.get("sr_room"), q)["pass"]:
+            why = f"room {r.get('sr_room')} ATR"
+        k = (r["day"], r["side"])
+        if why is None and k in last_kept:
+            brk_i = r["i"] - int(r.get("pattern_bars_ago") or 0)
+            if not (q == "retest" and brk_i > last_kept[k]):
+                why = "same-side re-entry without a fresh breakout + retest"
+        if why:
+            removed.append((r, why))
+        else:
+            kept.append(r)
+            last_kept[k] = r["i"]
+    tr = lambda rows: [x["strat"][TRAIL_NAME] for x in rows if TRAIL_NAME in x.get("strat", {})]
+    days = sorted({r["day"] for r in conf_rows})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    out = {"all": stats(tr(conf_rows)), "kept": stats(tr(kept)), "removed": stats(tr([r for r, _ in removed])),
+           "removed_trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "why": why,
+                               "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r, why in removed][:30]}
+    if cut:
+        out["kept_first"] = stats(tr([r for r in kept if r["day"] < cut]))
+        out["kept_second"] = stats(tr([r for r in kept if r["day"] >= cut]))
+    a_, k_ = out["all"], out["kept"]
+    out["verdict"] = ("no signals" if not a_.get("n") else
+                      "the new rules removed nothing in this period" if not removed else
+                      "the new rules help - the trades they remove lost" if (out["removed"].get("total") or 0) < 0 else
+                      "the new rules cost profit here - the trades they remove made money")
+    return out
+
+
 # ---------------------------------------------------------------- v1.20.36 fade: take the OPPOSITE side of each confirmed signal
 def fade_whatif(cs, confirmed, conf_rows, interval, horizon, cost, target, stop):
     """BANKNIFTY moved ~2.3 ATR against the pullback signals (6 Oct - 6 Nov). If that is systematic, buying the other side at the
@@ -1274,6 +1315,18 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                   "text": f"Big moves: {mm['moves']} clean moves of ≥ 2.5 ATR in this period; the engine confirmed {mm['caught']} in time and missed {mm['missed']}."
                                   + (f" The gate that blocked the most missed moves: “{top['gate']}” ({top['moves']} of {mm['missed']}, {top['pct']}%). "
                                      "Check the near-miss table below before relaxing it: if the setups it alone blocked lost money, it is protecting you." if top else "")})
+    try:                       # v1.20.38: what the live decision-flow rules do to these signals
+        dfw = decision_flow_whatif(conf_rows)
+        rep["decision_flow_rules"] = dfw
+        if dfw["all"].get("n"):
+            rm_ = dfw["removed"]
+            rep["verdict"].insert(1, {"level": "action" if "cost" in dfw["verdict"] else "info",
+                                      "text": f"Live decision-flow rules (S/R room ≥ 0.25 ATR, 0.25-0.5 only with a retest-holding breakout; same-side re-entry "
+                                              f"only after a fresh breakout + retest): keep {dfw['kept'].get('n', 0)} of {dfw['all']['n']} signals, "
+                                              f"{dfw['kept'].get('avg', 0):+.1f} pts each (live trailing exit) vs {dfw['all'].get('avg', 0):+.1f} for all; the "
+                                              f"{rm_.get('n', 0)} removed made {rm_.get('total', 0):+.0f} pts in total. Verdict: {dfw['verdict']}."})
+    except Exception as exc:
+        rep["decision_flow_rules"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.36 what-if: fade the confirmed signals
         fd = fade_whatif(cs, confirmed, conf_rows, interval, horizon, cost, target, stop)
         rep["fade"] = fd

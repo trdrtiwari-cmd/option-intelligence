@@ -259,3 +259,21 @@ def test_rupee_estimate():
     assert two["total"] == round(2 * (302.5 + 1630)) and two["qty"] == 130
     fixed = dg.rupee_estimate(rows, ["2026-11-02"], "t1.5", 4.0, 65, 0.65, 60.0)
     assert fixed["rows"][0]["total"] == round((24 * .65 * 65 - 60) + (-20 * .65 * 65 - 60) + (30 * .65 * 65 - 60))
+
+
+def test_decision_flow_whatif():
+    import diagnostics as dg
+    T = dg.TRAIL_NAME
+    rows = [  # day, i, side, room, pattern -> kept / removed
+        {"day": "d1", "hhmm": "10:00", "i": 10, "side": "CE", "sr_room": 0.8, "pattern": "None", "pattern_side": None, "pattern_stage": "none", "strat": {T: 20}},
+        {"day": "d1", "hhmm": "10:30", "i": 16, "side": "CE", "sr_room": 0.9, "pattern": "Bull flag (forming)", "pattern_side": "CE", "pattern_stage": "forming", "strat": {T: -30}},
+        {"day": "d1", "hhmm": "11:00", "i": 22, "side": "CE", "sr_room": 0.9, "pattern": "Bull flag breakout (retest holding)", "pattern_side": "CE",
+         "pattern_stage": "breakout", "pattern_bars_ago": 2, "strat": {T: 25}},
+        {"day": "d2", "hhmm": "10:00", "i": 90, "side": "PE", "sr_room": 0.1, "pattern": "None", "pattern_side": None, "pattern_stage": "none", "strat": {T: -40}},
+        {"day": "d2", "hhmm": "10:10", "i": 92, "side": "PE", "sr_room": 0.4, "pattern": "None", "pattern_side": None, "pattern_stage": "none", "strat": {T: 10}},
+    ]
+    out = dg.decision_flow_whatif(rows)
+    assert out["kept"]["n"] == 2 and out["removed"]["n"] == 3 and out["removed"]["total"] == -60
+    whys = {r["time"]: r["why"] for r in out["removed_trades"]}
+    assert "re-entry" in whys["10:30"] and "room 0.1" in whys["10:00"] and "room 0.4" in whys["10:10"]
+    assert out["verdict"].startswith("the new rules help")

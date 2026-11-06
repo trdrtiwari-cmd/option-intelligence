@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.37"
+APP_VERSION = "1.20.38"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1721,9 +1721,9 @@ def side_buys_today(symbol, interval, mode):
     try:
         today = datetime.now(IST).date().isoformat()
         with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
-            rows = db.execute("SELECT side, COUNT(*), MIN(candle_time) FROM signal_log WHERE session_date=? AND symbol=? AND interval=? AND mode=? GROUP BY side",
+            rows = db.execute("SELECT side, COUNT(*), MIN(candle_time), MAX(candle_time) FROM signal_log WHERE session_date=? AND symbol=? AND interval=? AND mode=? GROUP BY side",
                               (today, symbol, int(interval), mode)).fetchall()
-        return {str(r[0]).upper(): {"count": int(r[1] or 0), "first": r[2]} for r in rows}
+        return {str(r[0]).upper(): {"count": int(r[1] or 0), "first": r[2], "last": r[3]} for r in rows}
     except Exception as exc:
         logger.debug("side_buys_today failed: %s", str(exc)[:120])
         return None
@@ -3636,6 +3636,28 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
         a["atr_levels"] = None
     try:
         market = market_status()
+        flow_extra, flow_ctx = [], {}
+        if sym in INDEX_KEYS and a.get("side") in ("CE", "PE") and a.get("atr"):
+            try:                   # v1.20.38: decision flow - same-side re-entry, S/R room, data freshness; trade feasibility score
+                import decision_flow as dfl
+                cs_cl, _ = drop_forming(normalize_candles(result["candles"]), interval)
+                side_, px_, atr_ = a["side"], a.get("last_close"), float(a["atr"])
+                rm = await asyncio.to_thread(dfl.sr_room, cs_cl, atr_, interval, sym, side_, px_)
+                q = dfl.pattern_quality(a.get("chart_pattern"), side_)
+                stretch = (((a.get("ema9") or px_) - px_) if side_ == "PE" else (px_ - (a.get("ema9") or px_))) / atr_ if px_ else None
+                per = max(1, round(375 / max(1, interval)))
+                trs = sorted(max(c["high"] - c["low"], abs(c["high"] - p_["close"]), abs(c["low"] - p_["close"]))
+                             for p_, c in zip(cs_cl[-per * 5 - 1:-1], cs_cl[-per * 5:]))
+                feas = dfl.feasibility(rm["room_atr"], rm["own_atr"], stretch, atr_, trs[len(trs) // 2] if trs else None, q)
+                sbi = side_buys_today(sym, interval, mode)
+                with STREAM_LOCK:
+                    tv = _tick_view(INDEX_KEYS[sym], time.time())
+                flow_extra = [dfl.reentry_gate(side_, sbi, a.get("chart_pattern"), a.get("last_closed_bar"), interval),
+                              dfl.room_gate(rm["room_atr"], q), dfl.freshness_gate(tv["age_seconds"] if tv else None, market["open"])]
+                flow_ctx = {"quality": q, "feasibility": dict(feas, room_atr=rm["room_atr"], own_level_atr=rm["own_atr"],
+                                                              stretch_atr=round(stretch, 2) if stretch is not None else None)}
+            except Exception as exc:
+                logger.warning("Decision flow checks failed for %s: %s", sym, str(exc)[:160])
         replay = orb_replay if orb_replay is not None else sf.replay_signal_start(result["candles"], interval, a, htf_raw=htf_raw, htf_interval=htf_interval,
                                                                                   volume_source=result.get("volume_source"), mode=mode)
         track = SIGNAL_TRACKER.update(sym, sf.dash_key(dash), a.get("last_close"), time.time())
@@ -3649,7 +3671,7 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                         current_bar=str(a.get("last_closed_bar") or ""),
                         day_pnl_rs=booked_rs_today(interval, mode) if (daily_target_rs() and sym in INDEX_KEYS) else None,
                         daily_target_rs=daily_target_rs(),
-                        symbol_enabled=(sym not in INDEX_KEYS) or sym in buy_symbols())
+                        symbol_enabled=(sym not in INDEX_KEYS) or sym in buy_symbols(), extra_gates=flow_extra)
         a["reconfirm"] = fused.get("reconfirm")
         final = fused["final"]
         # v1.19: WATCH / PENDING / CONFIRMED -> the option 2 strikes from ATM on the trade side (the terminal switches its chart to it)
@@ -3689,7 +3711,18 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                     _SIGNAL_LOG_DIRTY.set()
             except Exception as exc:
                 logger.warning("Signal board write failed: %s", str(exc)[:160])
-        a["gates"] = (a.get("gates") or []) + fused["gates"]
+        tech_gates_ = list(a.get("gates") or [])
+        a["gates"] = tech_gates_ + fused["gates"]
+        try:
+            import decision_flow as dfl
+            fin_ = fused["final"]
+            a["decision_flow"] = dfl.build(tech_gates_, fused["gates"], fin_.get("level"), fin_.get("side") or a.get("side"),
+                                           max(a.get("bull_score") or 0, a.get("bear_score") or 0), flow_ctx.get("feasibility"),
+                                           flow_ctx.get("quality") or "none",
+                                           buy_ok=(a.get("buy_plan") or {}).get("ok") if fin_.get("level") in ("CONFIRMED", "WATCH") and a.get("buy_plan") else None)
+            a["feasibility"] = flow_ctx.get("feasibility")
+        except Exception as exc:
+            logger.warning("Decision flow build failed: %s", str(exc)[:160])
         a.update({"final": fused["final"], "timing": fused["timing"], "dashboard": fused["dashboard"],
                   "signal_technical": a.get("signal"), "decision_technical": a.get("decision"),
                   "decision": fused["final"]["action"]})

@@ -227,7 +227,7 @@ def signal_age_limits(rules, interval):
 
 
 def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard", reconfirm=None, daily_losses=None, max_daily_losses=0,
-         side_buys=None, current_bar=None, day_pnl_rs=None, daily_target_rs=0, symbol_enabled=True):
+         side_buys=None, current_bar=None, day_pnl_rs=None, daily_target_rs=0, symbol_enabled=True, extra_gates=None):
     """Combine technical analysis `a` (indicators.analyze output) with the dashboard final signal `dash`
     (dashboard_data.final_signal output). `reconfirm` = {"tracker", "name", "window", "price", "ts"} switches on the hold-and-recheck
     step: a setup that passes every other gate is PENDING until the tracker has seen it hold for `window` seconds. Returns {"gates": [...extra hard gates...], "final": {...}, "timing": {...}, "dashboard": {...}}."""
@@ -351,6 +351,8 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
         gates.append({"label": f"Daily profit target not reached (₹{daily_target_rs:,.0f})", "pass": not hit,
                       "detail": (f"booked today ₹{day_pnl_rs:,.0f} - target reached, done for the day" if hit
                                  else f"booked today ₹{day_pnl_rs:,.0f} of ₹{daily_target_rs:,.0f}")})
+    if side and extra_gates:
+        gates.extend(g for g in extra_gates if g)        # v1.20.38: decision-flow gates (re-entry, S/R room, data freshness)
     rc = None
     cand = bool(side) and tech_level == "CONFIRMED" and all(g["pass"] for g in gates)
     if reconfirm:
