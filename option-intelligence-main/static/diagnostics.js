@@ -11,6 +11,36 @@
     if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Request failed (" + res.status + ")");
     return data;
   }
+  // v1.20.33: indicator values (CE / PE) - test here, apply to live (owner)
+  const TK = ["rsi_ce_min", "rsi_ce_max", "rsi_pe_min", "rsi_pe_max", "adx_min", "chase_atr", "rsi_slope"];
+  let tuneDefaults = null;
+  function tuneInputs() {
+    if (!$("t_rsi_ce_min") || !tuneDefaults) return null;
+    const o = {};
+    for (const k of TK) { const el = $("t_" + k); if (!el || el.value === "") continue; o[k] = k === "rsi_slope" ? el.value === "true" : Number(el.value); }
+    return o;
+  }
+  function tuneFill(vals, d) {
+    for (const k of TK) { const el = $("t_" + k); if (!el) continue; el.value = String(vals[k]);
+      const lab = el.closest("label"); if (lab) lab.title = (lab.title.split(" · tested")[0]) + ` · tested default ${d[k]}`; }
+  }
+  function tuneStateText(ch) {
+    const n = Object.keys(ch || {}).length;
+    $("tuneState").textContent = n ? `Live signals now use changed values: ${Object.entries(ch).map(([k, v]) => k + " " + v).join(", ")}.` : "Live signals use the tested defaults.";
+  }
+  (async () => {
+    try { const d = await api("/api/indicator-tuning"); tuneDefaults = d.defaults; tuneFill(d.live, d.defaults); tuneStateText(d.changes);
+      if (Object.keys(d.changes || {}).length && $("tuneBox")) $("tuneBox").open = true; } catch {}
+  })();
+  async function tuneSave(body, what) {
+    try { const d = await api("/api/indicator-tuning", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      tuneFill(d.live, tuneDefaults); tuneStateText(d.changes); fail(""); $("tuneState").textContent += " " + what;
+    } catch (e) { fail("Indicator values: " + e.message); }
+  }
+  if ($("tuneApply")) $("tuneApply").addEventListener("click", () => {
+    if (confirm("Apply these indicator values to LIVE signals? Test them here first - untested values can add losing trades.")) tuneSave({ values: tuneInputs() || {} }, "(applied)");
+  });
+  if ($("tuneReset")) $("tuneReset").addEventListener("click", () => tuneSave({ reset: true }, "(reset)"));
   function fail(msg) { const b = $("errorBox"); b.textContent = msg; b.hidden = !msg; }
 
   $("runBtn").addEventListener("click", async () => {
@@ -18,6 +48,7 @@
     const p = new URLSearchParams({ symbol: $("symbol").value, interval: $("interval").value, days: $("days").value, mode: $("mode").value,
       target: $("target").value, stop: $("stop").value, cost: $("cost").value, horizon: $("horizon").value, score_min: $("scoreMin") ? $("scoreMin").value : 60,
       pattern_minutes: $("patternMin") ? $("patternMin").value : 90 });
+    const tv = tuneInputs(); if (tv) p.set("tune", JSON.stringify(tv));
     $("runBtn").disabled = true; $("progressBox").hidden = false; $("progressBar").style.width = "2%"; $("progressText").textContent = "Fetching candles…";
     try {
       const { job_id } = await api("/api/diagnostics/start?" + p, { method: "POST" });

@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.32"
+APP_VERSION = "1.20.33"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -962,7 +962,8 @@ async def diagnostics_page():
 
 @app.post("/api/diagnostics/start")
 async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 15, mode: str = "scalp",
-                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 60, pattern_minutes: int = 0):
+                            cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 60, pattern_minutes: int = 0,
+                            tune: str = ""):
     """Replays the technical engine over the last `days` of candles and measures what happened after every signal.
     Runs in a background thread (a 20-day replay takes several seconds locally and longer on a free instance)."""
     _need_user(request)
@@ -980,6 +981,13 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
         raise HTTPException(status_code=400, detail="score_min must be 0, 60, 65 or 70.")
     if not (0 <= cost <= 30 and 5 <= target <= 100 and 5 <= stop <= 100 and 3 <= horizon <= 48):
         raise HTTPException(status_code=400, detail="cost 0-30, target/stop 5-100 points, horizon 3-48 candles.")
+    tune_d = None
+    if tune:
+        import indicators as _indm
+        try:
+            tune_d = _indm.clean_tune(json.loads(tune))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Indicator values: {exc}")
     with DIAG_LOCK:
         _diag_prune()
         running = next((j for j, v in DIAG_JOBS.items() if v["status"] == "running"), None)
@@ -1011,7 +1019,7 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
         try:
             rep = dgn.run(result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw, htf_interval=htf_interval,
                           volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop, score_min=score_min,
-                          pattern_minutes=pattern_minutes or None,
+                          pattern_minutes=pattern_minutes or None, tune=tune_d,
                           live_plan=OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
                           progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
             rep["params"]["volume_source"] = result.get("volume_source")
@@ -3087,7 +3095,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune")
 
 
 def _set_option_overrides(d):
@@ -3101,6 +3109,15 @@ def _set_option_overrides(d):
     if _cpm.set_minutes(OPTION_OVERRIDES.get("pattern_minutes") or os.getenv("CHART_PATTERN_MINUTES", "90")) != _PAT_MIN[0]:
         _PAT_MIN[0] = _cpm.PATTERN_MINUTES
         _AN_CACHE.clear()                                   # recompute with the new pattern window at once
+    import indicators as _indm
+    try:
+        new_t = _indm.clean_tune(json.loads(OPTION_OVERRIDES.get("tune") or "{}"))
+    except (ValueError, TypeError):
+        new_t = {}
+    if new_t != _indm.LIVE_TUNE:
+        _indm.LIVE_TUNE.clear()
+        _indm.LIVE_TUNE.update(new_t)
+        _AN_CACHE.clear()                                   # recompute live signals with the new indicator values at once
     import trend_entry as _tem
     if _tem.set_variant(OPTION_OVERRIDES.get("trend_entry") or os.getenv("TREND_ENTRY", "off")) != _PAT_MIN[1]:
         _PAT_MIN[1] = _tem.TREND_ENTRY
@@ -3108,6 +3125,42 @@ def _set_option_overrides(d):
 
 
 _PAT_MIN = [None, None]
+
+
+@app.get("/api/indicator-tuning")
+async def indicator_tuning_get(request: Request):
+    """v1.20.33: the tested default indicator values, the owner's live values and what differs."""
+    _need_user(request)
+    import indicators as _indm
+    return {"defaults": _indm.DEFAULT_TUNE, "live": _indm.tune_values(), "changes": _indm.tune_changes(), "limits": _indm.TUNE_LIMITS}
+
+
+class TuneBody(BaseModel):
+    values: dict = {}
+    reset: bool = False
+
+
+@app.post("/api/indicator-tuning")
+async def indicator_tuning_set(payload: TuneBody, request: Request):
+    """Apply indicator values to LIVE signals (owner). reset=true goes back to the tested defaults. Keeps every other saved setting."""
+    _require_admin(request)
+    import indicators as _indm
+    try:
+        t = {} if payload.reset else _indm.clean_tune(payload.values)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    t = {k: v for k, v in t.items() if v != _indm.DEFAULT_TUNE[k]}
+    try:
+        saved = json.loads(await asyncio.to_thread(acc.meta_get, "signal_log_config") or "{}")
+    except Exception:
+        saved = {}
+    saved["opt_tune"] = json.dumps(t) if t else ""
+    _set_option_overrides(saved)
+    try:
+        await asyncio.to_thread(acc.meta_set, "signal_log_config", json.dumps(saved))
+    except Exception as exc:
+        logger.warning("Indicator values not saved: %s", str(exc)[:140])
+    return {"live": _indm.tune_values(), "changes": _indm.tune_changes()}
 
 
 class PatternWindow(BaseModel):
@@ -3150,6 +3203,7 @@ async def signal_log_config():
             "one_per_side": "on" if one_per_side_on() else "off",
             "daily_target_rs": daily_target_rs(),
             "trend_entry": __import__("trend_entry").TREND_ENTRY,
+            "indicator_changes": __import__("indicators").tune_changes(),
             "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
             "option": {"steps": oc["steps"], "moneyness": oc["moneyness"], "lots": oc["lots"], "charges_rs": oc["charges_rs"], "min_rr": oc["min_rr"],
                        "custom": bool(OPTION_OVERRIDES)}}
@@ -3229,6 +3283,8 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         new["opt_pattern_minutes"] = int(payload.opt_pattern_minutes)
     elif OPTION_OVERRIDES.get("pattern_minutes"):
         new["opt_pattern_minutes"] = int(OPTION_OVERRIDES["pattern_minutes"])     # the Signals page does not send it: keep it
+    if OPTION_OVERRIDES.get("tune") and "opt_tune" not in new:
+        new["opt_tune"] = OPTION_OVERRIDES["tune"]                              # v1.20.33: set on the Diagnostics page: keep it
     sx.set_overrides(new)
     _set_option_overrides(new)
     try:

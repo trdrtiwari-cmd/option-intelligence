@@ -138,6 +138,49 @@ def rsi_band(side, wide=False):
     """(low, high) RSI limits for a CE or PE entry. `wide` = scalp mode with a confirmed price-structure trend."""
     return RSI_BANDS["wide" if wide else "strict"][side]
 
+
+# v1.20.33: owner-adjustable indicator values (CE and PE separately). DEFAULT_TUNE = the tested values; LIVE_TUNE = what the owner
+# applied to live signals (Diagnostics page); analyze(..., tune=...) can test other values without touching the live ones.
+DEFAULT_TUNE = {"rsi_ce_min": RSI_BANDS["strict"]["CE"][0], "rsi_ce_max": RSI_BANDS["strict"]["CE"][1],
+                "rsi_pe_min": RSI_BANDS["strict"]["PE"][0], "rsi_pe_max": RSI_BANDS["strict"]["PE"][1],
+                "adx_min": 20.0, "chase_atr": 1.0, "rsi_slope": RSI_SLOPE}
+TUNE_LIMITS = {"rsi_ce_min": (0, 100), "rsi_ce_max": (0, 100), "rsi_pe_min": (0, 100), "rsi_pe_max": (0, 100),
+               "adx_min": (0, 60), "chase_atr": (0.2, 5.0)}
+LIVE_TUNE = {}
+
+
+def clean_tune(t):
+    """Validated copy of a tuning dict (unknown keys dropped). Raises ValueError with a plain message."""
+    out = {}
+    for k, v in (t or {}).items():
+        if k not in DEFAULT_TUNE or v in (None, ""):
+            continue
+        if k == "rsi_slope":
+            out[k] = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "on", "yes")
+            continue
+        x = float(v)
+        lo, hi = TUNE_LIMITS[k]
+        if not lo <= x <= hi:
+            raise ValueError(f"{k} must be between {lo:g} and {hi:g}")
+        out[k] = x
+    m = {**DEFAULT_TUNE, **out}
+    if m["rsi_ce_min"] >= m["rsi_ce_max"]:
+        raise ValueError("CE: RSI minimum must be below the RSI maximum")
+    if m["rsi_pe_min"] >= m["rsi_pe_max"]:
+        raise ValueError("PE: RSI minimum must be below the RSI maximum")
+    return out
+
+
+def tune_values(t=None):
+    """Effective values: tested defaults, then the owner's live values, then `t` (a test)."""
+    return {**DEFAULT_TUNE, **LIVE_TUNE, **(t or {})}
+
+
+def tune_changes(t=None):
+    """Only the values that differ from the tested defaults (for reports)."""
+    v = tune_values(t)
+    return {k: v[k] for k in DEFAULT_TUNE if v[k] != DEFAULT_TUNE[k]}
+
 MODES = {
     "standard": {"label": "Standard", "rsi_lo": 30, "rsi_hi": 70, "rsi_score_lo": 20, "rsi_score_hi": 80, "chase_atr": 1.0,
                  "room_atr": 1.0, "relax_lagging": False, "micro_trigger": False,
@@ -488,8 +531,17 @@ def breakout_quality(cs, atr, side, n=20):
 
 
 def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard", score_min=60,
-            pattern_minutes=None, trend_entry_variant=None):
+            pattern_minutes=None, trend_entry_variant=None, tune=None):
     rules = mode_rules(mode)
+    T = tune_values(tune)
+    if mode == "standard" and T["chase_atr"] != rules["chase_atr"]:
+        rules = dict(rules, chase_atr=T["chase_atr"])
+
+    def rsi_band(side, wide=False):                    # this analysis' RSI limits (owner values / a test), CE and PE separately
+        lo, hi = RSI_BANDS["wide" if wide else "strict"][side]
+        if not wide:
+            return (T["rsi_ce_min"], T["rsi_ce_max"]) if side == "CE" else (T["rsi_pe_min"], T["rsi_pe_max"])
+        return (lo, T["rsi_ce_max"]) if side == "CE" else (T["rsi_pe_min"], hi)
     mode = mode if mode in MODES else "standard"
     cs, forming_dropped = drop_forming(normalize_candles(raw_candles), interval, now)
     if len(cs) < 40:
@@ -537,8 +589,8 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
          "bull": bool(rsi is not None and rsi_band("CE", rules["relax_lagging"])[0] <= rsi <= rsi_band("CE", rules["relax_lagging"])[1]),
          "bear": bool(rsi is not None and rsi_band("PE", rules["relax_lagging"])[0] <= rsi <= rsi_band("PE", rules["relax_lagging"])[1]),
          "detail": (f"RSI {rsi:.1f}" + (f" ({rsi - rsi_prev:+.1f} vs previous bar)" if rsi_prev is not None else "")) if rsi is not None else "n/a"},
-        {"key": "adx", "label": "ADX (14) trend strength ≥ 20", "weight": 12, "ok": adx is not None,
-         "bull": bool(adx and adx[0] >= 20 and adx[1] > adx[2]), "bear": bool(adx and adx[0] >= 20 and adx[2] > adx[1]),
+        {"key": "adx", "label": f"ADX (14) trend strength ≥ {T['adx_min']:g}", "weight": 12, "ok": adx is not None,
+         "bull": bool(adx and adx[0] >= T["adx_min"] and adx[1] > adx[2]), "bear": bool(adx and adx[0] >= T["adx_min"] and adx[2] > adx[1]),
          "detail": f"ADX {adx[0]:.1f} · +DI {adx[1]:.1f} · −DI {adx[2]:.1f}" if adx else "n/a"},
         {"key": "breakout", "label": "Breaks last 11-bar range", "weight": 10, "ok": True,
          "bull": last > recent_high, "bear": last < recent_low, "detail": f"Range {f(recent_low)} – {f(recent_high)}"},
@@ -618,7 +670,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         score_min = max(50, min(70, int(score_min)))
         gates = [
             {"label": f"Score ≥ {score_min}", "pass": dom >= score_min, "detail": f"{dom}/100"},
-            {"label": "Trend strength (ADX ≥ 20, DI agrees)" + (" or price-structure trend" if lag_ok else ""), "pass": bool(adx_ok),
+            {"label": f"Trend strength (ADX ≥ {T['adx_min']:g}, DI agrees)" + (" or price-structure trend" if lag_ok else ""), "pass": bool(adx_ok),
              "detail": by_key["adx"]["detail"] + (lag_note if adx_ok and not by_key["adx"][want] else "")},
             {"label": "Supertrend agrees" + (" or price-structure trend" if lag_ok else ""), "pass": bool(st_ok),
              "detail": by_key["supertrend"]["detail"] + (lag_note if st_ok and not by_key["supertrend"][want] else "")},
@@ -637,7 +689,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
                 floor_ok = True       # RSI_MOMENTUM=0 switches the momentum floor off
             gates.append({"label": f"Momentum present (RSI {'≥ %g' % floor if side == 'CE' else '≤ %g' % floor} for {side})", "pass": floor_ok,
                           "detail": f"RSI {rsi:.1f} — CE needs RSI ≥ {band_lo:g}, PE needs RSI ≤ {band_hi:g} (entries with RSI still near 50 lost 5 of 5 in the replay)" + (" · wider scalp limit (trend confirmed)" if rsi_wide and (band_lo, band_hi) != (strict_lo, strict_hi) else "")})
-            if RSI_SLOPE and rsi_prev is not None:
+            if T["rsi_slope"] and rsi_prev is not None:
                 slope = rsi - rsi_prev
                 gates.append({"label": f"RSI direction supports {side} ({'rising' if side == 'CE' else 'falling'} vs the previous bar)",
                               "pass": slope >= 0 if side == "CE" else slope <= 0,
@@ -674,7 +726,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
             stretch = (last - e9[-1]) if side == "CE" else (e9[-1] - last)
             bar_range = (cs[-1]["high"] - cs[-1]["low"]) / atr
             chase_ok = stretch <= rules["chase_atr"] * atr and (not relax or bar_range <= 2.5)
-            gates.append({"label": (f"Not chasing (≤ {rules['chase_atr']:g} ATR beyond EMA 9, no blow-off bar)" if relax else "Not chasing (≤ 1 ATR beyond EMA 9)"),
+            gates.append({"label": (f"Not chasing (≤ {rules['chase_atr']:g} ATR beyond EMA 9, no blow-off bar)" if relax else f"Not chasing (≤ {rules['chase_atr']:g} ATR beyond EMA 9)"),
                           "pass": chase_ok,
                           "detail": f"{stretch:+.1f} pts beyond EMA 9 ({stretch / atr:+.2f} ATR)" + (f" · last bar range {bar_range:.1f} ATR" if relax else "")})
             ok_pb, pb_detail = pullback_resume(cs, e9, atr, side)
@@ -725,7 +777,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "mode_rules": {k: rules[k] for k in ("room_atr", "fresh_bars", "expire_bars", "max_chase_atr")},
         "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
         "regime": regime, "regime_label": regime_label, "regime_phase": regime_phase, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
-        "chart_pattern": chart_pattern, "pattern_effects": pattern_effects, "trend_entry": trend_entry,
+        "chart_pattern": chart_pattern, "pattern_effects": pattern_effects, "trend_entry": trend_entry, "tune_changes": tune_changes(tune),
         "trend_evidence": ds["evidence"], "candle_confirmation": candle_confirmation(cs, side) if side else {"pattern": "NO_DIRECTIONAL_BIAS", "confirmed": False, "detail": "No CE/PE bias to confirm."},
         "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
                   "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"], "broke_out": ds["broke_out"]}, "checks": checks, "gates": gates,

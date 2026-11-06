@@ -35,7 +35,7 @@ MIN_N = 8          # fewer samples than this are shown but never used to draw a 
 
 
 # ---------------------------------------------------------------- replay
-def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None, first_bar=40,
+def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None, first_bar=40, tune=None,
            window=None, progress=None, score_min=60, live_window=True, pattern_minutes=None):
     """One record per closed bar from `first_bar` on: the technical signal as it stood when that bar closed.
     live_window (v1.19.1): apply the live app's entry-time window (ENTRY_START_MIN..ENTRY_CUTOFF) so the replay only counts
@@ -53,7 +53,7 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
         sub = htf[:h]
         a = analyze(cs[max(0, i + 1 - window):i + 1], symbol, interval, htf_raw=sub or None, htf_interval=htf_interval if sub else None,
                     volume_source=volume_source, now=close_dt, mode=mode, score_min=score_min, pattern_minutes=pattern_minutes,
-                    trend_entry_variant="off")   # v1.20.28: replay the base rules; strong-trend entries are measured as a what-if
+                    trend_entry_variant="off", tune=tune)   # v1.20.28: replay the base rules; strong-trend entries are measured as a what-if
         if a.get("status") != "ok":
             continue
         side, atr = a.get("side"), a.get("atr")
@@ -1029,9 +1029,9 @@ def window_slots(cs, near, interval, horizon, cost, target, stop):
 
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=60, live_window=True, pattern_minutes=None, live_plan=None):
+        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=60, live_window=True, pattern_minutes=None, live_plan=None, tune=None):
     cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress, score_min=score_min,
-                          live_window=live_window, pattern_minutes=pattern_minutes)
+                          live_window=live_window, pattern_minutes=pattern_minutes, tune=tune)
     confirmed, near = events_from(replayed)
     conf_rows = evaluate(cs, confirmed, interval, horizon, cost, target, stop, with_extras=True)
     near_rows = evaluate(cs, near, interval, horizon, cost, target, stop)
@@ -1040,6 +1040,7 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
     import chart_patterns as _cpm
     params = {"symbol": symbol, "interval": interval, "mode": mode, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
               "pattern_minutes": _cpm._clean(pattern_minutes or _cpm.PATTERN_MINUTES),
+              "indicator_values": __import__("indicators").tune_values(tune), "indicator_changes": __import__("indicators").tune_changes(tune),
               "days": days, "bars_evaluated": len(replayed)}
     try:
         sr_features(cs, conf_rows, interval, symbol)
@@ -1205,6 +1206,13 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                   "text": f"Big moves: {mm['moves']} clean moves of ≥ 2.5 ATR in this period; the engine confirmed {mm['caught']} in time and missed {mm['missed']}."
                                   + (f" The gate that blocked the most missed moves: “{top['gate']}” ({top['moves']} of {mm['missed']}, {top['pct']}%). "
                                      "Check the near-miss table below before relaxing it: if the setups it alone blocked lost money, it is protecting you." if top else "")})
+    ch = rep["params"].get("indicator_changes") or {}
+    if ch:                     # v1.20.33: this run used indicator values other than the tested defaults - say so first
+        names = {"rsi_ce_min": "CE RSI min", "rsi_ce_max": "CE RSI max", "rsi_pe_min": "PE RSI min", "rsi_pe_max": "PE RSI max",
+                 "adx_min": "ADX min", "chase_atr": "Not chasing (ATR)", "rsi_slope": "RSI direction rule"}
+        rep["verdict"].insert(0, {"level": "info", "text": "Indicator values in this run differ from the tested defaults: "
+                                  + ", ".join(f"{names.get(k, k)} {v}" for k, v in ch.items())
+                                  + ". Compare with a run on the default values before applying them to live signals."})
     return rep
 
 

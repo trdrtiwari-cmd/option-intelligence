@@ -537,6 +537,9 @@ def consistency_checks(ctx):
         if le["avg"] > tr + 3:
             out.append(f"EXIT PLAN: in this replay the fixed 1.5/1.5 ATR exit made {le['avg']:+.1f} pts per trade vs {tr:+.1f} for your live trailing plan "
                        f"(n={m.group(1)}). Small sample - compare with the 30-day Diagnostics before switching.")
+    if sc.get("indicator_changes"):
+        out.append("INDICATOR VALUES changed from the tested defaults for live signals: "
+                   + ", ".join(f"{k} {v}" for k, v in sc["indicator_changes"].items()) + " - check they were tested in Diagnostics first.")
     if sc.get("one_per_side") == "off":
         out.append("ONE TRADE PER SIDE is off (Signals page). Earlier 30-day replays: 1st same-side signal of the day won, later ones lost - small sample.")
     pg = (ctx or {}).get("page") or {}

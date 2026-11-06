@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.32">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.32">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.33">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.33">
 </head>
 <body>
 <header class="topbar">
@@ -32,6 +32,20 @@
       <label>Hold up to (candles)<input id="horizon" type="number" min="3" max="48" value="12"></label><label title="How far back a chart pattern may start (flag, double bottom, triangle, range)">Pattern window<select id="patternMin"><option value="60">1 hour</option><option value="75">1 h 15 min</option><option value="90" selected>1 h 30 min</option><option value="105">1 h 45 min</option><option value="120">2 hours</option></select></label>
       <button id="runBtn" type="button">Run diagnostics</button>
     </div>
+    <details id="tuneBox" class="dg-tune" style="margin:4px 0 10px">
+      <summary style="cursor:pointer;font-weight:650">Indicator values (CE / PE) - test other ranges</summary>
+      <p class="sub" style="margin:6px 0 8px">These values are used by the run above. Change them, run, and compare with a run on the tested defaults. "Apply to live signals" makes the live app use them (owner only); "Reset" goes back to the tested values. <span id="tuneState"></span></p>
+      <div class="toolbar dg-toolbar" style="margin-bottom:6px">
+        <label title="CE needs RSI at or above this (momentum present)">CE: RSI minimum<input id="t_rsi_ce_min" type="number" min="0" max="100" step="1"></label>
+        <label title="CE is blocked at or above this (overextended)">CE: RSI maximum<input id="t_rsi_ce_max" type="number" min="0" max="100" step="1"></label>
+        <label title="PE is blocked at or below this (overextended)">PE: RSI minimum<input id="t_rsi_pe_min" type="number" min="0" max="100" step="1"></label>
+        <label title="PE needs RSI at or below this (momentum present)">PE: RSI maximum<input id="t_rsi_pe_max" type="number" min="0" max="100" step="1"></label>
+        <label title="Trend strength: ADX at or above this">ADX minimum<input id="t_adx_min" type="number" min="0" max="60" step="1"></label>
+        <label title="Standard mode: how far beyond EMA 9 an entry may be">Not chasing (ATR)<input id="t_chase_atr" type="number" min="0.2" max="5" step="0.1"></label>
+        <label title="CE needs RSI rising, PE needs it falling on the last closed candle">RSI direction rule<select id="t_rsi_slope"><option value="true">On</option><option value="false">Off</option></select></label>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button id="tuneApply" type="button" class="secondary">Apply to live signals</button><button id="tuneReset" type="button" class="secondary">Reset to tested defaults</button></div>
+    </details>
     <div id="progressBox" hidden><div class="dg-bar"><i id="progressBar"></i></div><div id="progressText" class="sub">Starting…</div></div>
     <div id="errorBox" class="notice warning" hidden></div>
   </section>
@@ -54,6 +68,6 @@
   </div>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/savefile.js?v=1.20.32"></script><script src="/static/sync.js?v=1.20.32" data-next="/static/diagnostics.js?v=1.20.32"></script>
-<script src="/static/mobile.js?v=1.20.32" defer></script><script src="/static/tables.js?v=1.20.32" defer></script>
+<script src="/static/savefile.js?v=1.20.33"></script><script src="/static/sync.js?v=1.20.33" data-next="/static/diagnostics.js?v=1.20.33"></script>
+<script src="/static/mobile.js?v=1.20.33" defer></script><script src="/static/tables.js?v=1.20.33" defer></script>
 </body></html>
