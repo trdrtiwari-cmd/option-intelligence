@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.26">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.26">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.27">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.27">
 </head>
 <body>
 <header class="topbar">
@@ -43,6 +43,7 @@
     <section class="panel"><h2>Where it wins and loses</h2><div id="groups" class="dg-groups"></div></section>
     <section class="panel"><div class="section-head"><div><h2>Win-rate finder — exits with ≥ 70 % winners in BOTH halves</h2><p id="wfNote">An exit only counts when it wins ≥ 70 % of trades with a positive average in the first half AND the second half of the period.</p></div></div><div class="table-wrap"><table id="wfTable" class="cardify"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>Opening Range Breakout (ORB) - a strategy the app does not use yet</h2><p>The high / low of the first 15 or 30 minutes after 09:15 is the opening range; the first 5-minute close above it is a CE entry, below it a PE entry; one trade a day, entries until 12:00. Three versions: the break alone, only when the engine leans the same way, and only when the range is 0.5-2.5 ATR wide. Live trailing exit (1.5 ATR stop), by half. Studies on US markets found it profitable; a replication on stock indices found the gain vanished after costs - so it is tested here on NIFTY before anything goes live.</p></div></div><div class="table-wrap"><table id="orbTable"></table></div><div class="table-wrap" style="margin-top:10px"><table id="orbTrades"></table></div></section>
+    <section class="panel"><div class="section-head"><div><h2>Strong trend: relax the RSI limit (test only)</h2><p>On a clean one-way move (the last 20 candles moved at least 4 ATR in the trade's direction with efficiency of at least 0.6, and price is on the trade side of VWAP), allow RSI up to 75 for CE / down to 25 for PE instead of 68 / 32. Every other rule still applies, including the entry window. The loose version also allows a fresh-breakout candle and more than 1 ATR beyond EMA 9. Live trailing exit, by half. Nothing changes in live signals.</p></div></div><div class="table-wrap"><table id="stTable"></table></div><div class="table-wrap" style="margin-top:10px"><table id="stTrades"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>Leading triggers instead of the pullback trigger</h2><p>Three triggers that turn before the moving averages: RSI divergence, Stochastic cross out of oversold / overbought, MACD histogram turn. <b>Strict</b>: fires on a bar where every other rule already passed. <b>Loose</b>: fires with only the engine's side, the score and the entry window. "Extra" = trades the current rules did not take. Judged on the live trailing exit, by half. Set the winner live with LEADING_TRIGGER on Render only if it adds profit in both halves with 15+ trades.</p></div></div><div class="table-wrap"><table id="leadTable"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>What-if: buy at support / sell at resistance reversals</h2><p>Entries where a bar touched a Medium / Strong support (CE) or resistance (PE) known before that bar, and closed back away from it as a reversal candle, inside the entry windows; one trade per level per day. Results with the live trailing exit, compared with the current signals. The "Distance from support" table in the groups below shows the same question for the signals actually taken.</p></div></div><div class="table-wrap"><table id="srTable"></table></div><div class="table-wrap" style="margin-top:10px"><table id="srTrades"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>Entry time window by slot</h2><p>Setups blocked ONLY by the entry window (every other gate passed), split by when they happened. Judge each slot on the live trailing exit, in both halves of the period. A slot is worth opening only with 15+ setups positive in both halves.</p></div></div><div class="table-wrap"><table id="wsTable"></table></div></section>
@@ -53,6 +54,6 @@
   </div>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/savefile.js?v=1.20.26"></script><script src="/static/sync.js?v=1.20.26" data-next="/static/diagnostics.js?v=1.20.26"></script>
-<script src="/static/mobile.js?v=1.20.26" defer></script>
+<script src="/static/savefile.js?v=1.20.27"></script><script src="/static/sync.js?v=1.20.27" data-next="/static/diagnostics.js?v=1.20.27"></script>
+<script src="/static/mobile.js?v=1.20.27" defer></script>
 </body></html>

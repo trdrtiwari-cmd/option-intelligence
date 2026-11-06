@@ -21,7 +21,7 @@ import sys
 from datetime import timedelta
 
 import dashboard_data as dd
-from indicators import IST, analyze, normalize_candles
+from indicators import IST, analyze, normalize_candles, efficiency_ratio
 import signal_fusion as _sf
 
 TARGET_GRID = (15, 20, 25, 30, 40, 60)
@@ -76,7 +76,8 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
         out.append({"i": i, "signal": a["signal"], "side": side, "score": a["score"], "regime": a.get("regime_label"), "phase": a.get("regime_phase"),
                     "pattern": cpat.get("name"), "pattern_side": cpat.get("side"), "pattern_stage": cpat.get("stage"), "pe": a.get("pattern_effects"),
                     "failed": failed, "trigger": trigger, "stretch_atr": stretch, "atr": atr,
-                    "rsi_ext": (rsi if side == "PE" else 100 - rsi) if (rsi is not None and side) else None})
+                    "rsi_ext": (rsi if side == "PE" else 100 - rsi) if (rsi is not None and side) else None,
+                    "rsi": rsi, "vwap": a.get("vwap") if a.get("vwap") is not None else a.get("vwap_approx")})
     return cs, out
 
 
@@ -623,6 +624,83 @@ def trend_day_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, s
     return out
 
 
+# ---------------------------------------------------------------- v1.20.27 strong trend: allow RSI up to 75 (CE) / down to 25 (PE)
+RSI_EXT_LABELS = ("Momentum not overextended (RSI < ", "Momentum not overextended (RSI > ")
+STRONG_RELAX = {"strict": RSI_EXT_LABELS,
+                "loose": RSI_EXT_LABELS + ("Not a fresh breakout / breakdown bar", "Not chasing")}
+
+
+def strong_trend_events(cs, replayed, variant="strict", rsi_cap=75.0, min_eff=0.6, min_move_atr=4.0, max_per_day=3):
+    """Extra entries if the 'RSI overextended' rule were relaxed on STRONG trends only. Strictly causal:
+      * strong trend when the bar closed: the last 20 closes moved >= `min_move_atr` ATR in the trade's direction with a Kaufman
+        efficiency >= `min_eff` (a clean, one-way move), and price is on the trade side of the session VWAP;
+      * RSI is past the normal limit but not beyond `rsi_cap` (CE: 68-75, PE: 25-32);
+      * every other gate passes (variant 'loose' also allows a fresh-breakout bar and > 1 ATR beyond EMA 9) - the entry window,
+        score, trend, HTF and dashboard-free gates all still apply;
+      * one trade at a time, at most `max_per_day` per day, never on a bar that is already a confirmed signal."""
+    relax = STRONG_RELAX[variant]
+    out, busy_until, taken_day = [], -1, {}
+    for r in replayed:
+        i, side, atr, rsi = r["i"], r.get("side"), r.get("atr"), r.get("rsi")
+        if not side or not atr or rsi is None or r["signal"].startswith("CONFIRMED") or i <= busy_until or i < 20:
+            continue
+        failed = r["failed"]
+        if not any(f.startswith(RSI_EXT_LABELS) for f in failed):
+            continue
+        if any(not f.startswith(relax) for f in failed):
+            continue
+        if (side == "CE" and rsi > rsi_cap) or (side == "PE" and rsi < 100 - rsi_cap):
+            continue
+        closes = [c["close"] for c in cs[i - 20:i + 1]]
+        d = 1 if side == "CE" else -1
+        move = (closes[-1] - closes[0]) * d
+        if move < min_move_atr * atr or efficiency_ratio(closes) < min_eff:
+            continue
+        vw = r.get("vwap")
+        if vw is not None and (closes[-1] - vw) * d <= 0:
+            continue
+        day = cs[i]["_dt"].astimezone(IST).date()
+        if taken_day.get(day, 0) >= max_per_day:
+            continue
+        res, k = _touch(cs, i, d, atr)
+        busy_until = k if k is not None else i + 12
+        taken_day[day] = taken_day.get(day, 0) + 1
+        out.append({**r, "trend_eff": round(efficiency_ratio(closes), 2), "trend_move_atr": round(move / atr, 1)})
+    return out
+
+
+def strong_trend_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop):
+    """Report: extra trades alone (live trailing exit and fixed 1.5 / 1.5 ATR), by half, and added to the current signals."""
+    days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    tr = lambda rows: [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
+    base = tr(conf_rows)
+    out = {"baseline": stats(base), "variants": []}
+    for variant, label in (("strict", "Strong trend: allow RSI up to 75 (CE) / down to 25 (PE)"),
+                           ("loose", "Strong trend: RSI up to 75 + fresh-breakout bar + chasing allowed")):
+        rows = evaluate(cs, strong_trend_events(cs, replayed, variant), interval, horizon, cost, target, stop, with_extras=True)
+        v = {"variant": variant, "label": label, "trail": stats(tr(rows)), "combined": stats(base + tr(rows)),
+             "fixed_atr": stats([r["atr_grid"]["1.5/1.5"] for r in rows if "1.5/1.5" in r.get("atr_grid", {})]),
+             "trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "rsi": round(r.get("rsi") or 0, 1),
+                         "eff": r.get("trend_eff"), "move_atr": r.get("trend_move_atr"),
+                         "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r in rows][:40]}
+        if cut:
+            v["first"] = stats(tr([r for r in rows if r["day"] < cut]))
+            v["second"] = stats(tr([r for r in rows if r["day"] >= cut]))
+        e, f_, s_, fx = v["trail"], v.get("first") or {}, v.get("second") or {}, v["fixed_atr"]
+        both = bool(f_.get("n")) and bool(s_.get("n")) and f_.get("avg", 0) > 0 and s_.get("avg", 0) > 0
+        solid = (e.get("se") or 0) > 0 and e.get("avg", 0) >= e["se"] and fx.get("avg", -1) > 0
+        v["verdict"] = ("no extra trades in this period" if not e.get("n") else
+                        "works - positive in both halves, 15+ trades, beats its noise and also wins with a fixed exit; worth a live paper test"
+                        if both and e["n"] >= 15 and solid else
+                        "fragile - positive in both halves with 15+ trades, but inside its noise or the fixed exit loses; do not switch on"
+                        if both and e["n"] >= 15 and e["avg"] > 0 else
+                        "positive, not proven (need 15+ trades, positive in both halves)" if e.get("avg", 0) > 0 else
+                        "loses - keep the RSI limit")
+        out["variants"].append(v)
+    return out
+
+
 # ---------------------------------------------------------------- v1.20.16 chart patterns: old rule vs pattern rule
 TRIG_LABELS = ("Entry trigger (EMA 9 retest resumes, or break of the last pause)", "Pullback-and-resume trigger (retest holds)")
 CANDLE_LABEL = "Closed-candle price-action confirmation"
@@ -1122,6 +1200,20 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                            f"1.5 / 1.5 ATR exit (signals + extra: {b['combined']['n']} trades, {b['combined']['avg']:+.1f} pts each). Verdict: {b['verdict']}."})
     except Exception as exc:
         rep["trend_day"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    try:                       # v1.20.27 what-if (Diagnostics only - live signals unchanged)
+        stw = strong_trend_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, stop)
+        rep["strong_trend"] = stw
+        for v in stw["variants"]:
+            e = v["trail"]
+            if e.get("n"):
+                rep["verdict"].append({"level": "action" if v["verdict"].startswith("works") else "info",
+                                       "text": f"What-if “{v['label']}”: {e['n']} extra trades, {e['win_rate']}% winners, {e['avg']:+.1f} pts each "
+                                               f"(live trailing exit; fixed 1.5/1.5 ATR {v['fixed_atr'].get('avg', 0):+.1f}) vs current signals "
+                                               f"{stw['baseline'].get('avg', 0):+.1f}. Verdict: {v['verdict']}."})
+            else:
+                rep["verdict"].append({"level": "info", "text": f"What-if “{v['label']}”: no extra trades in this period (no strong-trend bar was blocked only by RSI)."})
+    except Exception as exc:
+        rep["strong_trend"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     mm = missed_moves(cs, replayed, horizon=horizon)
     rep["missed_moves"] = mm
     if mm["moves"]:

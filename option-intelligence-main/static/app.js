@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.26";
+const FRONTEND_VERSION="1.20.27";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -349,10 +349,24 @@ function renderBuyPlan(a){
   $("bpNote").textContent=ok?"Paper signal, recorded in the Daily Signal Log with these levels. Index levels decide the exit; the premium levels are delta/gamma estimates.":
     plan?("No buy: "+bad.map(c=>`${c.label} — ${c.detail}`).join(" · ")):"Strike chosen automatically (2 strikes in the money on the signal side, by default). Stop-loss and target are set when the signal is confirmed and passes the profit check.";
 }
-let lastAutoOptionKey=null,lastAutoSide=null;
+let lastAutoOptionKey=null,lastAutoSide=null,autoIdleSince=null;
+try{lastAutoOptionKey=sessionStorage.getItem("oiAutoPick")||null}catch{}
+// v1.20.27: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
+// morning while NIFTY rallied to 25,030). If the contract on screen was picked automatically (not by you) and there has been no
+// setup for 10 minutes - or 2 minutes when the engine now leans the other side - the chart goes back to the index.
+function autoRevertOption(a){
+  if(($("autoOption")&&$("autoOption").value)==="off"||$("chartView").value!=="option"||!paperSelected||!lastAutoOptionKey||paperSelected.instrument_key!==lastAutoOptionKey){autoIdleSince=null;return}
+  if(!autoIdleSince){autoIdleSince=Date.now();return}
+  const opposite=!!(a&&a.side&&a.side!==paperSelected.type),idle=Date.now()-autoIdleSince;
+  if(idle<(opposite?2:10)*60000)return;
+  autoIdleSince=null;lastAutoSide=null;lastAutoOptionKey=null;try{sessionStorage.removeItem("oiAutoPick")}catch{}   // the next setup may pick again
+  $("chartView").value="index";try{$("chartView").dispatchEvent(new Event("change"))}catch{refreshChartSource()}
+  toast(opposite?`Engine now leans ${a.side}: chart back to the index (the auto-picked ${paperSelected.type} no longer fits)`:"No setup for 10 minutes: chart back to the index");
+}
 function autoSwitchOption(a){
   const pk=a&&a.option_pick,lvl=a&&a.final&&a.final.level;
-  if(!pk||!pk.instrument_key||!["WATCH","PENDING","CONFIRMED"].includes(lvl)){if(!lvl||lvl==="WAIT")lastAutoSide=null;return}
+  if(!pk||!pk.instrument_key||!["WATCH","PENDING","CONFIRMED"].includes(lvl)){if(!lvl||lvl==="WAIT")lastAutoSide=null;try{autoRevertOption(a)}catch{}return}
+  autoIdleSince=null;
   if(($("autoOption")&&$("autoOption").value)==="off"||pk.symbol!==getSymbol())return;
   if(lastAutoOptionKey===pk.instrument_key)return;              // once per contract: after that your own choice is left alone
   // v1.20.2: stay on the contract chosen for this setup. The "2 strikes ITM" pick moves with every 50-pt index move, and following it
@@ -360,7 +374,7 @@ function autoSwitchOption(a){
   // setup starts after a WAIT.
   if(lastAutoSide===pk.type&&paperSelected&&paperSelected.type===pk.type)return;
   lastAutoSide=pk.type;
-  lastAutoOptionKey=pk.instrument_key;
+  lastAutoOptionKey=pk.instrument_key;try{sessionStorage.setItem("oiAutoPick",pk.instrument_key)}catch{}
   if(pk.lot_size)chainLotSize=pk.lot_size;
   if(!(paperSelected&&paperSelected.instrument_key===pk.instrument_key))selectPaperContract(pk.type,pk.strike,pk.instrument_key,pk.ltp,pk.expiry,null);
   if($("chartView").value!=="option"){$("chartView").value="option";try{$("chartView").dispatchEvent(new Event("change"))}catch{refreshChartSource()}}
@@ -1633,7 +1647,7 @@ function escapeHtml(t){return String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;",
   });})();
 
 
-// v1.20.26: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
+// v1.20.27: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
 // The server dedupes moments across tabs/phones and caps calls per day; the AI never changes the signal.
 const aiLive={busy:false,lastKey:"",combo:""};
 function aiLiveCombo(){return `${getSymbol()}|${getInterval()}|${getMode()}`}

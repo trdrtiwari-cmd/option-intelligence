@@ -488,9 +488,18 @@ def suggestions(rep, min_n=8):
 
 
 # ---------------------------------------------------------------- 6. Claude
+# v1.20.27: rules every AI reply must follow (6 Nov: the free model misread a 20-bar move as the day's close, quoted the
+# signal board as "near-miss data", invented a cause for past losses and used a 'blocked winners' number as a reason to keep a rule)
+STRICT_RULES = ("\nSTRICT RULES: (a) Quote only numbers that appear in the data, with their label; never estimate or make up a cause, a figure "
+                "or a past result. If the data does not say, write 'not in the data'. (b) Read labels exactly: 'N ATR move up in 20 bars' is the "
+                "last 20 candles, not the day; 'today_blocking_rules' and the signal board are TODAY only; 'near_miss_by_gate' is the multi-day "
+                "replay. (c) Setups from the same day and the same move are ONE piece of evidence, not many: say 'one day / one rally' and never "
+                "relax a rule on one day's evidence when the multi-day replay disagrees. (d) A rule is protecting you when the setups it alone "
+                "blocked LOST in the replay; blocking big moves is not, by itself, evidence for or against it. (e) Under 30 trades is not proven. "
+                "(f) Read 'checks' first: they are computed by code and are facts - mention every one that is a problem.")
 SYSTEM_NOTE = ("You monitor an intraday NIFTY / BANKNIFTY options signal app for its owner. You get one finding produced by code "
                "(with numbers). In 2-4 short sentences say what most likely caused it and what to check or change. Be concrete and use the "
-               "numbers given. Do not invent data. Never tell the user to place or exit a trade; this is analysis only.")
+               "numbers given. Do not invent data. Never tell the user to place or exit a trade; this is analysis only." + STRICT_RULES)
 SYSTEM_REVIEW = ("You are reviewing an intraday options signal strategy (NIFTY/BANKNIFTY, ITM options 2 strikes in the money, stop at least "
                  "1.5 ATR, entry windows 09:45-12:00 and 14:30-15:00, square-off 15:20). You get JSON with today's live trades, losses with "
                  "code-detected causes, missed moves with the gates that blocked them, signal-board setups that were not bought, "
@@ -503,7 +512,52 @@ SYSTEM_REVIEW = ("You are reviewing an intraday options signal strategy (NIFTY/B
                  "have paid according to the near-miss data).\n3. What caused the losses (patterns, not single trades).\n4. Suggested changes, "
                  "ranked, max 5. For each: the exact setting or rule, the evidence, and the risk (sample size, overfitting). Prefer 'keep' when "
                  "the evidence is weak.\n5. Data / feed problems, if any.\nKeep the stop at least 1.5 ATR (owner's rule). Do not promise "
-                 "profits. Use only the data given. Under 400 words.")
+                 "profits. Use only the data given. Under 400 words." + STRICT_RULES)
+
+
+def consistency_checks(ctx):
+    """v1.20.27: facts computed by code for the reviewer (AI or human), so they do not depend on the model reading the JSON right."""
+    out = []
+    t = (ctx or {}).get("terminal") or {}
+    st = t.get("settings") or {}
+    ba, sc = st.get("background_alerts") or {}, st.get("signals_config") or {}
+    combos = [c for c in (t.get("combos_in_use") or []) if isinstance(c, (list, tuple)) and len(c) >= 4]
+    if ba and combos:
+        other = sorted({(c[2], c[3]) for c in combos} - {(ba.get("mode"), ba.get("score_min"))})
+        if other:
+            out.append(f"SETTINGS MISMATCH: phone alerts use mode {ba.get('mode')} / score {ba.get('score_min')} but a page is using "
+                       + ", ".join(f"{m} / {s_}" for m, s_ in other) + " - alerts and the screen can disagree. Use the same mode and score (Render ALERT_MODE / ALERT_SCORE_MIN).")
+    rep = (ctx or {}).get("replay") or {}
+    le, verdicts = rep.get("live_exit") or {}, " ".join(rep.get("verdict") or [])
+    import re as _re
+    m = _re.search(r"Live exit plan \(stop 1\.5 ATR, trail.*?\): (\d+) trades, [\d.]+% winners, ([+-][\d.]+) pts", verdicts)
+    if m and le.get("avg") is not None and sc.get("exit_plan") == "trail":
+        tr = float(m.group(2))
+        if le["avg"] > tr + 3:
+            out.append(f"EXIT PLAN: in this replay the fixed 1.5/1.5 ATR exit made {le['avg']:+.1f} pts per trade vs {tr:+.1f} for your live trailing plan "
+                       f"(n={m.group(1)}). Small sample - compare with the 30-day Diagnostics before switching.")
+    if sc.get("one_per_side") == "off":
+        out.append("ONE TRADE PER SIDE is off (Signals page). Earlier 30-day replays: 1st same-side signal of the day won, later ones lost - small sample.")
+    pg = (ctx or {}).get("page") or {}
+    so = pg.get("selected_option") or {}
+    if so and pg.get("chart_view") == "option":
+        lean = next((x.get("analysis", {}).get("side") for x in (t.get("live_analyses") or [])
+                     if x.get("symbol") == pg.get("symbol") and x.get("mode") == pg.get("mode")), None)
+        if lean and so.get("type") and lean != so.get("type"):
+            out.append(f"CHART ON THE WRONG SIDE: the terminal shows {so.get('name')} ({so.get('type')}) while the engine leans {lean}.")
+    blk = {b.get("gate"): b for b in (ctx or {}).get("today_blocking_rules") or []}
+    if blk:
+        out.append("ONE DAY: today_blocking_rules and the signal board come from today only - setups in the same move are one piece of evidence.")
+    nm = {g.get("gate"): g for g in rep.get("near_miss_by_gate") or []}
+    for gname, b in blk.items():
+        w3 = lambda x: " ".join(str(x or "").lower().split()[:3])
+        n_ = next((v for k, v in nm.items() if k and gname and w3(k) == w3(gname)), None)
+        if b.get("setups", 0) >= 5 and (b.get("avg_points") or 0) > 0 and n_ and n_.get("n") and (n_.get("avg") or 0) <= 0:
+            out.append(f"KEEP '{gname}': today it blocked {b['setups']} setups that would have paid, but in the multi-day replay the setups it alone "
+                       f"blocked made {n_['avg']:+.1f} pts (n={n_['n']}).")
+        if b.get("setups", 0) >= 3 and (b.get("avg_points") or 0) < 0:
+            out.append(f"PROTECTING: '{gname}' blocked {b['setups']} setups today that would have lost ({b['avg_points']:+.1f} pts each).")
+    return out
 
 
 async def claude_call(system, user_text, model, max_tokens=700, timeout=40.0):

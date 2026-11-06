@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.26"
+APP_VERSION = "1.20.27"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2150,6 +2150,10 @@ async def monitor_review(kind="intraday", force=False):
             ctx["terminal"] = await _terminal_snapshot(day)       # v1.20.14: live terminal state for the reviewer
         except Exception as exc:
             ctx["terminal"] = {"error": str(exc)[:120]}
+        try:
+            ctx["checks"] = mon.consistency_checks(ctx)
+        except Exception as exc:
+            ctx["checks"] = [f"checks failed: {exc}"[:120]]
         if mon.provider():
             if force or await asyncio.to_thread(mon.calls_today, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK) < mon.SETTINGS["max_calls"]:
                 text, err, model = await mon.ai_call(mon.SYSTEM_REVIEW, json.dumps(ctx, default=str, ensure_ascii=False), kind, max_tokens=1200, timeout=90.0)
@@ -2392,6 +2396,10 @@ async def _monitor_export_impl(request, day="", fresh=0, client=None):
             ctx["terminal"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     if client:
         ctx["page"] = json.loads(json.dumps(client, default=str)[:20000]) if len(json.dumps(client, default=str)) <= 20000 else {"note": "page snapshot too large"}
+    try:
+        ctx["checks"] = mon.consistency_checks(ctx)
+    except Exception as exc:
+        ctx["checks"] = [f"checks failed: {exc}"[:120]]
     blob = json.dumps(mon.chat_bundle(ctx), default=str, ensure_ascii=False, separators=(",", ":"))   # compact: fits a paste
     return Response(blob, media_type="application/json",
                     headers={"Content-Disposition": f"attachment; filename=strategy-review-{day}.json", "Cache-Control": "no-store"})
@@ -2429,7 +2437,8 @@ AI_LIVE_SYSTEM = (
     "1) What price is doing now (trend, where it is versus EMA 9 / VWAP / nearest support and resistance).\n"
     "2) The setup: if a BUY fired, whether the data agrees or what could go wrong; if blocked, which rule blocks it and the price or event that would change that.\n"
     "3) If a trade is open: the levels to watch (stop, trail, target) and whether price is acting for or against it.\n"
-    "4) One caution if something in the data looks risky (stale data, fresh breakout candle, nearby level, late in the day). Skip it if nothing.")
+    "4) One caution if something in the data looks risky (stale data, fresh breakout candle, nearby level, late in the day). Skip it if nothing.\n"
+    "Quote only numbers that are in the data; if something is not there, do not guess it.")
 
 
 def _ai_live_reset():

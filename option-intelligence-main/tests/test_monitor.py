@@ -340,3 +340,24 @@ def test_ai_live_terminal_view():
     finally:
         M._need_user, M.analysis, M.mon.ai_call, M.mon.provider, M.market_status, M.get_signal_log = old
         M._AI_LIVE["day"] = None
+
+
+def test_consistency_checks_6_nov():
+    import monitor as mon
+    ctx = {"terminal": {"settings": {"background_alerts": {"mode": "standard", "score_min": 60},
+                                     "signals_config": {"exit_plan": "trail", "one_per_side": "off"}},
+                        "combos_in_use": [["NIFTY", 5, "standard", 60], ["NIFTY", 5, "scalp", 70]],
+                        "live_analyses": [{"symbol": "NIFTY", "mode": "scalp", "analysis": {"side": "CE"}}]},
+           "replay": {"live_exit": {"avg": 15.12}, "verdict": ["Live exit plan (stop 1.5 ATR, trail 0.75 ATR once +1.2 ATR, square-off 15:20): 10 trades, 60.0% winners, +3.5 pts per trade (+35 total)."],
+                      "near_miss_by_gate": [{"gate": "Not a fresh breakout / breakdown bar (wait for the retest)", "n": 3, "avg": -3.13}]},
+           "today_blocking_rules": [{"gate": "Not a fresh breakout / breakdown bar (wait for the retest)", "setups": 24, "avg_points": 13.2},
+                                    {"gate": "Data Check dashboard agrees (≥ BIAS, same side)", "setups": 5, "avg_points": -112.1}],
+           "page": {"symbol": "NIFTY", "mode": "scalp", "chart_view": "option", "selected_option": {"name": "NIFTY 24600 PE", "type": "PE"}}}
+    c = " | ".join(mon.consistency_checks(ctx))
+    assert "SETTINGS MISMATCH" in c and "scalp / 70" in c
+    assert "EXIT PLAN" in c and "+15.1" in c and "+3.5" in c
+    assert "ONE TRADE PER SIDE is off" in c and "CHART ON THE WRONG SIDE" in c and "ONE DAY" in c
+    assert "KEEP 'Not a fresh breakout" in c and "-3.1" in c
+    assert "PROTECTING: 'Data Check dashboard" in c
+    assert mon.consistency_checks({}) == []
+    assert "STRICT RULES" in mon.SYSTEM_REVIEW and "STRICT RULES" in mon.SYSTEM_NOTE

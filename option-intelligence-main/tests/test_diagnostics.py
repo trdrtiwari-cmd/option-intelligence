@@ -223,3 +223,24 @@ def test_orb_events_first_break_only():
     m = ev[0]["i"]
     assert cs[m]["_dt"].astimezone(dg.IST).hour * 60 + cs[m]["_dt"].astimezone(dg.IST).minute >= 9 * 60 + 30
     assert dg.orb_events(cs, [dict(r, side="PE") for r in rep], 5, 15, "with_trend") == []
+
+
+def test_strong_trend_rsi_whatif():
+    import diagnostics as dg
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 11, 6, 9, 15, tzinfo=dg.IST)
+    cs = [{"_dt": t0 + timedelta(minutes=5 * i), "open": 100 + 3 * i, "high": 102 + 3 * i, "low": 99 + 3 * i, "close": 101 + 3 * i}
+          for i in range(60)]
+    rsi_lbl = "Momentum not overextended (RSI < 68 for CE)"
+    rep = [{"i": 30, "side": "CE", "atr": 3.0, "rsi": 72.0, "vwap": 150.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},
+           {"i": 31, "side": "CE", "atr": 3.0, "rsi": 80.0, "vwap": 150.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},          # RSI beyond cap
+           {"i": 45, "side": "CE", "atr": 3.0, "rsi": 72.0, "vwap": 150.0, "signal": "WATCH_CE", "failed": [rsi_lbl, "Score ≥ 70"]},  # another gate
+           {"i": 50, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 500.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},          # below VWAP
+           {"i": 52, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 150.0, "signal": "WATCH_CE",
+            "failed": [rsi_lbl, "Not a fresh breakout / breakdown bar (wait for the retest)"]}]
+    strict = dg.strong_trend_events(cs, rep, "strict")
+    assert [r["i"] for r in strict] == [30] and strict[0]["trend_eff"] == 1.0
+    loose = dg.strong_trend_events(cs, rep, "loose")
+    assert [r["i"] for r in loose] == [30, 52]
+    choppy = [dict(c, close=100 + (5 if k % 2 else 0)) for k, c in enumerate(cs)]
+    assert dg.strong_trend_events(choppy, rep, "strict") == []                                                            # not a clean trend

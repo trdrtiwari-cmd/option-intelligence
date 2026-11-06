@@ -108,6 +108,19 @@
           best && best.trades.length ? best.trades.map(x => [`${x.day} ${x.time}`, x.side, x.or_width_atr, { text: num(x.pts), cls: x.pts > 0 ? "green" : "red" }]) : [["None", "", "", ""]]);
       }
     }
+    const stw = rep.strong_trend;
+    if (stw && $("stTable")) {
+      const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";
+      if (stw.error) table($("stTable"), ["Strong trend"], [["Could not run: " + stw.error]]);
+      else {
+        table($("stTable"), ["Rule", "Extra trades (trailing)", "1st half", "2nd half", "Fixed 1.5/1.5 ATR", "Signals + extra", "Verdict"],
+          [["Current rules (RSI 68 / 32)", sc(stw.baseline), "", "", "", sc(stw.baseline), ""]].concat(stw.variants.map(v => [v.label, sc(v.trail), sc(v.first), sc(v.second), sc(v.fixed_atr), sc(v.combined),
+            { text: v.verdict, cls: v.verdict.startsWith("works") ? "green" : v.verdict.startsWith("loses") ? "red" : "" }])));
+        const tr = (stw.variants[0] || {}).trades || [];
+        table($("stTrades"), ["Extra trade (strict version)", "Side", "RSI", "Trend (efficiency · move)", "Result (pts, trailing)"],
+          tr.length ? tr.map(x => [`${x.day} ${x.time}`, x.side, x.rsi, `${x.eff} · ${x.move_atr} ATR`, { text: num(x.pts), cls: x.pts > 0 ? "green" : "red" }]) : [["No extra trades in this period", "", "", "", ""]]);
+      }
+    }
     const ld = rep.leading;
     if (ld && $("leadTable")) {
       const sc = s => s && s.n ? `${s.n} · ${s.win_rate}% · ${num(s.avg)}` : "—";
