@@ -322,6 +322,7 @@
     $("drawHint").textContent = !drawMode ? "" : drawMode === "hline" ? "Tap a price" : drawMode === "zone" ? "Tap the top, then the bottom of the zone" : "Tap the first point";
   }
   document.querySelectorAll("#drawBar [data-tool]").forEach(b => b.onclick = () => setTool(b.dataset.tool));
+  $("drawToggle").onclick = () => { const t = $("drawTools"), open = t.hidden; t.hidden = !open; $("drawToggle").classList.toggle("on", open); if (!open) setTool(null); };
   $("drawUndo").onclick = () => { const l = dGet(); l.pop(); dSet(l); renderDrawings(); };
   $("drawClear").onclick = () => { if (dGet().length && confirm("Remove all drawings on this chart?")) { dSet([]); renderDrawings(); } };
   C.main.subscribeClick(param => {

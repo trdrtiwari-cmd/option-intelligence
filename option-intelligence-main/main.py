@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.51"
+APP_VERSION = "1.20.52"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -470,15 +470,21 @@ async def fetch_candles(key, interval, days):
             for old in sorted(HIST_CACHE, key=lambda k: HIST_CACHE[k][0])[:15]:
                 HIST_CACHE.pop(old, None)
     rows = list(hist_rows)
-    try:
-        intra = await upstox_get(f"{API_V3}/historical-candle/intraday/{key}/minutes/{interval}")
-        rows += _rows_to_candles((intra.get("data") or {}).get("candles"))
-    except HTTPException as exc:
-        if exc.status_code == 401:
-            raise
-        logger.info("Intraday candles unavailable for %s: %s", key, str(exc.detail)[:160])
+    intra_ok = False
+    for attempt in range(2):                 # v1.20.52: one retry - a missed intraday call left today's futures volume at 0
+        try:
+            intra = await upstox_get(f"{API_V3}/historical-candle/intraday/{key}/minutes/{interval}")
+            rows += _rows_to_candles((intra.get("data") or {}).get("candles"))
+            intra_ok = True
+            break
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+            logger.info("Intraday candles unavailable for %s (try %s): %s", key, attempt + 1, str(exc.detail)[:160])
+            await asyncio.sleep(0.4)
     candles = [{k: v for k, v in c.items() if k != "_dt"} for c in normalize_candles(rows)]
-    CANDLE_CACHE[ck] = (time.time(), candles)
+    # without today's candles keep it only ~2 s (instead of the normal TTL), so the next request soon tries again
+    CANDLE_CACHE[ck] = (time.time() if intra_ok else time.time() - max(0, CANDLE_CACHE_TTL - 2), candles)
     if len(CANDLE_CACHE) > 60:
         for old in sorted(CANDLE_CACHE, key=lambda k: CANDLE_CACHE[k][0])[:20]:
             CANDLE_CACHE.pop(old, None)

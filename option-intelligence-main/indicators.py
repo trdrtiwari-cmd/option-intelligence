@@ -407,6 +407,9 @@ def merge_volume(index_raw, fut_raw, min_match=0.5):
     matched = sum(1 for c in idx if c["_dt"].timestamp() in vol)
     if matched / len(idx) < min_match:
         return None
+    # v1.20.52: futures data that ends a session (or more) before the index would give today's candles volume 0 - wrong, not missing
+    if fut[-1]["_dt"].date() < idx[-1]["_dt"].date():
+        return None
     out = []
     for c in idx:
         row = {k: v for k, v in c.items() if k != "_dt"}
