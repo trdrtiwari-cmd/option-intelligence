@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.25";
+const FRONTEND_VERSION="1.20.26";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -625,7 +625,7 @@ function applyAnalysis(a){
     $("analysisNote").textContent=[a.note||a.message||"Analysis loaded.",a.score_basis].filter(Boolean).join(" · ");
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
     $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
-    lastAnalysis=a;lastAnalysisAt=Date.now();renderSignal();loadOptionVolume();
+    lastAnalysis=a;lastAnalysisAt=Date.now();renderSignal();loadOptionVolume();try{aiLiveWatch(a)}catch{}
   }
 }
 function renderMarketPill(m){
@@ -1631,3 +1631,54 @@ function escapeHtml(t){return String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;",
       const d=await r.json();toast(`Chart patterns now read the last ${d.pattern_minutes} minutes - signals recompute now`);lastAnalysisAt=0;runAnalysis(true);
     }catch(e){toast("Pattern window not changed: "+e.message)}
   });})();
+
+
+// v1.20.26: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
+// The server dedupes moments across tabs/phones and caps calls per day; the AI never changes the signal.
+const aiLive={busy:false,lastKey:"",combo:""};
+function aiLiveCombo(){return `${getSymbol()}|${getInterval()}|${getMode()}`}
+function aiLiveRender(d,note){
+  const box=$("aiLiveText"),meta=$("aiLiveMeta"),list=$("aiLiveList"),older=$("aiLiveOlder");if(!box)return;
+  const cs=(d&&d.comments)||[],c=cs[0];
+  const why={manual:"you asked",buy:"BUY fired",near:"blocked by one rule"};
+  if(c){box.textContent=c.text;meta.textContent=`${c.at} IST · ${why[c.reason]||c.reason} · signal ${c.signal||"—"} · price ${fmt(c.price)} · ${c.ai||"AI"}${c.model?" ("+c.model+")":""}`+(note?` · ${note}`:"")}
+  else if(note){meta.textContent=note}
+  if(d&&d.auto_left!=null)meta.textContent+=` · left today: ${d.manual_left} questions, ${d.auto_left} auto`;
+  if(list&&older){const rest=cs.slice(1);older.hidden=!rest.length;
+    list.innerHTML=rest.map(x=>`<div class="notice" style="margin-top:6px;white-space:pre-line;overflow-wrap:anywhere"><b>${escapeHtml(x.at)}</b> · ${escapeHtml(why[x.reason]||x.reason)} · ${escapeHtml(x.signal||"")}<br>${escapeHtml(x.text)}</div>`).join("")}
+}
+async function aiLiveLoad(){
+  if(!$("aiLiveText"))return;aiLive.combo=aiLiveCombo();
+  try{const r=await fetch(`/api/ai/live?symbol=${getSymbol()}&interval=${getInterval()}&mode=${getMode()}`,{credentials:"same-origin"});if(!r.ok)return;
+    const d=await r.json();if(!d.enabled){$("aiLiveMeta").textContent="No AI connected - add GEMINI_API_KEY in Render, then press Test AI on the Signals page.";return}
+    if(d.comments&&d.comments.length)aiLiveRender(d);else{$("aiLiveText").textContent='Press "Ask AI now" for a read of this chart.';$("aiLiveMeta").textContent=`${d.ai} connected`;if($("aiLiveOlder"))$("aiLiveOlder").hidden=true}
+  }catch{}
+}
+async function aiLiveAsk(reason,event){
+  if(aiLive.busy)return;aiLive.busy=true;const b=$("aiLiveAsk");
+  if(reason==="manual"&&b){b.disabled=true;b.textContent="Asking…"}
+  if(reason!=="manual"&&$("aiLiveMeta"))$("aiLiveMeta").textContent=(reason==="buy"?"BUY fired":"Setup blocked by one rule")+" - asking the AI…";
+  try{let page=null;try{page=pageSnapshot()}catch{}
+    const r=await fetch("/api/ai/live",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({symbol:getSymbol(),interval:Number(getInterval()),mode:getMode(),score_min:Number(getScoreMin()),reconfirm:Number(getReconfirm()),reason,event,page})});
+    if(!r.ok)throw Error(r.status===401?"log in first":(await r.text()).slice(0,140));
+    const d=await r.json();aiLiveRender(d,d.ok?"":d.skipped);
+    if(reason!=="manual"&&d.ok&&d.comment)toast("AI: "+d.comment.text.slice(0,140));
+  }catch(e){if($("aiLiveMeta"))$("aiLiveMeta").textContent="AI view: "+e.message}
+  finally{aiLive.busy=false;if(b){b.disabled=false;b.textContent="Ask AI now"}}
+}
+function aiLiveWatch(a){
+  if(!$("aiLiveText"))return;
+  if(aiLive.combo!==aiLiveCombo()){aiLive.lastKey="";aiLiveLoad()}
+  const auto=$("aiLiveAuto");if(!auto||!auto.checked||!marketOpen||!a||a.status!=="ok")return;
+  const fin=a.final||{},bar=a.last_closed_bar||((a.timing||{}).generated_at)||"",side=fin.side||a.side;
+  let reason=null,event=null;
+  if(fin.level==="CONFIRMED"&&side){reason="buy";event=`${side}|${bar}`}
+  else if(side){const failed=(a.gates||[]).filter(g=>!g.pass);
+    if(failed.length===1&&!/Entry time window|One trade per side|Daily loss/i.test(failed[0].label||"")){reason="near";event=`${side}|${failed[0].label}|${bar}`}}
+  if(!reason)return;const key=reason+"|"+event;if(key===aiLive.lastKey)return;aiLive.lastKey=key;aiLiveAsk(reason,event);
+}
+(function(){const b=$("aiLiveAsk");if(!b)return;b.addEventListener("click",()=>aiLiveAsk("manual",null));
+  const au=$("aiLiveAuto");try{const v=localStorage.getItem("aiLiveAuto");if(v!=null)au.checked=v==="1"}catch{}
+  au.addEventListener("change",()=>{try{localStorage.setItem("aiLiveAuto",au.checked?"1":"0")}catch{}});
+  aiLiveLoad();setInterval(()=>{if(document.visibilityState==="visible"&&!aiLive.busy)aiLiveLoad()},60000);})();

@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.25"
+APP_VERSION = "1.20.26"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2413,6 +2413,122 @@ async def monitor_test_ai(request: Request):
         _SMON["error"] = None
         return {"ok": True, "message": f"{mon.ai_label()} answered ({model}): {text[:40]}", "keys": rep_}
     return {"ok": False, "message": f"{mon.ai_label()} call failed: {err}", "keys": rep_}
+
+
+# ---- v1.20.26: AI view on the terminal - a live second opinion; it explains and warns, it never creates or cancels a signal ------------
+AI_LIVE_AUTO_PER_DAY = int(os.getenv("AI_LIVE_AUTO_PER_DAY", "25"))       # automatic comments (BUY / near-miss) per day, shared by all pages
+AI_LIVE_MANUAL_PER_DAY = int(os.getenv("AI_LIVE_MANUAL_PER_DAY", "60"))   # "Ask AI now" presses per day
+AI_LIVE_MANUAL_GAP = 20.0                                                  # seconds: a second press within this shows the last answer
+AI_LIVE_NEAR_GAP = 15 * 60                                                 # seconds between two near-miss comments for one chart
+_AI_LIVE = {"day": None, "auto": 0, "manual": 0, "seen": {}, "last_manual": {}, "last_near": {}, "log": {}, "busy": set()}
+
+AI_LIVE_SYSTEM = (
+    "You watch an Indian index-options trading terminal (NIFTY / BANKNIFTY) during the live market and give the trader a short second opinion. "
+    "The app's tested rules decide BUY signals; you never override them, never invent a trade and never promise profit. "
+    "Use only the numbers in the data. Plain, simple English, at most 90 words, no headings, 3-4 short lines:\n"
+    "1) What price is doing now (trend, where it is versus EMA 9 / VWAP / nearest support and resistance).\n"
+    "2) The setup: if a BUY fired, whether the data agrees or what could go wrong; if blocked, which rule blocks it and the price or event that would change that.\n"
+    "3) If a trade is open: the levels to watch (stop, trail, target) and whether price is acting for or against it.\n"
+    "4) One caution if something in the data looks risky (stale data, fresh breakout candle, nearby level, late in the day). Skip it if nothing.")
+
+
+def _ai_live_reset():
+    d = ist_now().date().isoformat()
+    if _AI_LIVE["day"] != d:
+        _AI_LIVE.update(day=d, auto=0, manual=0, seen={}, last_manual={}, last_near={}, log={})
+
+
+def _ai_live_log(combo):
+    return _AI_LIVE["log"].setdefault(combo, [])
+
+
+class AiLiveRequest(BaseModel):
+    symbol: str = "NIFTY"
+    interval: int = 5
+    mode: str = "standard"
+    score_min: int = 70
+    reconfirm: int = -1
+    reason: str = "manual"          # manual | buy | near
+    event: Optional[str] = None     # page's key for the moment (dedupe across tabs and phones)
+    page: Optional[dict] = None
+
+
+@app.get("/api/ai/live")
+async def ai_live_get(request: Request, symbol: str = "NIFTY", interval: int = 5, mode: str = "standard"):
+    _need_user(request)
+    _ai_live_reset()
+    combo = (symbol.upper(), int(interval), mode)
+    return {"enabled": bool(mon.provider()), "ai": mon.ai_label(), "comments": list(reversed(_ai_live_log(combo)[-6:])),
+            "auto_left": max(0, AI_LIVE_AUTO_PER_DAY - _AI_LIVE["auto"]), "manual_left": max(0, AI_LIVE_MANUAL_PER_DAY - _AI_LIVE["manual"])}
+
+
+@app.post("/api/ai/live")
+async def ai_live(request: Request, payload: AiLiveRequest):
+    _need_user(request)
+    _ai_live_reset()
+    sym, iv, mode = payload.symbol.upper(), int(payload.interval), payload.mode
+    if sym not in INDEX_KEYS or mode not in MODES:
+        raise HTTPException(400, "Unknown symbol or mode")
+    combo, reason, now = (sym, iv, mode), (payload.reason if payload.reason in ("manual", "buy", "near") else "manual"), time.time()
+    log = _ai_live_log(combo)
+
+    def skip(why):
+        return {"ok": False, "skipped": why, "comments": list(reversed(log[-6:]))}
+    if not mon.provider():
+        return skip("No AI connected - add GEMINI_API_KEY in Render (Signals page > Claude strategy monitor > Test AI).")
+    if reason == "manual":
+        if _AI_LIVE["manual"] >= AI_LIVE_MANUAL_PER_DAY:
+            return skip(f"Daily limit of {AI_LIVE_MANUAL_PER_DAY} questions reached - it resets tomorrow.")
+        if now - _AI_LIVE["last_manual"].get(combo, 0) < AI_LIVE_MANUAL_GAP and log:
+            return skip("Asked a few seconds ago - showing that answer.")
+    else:
+        if not market_status()["open"]:
+            return skip("Automatic comments run only while the market is open.")
+        ev = f"{reason}|{sym}|{iv}|{mode}|{payload.event or ''}"
+        if ev in _AI_LIVE["seen"]:
+            return skip("Already commented on this moment.")
+        if reason == "near" and now - _AI_LIVE["last_near"].get(combo, 0) < AI_LIVE_NEAR_GAP:
+            return skip("A near-miss was commented on less than 15 minutes ago.")
+        if _AI_LIVE["auto"] >= AI_LIVE_AUTO_PER_DAY:
+            return skip(f"Daily limit of {AI_LIVE_AUTO_PER_DAY} automatic comments reached (saves the free AI allowance for the day's review).")
+        _AI_LIVE["seen"][ev] = now
+        if reason == "near":
+            _AI_LIVE["last_near"][combo] = now
+    if combo in _AI_LIVE["busy"]:
+        return skip("The AI is already answering for this chart.")
+    _AI_LIVE["busy"].add(combo)
+    try:
+        if reason == "manual":
+            _AI_LIVE["last_manual"][combo] = now
+            _AI_LIVE["manual"] += 1
+        else:
+            _AI_LIVE["auto"] += 1
+        a = await analysis(sym, iv, mode, payload.score_min if payload.score_min in (60, 65, 70) else 70, payload.reconfirm)
+        day = ist_now().date().isoformat()
+        rows = (await get_signal_log(day, day, "", 500))["rows"]
+        open_trades = [{k: r.get(k) for k in ("generated_at", "side", "option_name", "entry", "stop_loss", "target", "exit_plan", "trail_start_pts", "trail_pts", "trade_status")}
+                       for r in rows if r.get("symbol") == sym and str(r.get("trade_status") or "OPEN") == "OPEN"][:3]
+        closed_today = [{k: r.get(k) for k in ("generated_at", "side", "trade_status", "net_pnl_points")}
+                        for r in rows if r.get("symbol") == sym and str(r.get("trade_status") or "OPEN") != "OPEN"][:6]
+        ctx = {"moment": {"manual": "the trader pressed Ask AI", "buy": "a BUY signal just fired", "near": "a setup is blocked by only one rule"}[reason],
+               "time_ist": ist_now().strftime("%H:%M"), "market": market_status(), "symbol": sym, "interval_min": iv, "mode": mode,
+               "analysis": _compact_analysis(a), "open_trades": open_trades, "closed_today": closed_today,
+               "your_previous_comments": [c["text"] for c in log[-2:]],
+               "page": json.loads(json.dumps(payload.page, default=str)[:6000]) if payload.page and len(json.dumps(payload.page, default=str)) <= 6000 else None}
+        text, err, model = await mon.ai_call(AI_LIVE_SYSTEM, json.dumps(ctx, default=str, separators=(",", ":")), "note", max_tokens=320, timeout=40.0)
+        if not text:
+            if reason == "manual":
+                _AI_LIVE["manual"] = max(0, _AI_LIVE["manual"] - 1)
+            return skip(f"{mon.ai_label() or 'AI'} did not answer: {err}")
+        fin = (a or {}).get("final") or {}
+        item = {"at": ist_now().strftime("%H:%M:%S"), "reason": reason, "text": text.strip()[:900], "model": model, "ai": mon.ai_label(),
+                "signal": f"{fin.get('level') or '—'} {fin.get('side') or ''}".strip(), "price": (a or {}).get("last_close")}
+        log.append(item)
+        del log[:-20]
+        return {"ok": True, "comment": item, "comments": list(reversed(log[-6:])),
+                "auto_left": max(0, AI_LIVE_AUTO_PER_DAY - _AI_LIVE["auto"]), "manual_left": max(0, AI_LIVE_MANUAL_PER_DAY - _AI_LIVE["manual"])}
+    finally:
+        _AI_LIVE["busy"].discard(combo)
 
 
 @app.post("/api/monitor/review-now")

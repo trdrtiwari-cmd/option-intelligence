@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.25">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.25">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.26">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.26">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -125,6 +125,14 @@
       </div>
     </div>
     <div class="notice warning">Confirmation lowers false signals; it cannot remove losses or guarantee profit. Validate the rules on your own history (TradingView strategy tester) and keep per-trade risk small.</div>
+  </section>
+
+  <section class="panel ai-live-panel" id="aiLivePanel">
+    <div class="section-head" style="flex-wrap:wrap"><div><h2>AI view (live)</h2><p id="aiLiveSub">Second opinion on this chart · explains and warns, never creates or cancels a signal</p></div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><label style="display:flex;gap:6px;align-items:center;color:var(--muted);font-size:12px"><input type="checkbox" id="aiLiveAuto" checked> Auto at BUY / near-miss</label><button type="button" id="aiLiveAsk">Ask AI now</button></div></div>
+    <div class="notice" id="aiLiveText" style="white-space:pre-line;overflow-wrap:anywhere">Press "Ask AI now" for a read of this chart. With Auto on, it also comments by itself when a BUY fires or a setup is blocked by only one rule (market hours, limited per day).</div>
+    <div class="sub small" id="aiLiveMeta"></div>
+    <details id="aiLiveOlder" style="margin-top:8px" hidden><summary class="sub" style="cursor:pointer">Earlier comments today</summary><div id="aiLiveList"></div></details>
   </section>
 
   <section class="panel derivatives-panel">
@@ -251,6 +259,6 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/trendlines.js?v=1.20.25"></script><script src="/static/savefile.js?v=1.20.25"></script><script src="/static/boot.js?v=1.20.25"></script><script src="/static/sync.js?v=1.20.25" data-next="/static/app.js?v=1.20.25"></script>
-<script src="/static/mobile.js?v=1.20.25" defer></script>
+<script src="/static/trendlines.js?v=1.20.26"></script><script src="/static/savefile.js?v=1.20.26"></script><script src="/static/boot.js?v=1.20.26"></script><script src="/static/sync.js?v=1.20.26" data-next="/static/app.js?v=1.20.26"></script>
+<script src="/static/mobile.js?v=1.20.26" defer></script>
 </body></html>

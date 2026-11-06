@@ -298,3 +298,45 @@ def test_suggested_model_parsed():
     import monitor as mon
     e = "Gemini API 404: This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash for the latest"
     assert mon._suggested_model(e) == "gemini-3.8-flash"
+
+
+def test_ai_live_terminal_view():
+    try:
+        import main as M
+    except Exception:
+        return
+    old = (M._need_user, M.analysis, M.mon.ai_call, M.mon.provider, M.market_status, M.get_signal_log)
+    seen = []
+
+    async def fake_analysis(*a, **k):
+        return {"status": "ok", "last_close": 24500.0, "final": {"level": "CONFIRMED", "side": "CE"}, "gates": []}
+
+    async def fake_ai(system, text, kind="note", max_tokens=700, timeout=40.0):
+        seen.append(text)
+        return "Price above EMA 9; BUY agrees with data.", None, "gemini-test"
+
+    async def fake_log(*a, **k):
+        return {"rows": [{"symbol": "NIFTY", "trade_status": "OPEN", "side": "CE", "entry": 24490, "stop_loss": 24450}]}
+    M._need_user = lambda r: {"id": 1}
+    M.analysis = fake_analysis
+    M.mon.ai_call = fake_ai
+    M.mon.provider = lambda: "gemini"
+    M.market_status = lambda: {"open": True}
+    M.get_signal_log = fake_log
+    M._AI_LIVE["day"] = None
+    try:
+        r = asyncio.run(M.ai_live(None, M.AiLiveRequest(reason="buy", event="CE|10:05")))
+        assert r["ok"] and r["comment"]["reason"] == "buy" and r["comment"]["signal"] == "CONFIRMED CE"
+        assert '"open_trades":[{' in seen[0] and "a BUY signal just fired" in seen[0]
+        again = asyncio.run(M.ai_live(None, M.AiLiveRequest(reason="buy", event="CE|10:05")))
+        assert not again["ok"] and "Already" in again["skipped"] and len(seen) == 1       # same moment from another tab: no second call
+        m1 = asyncio.run(M.ai_live(None, M.AiLiveRequest(reason="manual")))
+        m2 = asyncio.run(M.ai_live(None, M.AiLiveRequest(reason="manual")))
+        assert m1["ok"] and not m2["ok"] and len(seen) == 2                               # second press within 20 s shows the last answer
+        g = asyncio.run(M.ai_live_get(None, "NIFTY", 5, "standard"))
+        assert len(g["comments"]) == 2 and g["comments"][0]["reason"] == "manual"
+        M.market_status = lambda: {"open": False}
+        assert "market is open" in asyncio.run(M.ai_live(None, M.AiLiveRequest(reason="near", event="x")))["skipped"]
+    finally:
+        M._need_user, M.analysis, M.mon.ai_call, M.mon.provider, M.market_status, M.get_signal_log = old
+        M._AI_LIVE["day"] = None
