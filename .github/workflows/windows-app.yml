@@ -1,0 +1,57 @@
+# Builds the Windows app of Option Intelligence on GitHub (nothing to install on your PC) and publishes it as the
+# "Windows app (latest)" release: https://github.com/trdrtiwari-cmd/option-intelligence/releases/tag/windows-latest
+# Runs by itself when the desktop shell changes, or: Actions -> "Build Windows app" -> Run workflow (optionally another site URL).
+# The app opens the live site, so normal website updates on Render do NOT need a new download.
+name: Build Windows app
+on:
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: "Deployed site address"
+        required: false
+        default: "https://option-intelligence-vqtl.onrender.com"
+  push:
+    branches: [main]
+    paths:
+      - "option-intelligence-main/desktop/**"
+      - ".github/workflows/windows-app.yml"
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      APP_URL: ${{ inputs.app_url || 'https://option-intelligence-vqtl.onrender.com' }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: option-intelligence-main/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: node -e "require('fs').writeFileSync('app-url.json', JSON.stringify({url: process.env.APP_URL.replace(/\/+$/, '')}) + '\n')"
+      - run: npm install --no-audit --no-fund
+      - run: npx electron-builder --win nsis portable --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Collect the installers
+        run: |
+          ls -la dist
+          cp dist/OptionIntelligence-Setup.exe "$GITHUB_WORKSPACE/OptionIntelligence-Setup.exe"
+          cp dist/OptionIntelligence-Portable.exe "$GITHUB_WORKSPACE/OptionIntelligence-Portable.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: option-intelligence-windows
+          path: |
+            OptionIntelligence-Setup.exe
+            OptionIntelligence-Portable.exe
+      - name: Publish as the "windows-latest" release (stable download link)
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete windows-latest --yes --cleanup-tag || true
+          gh release create windows-latest OptionIntelligence-Setup.exe OptionIntelligence-Portable.exe --target "$GITHUB_SHA" \
+            --title "Windows app (latest)" \
+            --notes "Option Intelligence for Windows 10 / 11 (64-bit) - opens $APP_URL in its own window, so website updates arrive by themselves. OptionIntelligence-Setup.exe installs it with Start-menu and desktop shortcuts; OptionIntelligence-Portable.exe runs without installing. Not code-signed: if Windows SmartScreen says 'Windows protected your PC', click More info -> Run anyway. Built from ${GITHUB_SHA::7}."
