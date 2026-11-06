@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.35"
+APP_VERSION = "1.20.36"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1669,10 +1669,26 @@ def one_per_side_on():
 BUY_SYMBOLS_DEFAULT = os.getenv("BUY_SYMBOLS", "NIFTY")   # v1.20.35: BANKNIFTY off - 6 Oct-6 Nov replay: worse than random entries
 
 
+STRATEGY_DEFAULTS = {"NIFTY": os.getenv("STRATEGY_NIFTY", "pullback"), "BANKNIFTY": os.getenv("STRATEGY_BANKNIFTY", "off")}
+
+
+def strategy_for(sym):
+    """v1.20.36: the BUY strategy of one index - pullback (the tested engine), orb30 (Opening Range Breakout) or off.
+    Signals page (owner) wins; then the older 'Indices that may BUY' choice; then STRATEGY_<INDEX> env (NIFTY pullback, BANKNIFTY off)."""
+    import orb_live as _orbm
+    sym = str(sym).upper()
+    v = OPTION_OVERRIDES.get(f"strategy_{sym.lower()}")
+    if v in _orbm.STRATEGIES:
+        return v
+    if OPTION_OVERRIDES.get("buy_symbols"):
+        return "pullback" if sym in [x.strip().upper() for x in str(OPTION_OVERRIDES["buy_symbols"]).split(",")] else "off"
+    d = STRATEGY_DEFAULTS.get(sym, "pullback")
+    return d if d in _orbm.STRATEGIES else "off"
+
+
 def buy_symbols():
-    """Indices allowed to give BUY signals. Signals page (owner) wins; else BUY_SYMBOLS env (default NIFTY only)."""
-    v = OPTION_OVERRIDES.get("buy_symbols") or BUY_SYMBOLS_DEFAULT
-    return [x.strip().upper() for x in str(v).split(",") if x.strip().upper() in INDEX_KEYS] or ["NIFTY"]
+    """Indices allowed to give BUY signals (any strategy but off)."""
+    return [s_ for s_ in INDEX_KEYS if strategy_for(s_) != "off"]
 
 
 DAILY_TARGET_RS_DEFAULT = float(os.getenv("DAILY_TARGET_RS", "0") or 0)   # off: ₹2,000-3,000 is the owner's minimum goal, not a cap
@@ -3115,7 +3131,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols", "strategy_nifty", "strategy_banknifty")
 
 
 def _set_option_overrides(d):
@@ -3223,6 +3239,7 @@ async def signal_log_config():
             "one_per_side": "on" if one_per_side_on() else "off",
             "daily_target_rs": daily_target_rs(),
             "buy_symbols": ",".join(buy_symbols()),
+            "strategy_nifty": strategy_for("NIFTY"), "strategy_banknifty": strategy_for("BANKNIFTY"),
             "trend_entry": __import__("trend_entry").TREND_ENTRY,
             "indicator_changes": __import__("indicators").tune_changes(),
             "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
@@ -3245,6 +3262,8 @@ class SignalLogConfig(BaseModel):
     opt_daily_target_rs: Optional[float] = None  # v1.20.28: stop for the day after this booked profit (₹, 0 = off)
     opt_trend_entry: Optional[str] = None       # v1.20.28: off | rsi | continuation (trend_entry.py)
     opt_buy_symbols: Optional[str] = None       # v1.20.35: "NIFTY" | "NIFTY,BANKNIFTY" | "BANKNIFTY"
+    opt_strategy_nifty: Optional[str] = None    # v1.20.36: pullback | orb30 | off
+    opt_strategy_banknifty: Optional[str] = None
 
 
 @app.post("/api/signals/config")
@@ -3298,6 +3317,12 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         if not syms_ or any(x not in INDEX_KEYS for x in syms_):
             raise HTTPException(400, "BUY indices must be NIFTY and / or BANKNIFTY")
         new["opt_buy_symbols"] = ",".join(syms_)
+    import orb_live as _orbm
+    for k_, v_ in (("opt_strategy_nifty", payload.opt_strategy_nifty), ("opt_strategy_banknifty", payload.opt_strategy_banknifty)):
+        if v_:
+            if v_ not in _orbm.STRATEGIES:
+                raise HTTPException(400, "Strategy must be pullback, orb30 or off")
+            new[k_] = v_
     if payload.opt_trend_entry:
         import trend_entry as _tem
         if payload.opt_trend_entry.lower() not in _tem.VARIANTS:
@@ -3547,14 +3572,26 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
         raise
     if a.get("status") != "ok":
         return a
+    orb_replay = None
+    if sym in INDEX_KEYS and strategy_for(sym) == "orb30":
+        try:                       # v1.20.36: this index trades the Opening Range Breakout instead of the pullback engine
+            import orb_live as _orbm
+            cs_closed, _ = drop_forming(normalize_candles(result["candles"]), interval)
+            a, orb_replay = _orbm.apply(a, cs_closed, interval)
+        except Exception as exc:
+            logger.warning("ORB strategy failed for %s: %s", sym, str(exc)[:140])
+            a = dict(a, signal="WAIT", side=None, decision=f"ORB unavailable: {str(exc)[:80]}")
+            orb_replay = {}
+    elif sym in INDEX_KEYS:
+        a["strategy"] = strategy_for(sym)
     try:
         a["atr_levels"] = dd.trade_levels({"side": a.get("side"), "level": a.get("signal")}, {}, atr=a.get("atr"), price=a.get("last_close"))
     except Exception:
         a["atr_levels"] = None
     try:
         market = market_status()
-        replay = sf.replay_signal_start(result["candles"], interval, a, htf_raw=htf_raw, htf_interval=htf_interval,
-                                        volume_source=result.get("volume_source"), mode=mode)
+        replay = orb_replay if orb_replay is not None else sf.replay_signal_start(result["candles"], interval, a, htf_raw=htf_raw, htf_interval=htf_interval,
+                                                                                  volume_source=result.get("volume_source"), mode=mode)
         track = SIGNAL_TRACKER.update(sym, sf.dash_key(dash), a.get("last_close"), time.time())
         rc_name = f"{sym}|{interval}|{mode}|{score_min}"
         LAST_ANALYSIS_AT[rc_name] = time.time()

@@ -1027,6 +1027,33 @@ def window_slots(cs, near, interval, horizon, cost, target, stop):
     return out
 
 
+# ---------------------------------------------------------------- v1.20.36 fade: take the OPPOSITE side of each confirmed signal
+def fade_whatif(cs, confirmed, conf_rows, interval, horizon, cost, target, stop):
+    """BANKNIFTY moved ~2.3 ATR against the pullback signals (6 Oct - 6 Nov). If that is systematic, buying the other side at the
+    same moment would pay. Same bars, same exits, side flipped. One sample - treat a good result as a lead to re-test, not proof."""
+    days = sorted({r["day"] for r in conf_rows})
+    cut = days[len(days) // 2] if len(days) >= 4 else None
+    tr = lambda rows: [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
+    flipped = [{**e, "side": "PE" if e.get("side") == "CE" else "CE"} for e in confirmed if e.get("side")]
+    rows = evaluate(cs, flipped, interval, horizon, cost, target, stop, with_extras=True)
+    v = {"label": "Fade: buy the opposite side of each confirmed signal", "trail": stats(tr(rows)),
+         "fixed_atr": stats([r["atr_grid"]["1.5/1.5"] for r in rows if "1.5/1.5" in r.get("atr_grid", {})]),
+         "baseline": stats(tr(conf_rows))}
+    if cut:
+        v["first"] = stats(tr([r for r in rows if r["day"] < cut]))
+        v["second"] = stats(tr([r for r in rows if r["day"] >= cut]))
+    e, f_, s_, fx = v["trail"], v.get("first") or {}, v.get("second") or {}, v["fixed_atr"]
+    both = bool(f_.get("n")) and bool(s_.get("n")) and f_.get("avg", 0) > 0 and s_.get("avg", 0) > 0
+    solid = (e.get("se") or 0) > 0 and e.get("avg", 0) >= e["se"] and fx.get("avg", -1) > 0
+    v["verdict"] = ("no trades" if not e.get("n") else
+                    "works - positive in both halves, 15+ trades, beats its noise and wins with a fixed exit; worth a paper test"
+                    if both and e["n"] >= 15 and solid else
+                    "positive in both halves but not proven (needs 15+ trades, beating its noise, and a positive fixed exit)"
+                    if both and e.get("avg", 0) > 0 else
+                    "positive, not proven" if e.get("avg", 0) > 0 else "loses - fading does not pay either")
+    return v
+
+
 # ---------------------------------------------------------------- v1.20.34 rupees per day for 1 / 2 / 3 lots
 PLAN_KEYS = {"t1.5": "1.5/1.5", "t2": "2/1.5", "t3": "3/1.5"}
 DEFAULT_LOTS = {"NIFTY": 65, "BANKNIFTY": 30}       # fallback only, when the option chain does not give the lot size
@@ -1247,6 +1274,17 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                   "text": f"Big moves: {mm['moves']} clean moves of ≥ 2.5 ATR in this period; the engine confirmed {mm['caught']} in time and missed {mm['missed']}."
                                   + (f" The gate that blocked the most missed moves: “{top['gate']}” ({top['moves']} of {mm['missed']}, {top['pct']}%). "
                                      "Check the near-miss table below before relaxing it: if the setups it alone blocked lost money, it is protecting you." if top else "")})
+    try:                       # v1.20.36 what-if: fade the confirmed signals
+        fd = fade_whatif(cs, confirmed, conf_rows, interval, horizon, cost, target, stop)
+        rep["fade"] = fd
+        e = fd["trail"]
+        if e.get("n"):
+            rep["verdict"].append({"level": "action" if fd["verdict"].startswith("works") else "info",
+                                   "text": f"What-if “{fd['label']}”: {e['n']} trades, {e['win_rate']}% winners, {e['avg']:+.1f} pts each (live trailing exit; "
+                                           f"fixed 1.5/1.5 ATR {fd['fixed_atr'].get('avg', 0):+.1f}; first half {(fd.get('first') or {}).get('avg', 0):+.1f}, "
+                                           f"second half {(fd.get('second') or {}).get('avg', 0):+.1f}) vs the signals themselves {fd['baseline'].get('avg', 0):+.1f}. Verdict: {fd['verdict']}."})
+    except Exception as exc:
+        rep["fade"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.34: what the signals mean in rupees per day, for 1 / 2 / 3 lots
         m = money or {}
         lot = int(m.get("lot") or DEFAULT_LOTS.get(symbol, 65))
