@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.31"
+APP_VERSION = "1.20.32"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1647,7 +1647,7 @@ def one_per_side_on():
     return ONE_TRADE_PER_SIDE_DEFAULT if v in (None, "") else str(v).lower() == "on"
 
 
-DAILY_TARGET_RS_DEFAULT = float(os.getenv("DAILY_TARGET_RS", "2000") or 0)   # owner: ₹2,000-3,000 a day is enough
+DAILY_TARGET_RS_DEFAULT = float(os.getenv("DAILY_TARGET_RS", "0") or 0)   # off: ₹2,000-3,000 is the owner's minimum goal, not a cap
 
 
 def daily_target_rs():
