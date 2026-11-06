@@ -141,7 +141,9 @@ async function loadConfig() {
     $('optSteps').value = String(o.steps ?? 2); $('optMoney').value = o.moneyness || 'ITM'; $('optLots').value = o.lots ?? 1;
     $('optCharges').value = o.charges_rs ?? 60; $('optRr').value = o.min_rr ?? 1.5; $('optExit').value = cfg.exit_plan || 'trail';
     if ($('optOnePer')) $('optOnePer').value = cfg.one_per_side || 'off';
-    $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · stop at least ${cfg.min_sl_atr ?? 1.5} ATR (${cfg.min_sl_points ?? 20} pts) · entries ${cfg.entry_windows || ''} IST${cfg.one_per_side === 'on' ? ' · only the first BUY per side each day' : ''}.`;
+    if ($('optDayTarget')) $('optDayTarget').value = String(cfg.daily_target_rs ?? 0);
+    if ($('optTrendEntry')) $('optTrendEntry').value = cfg.trend_entry || 'off';
+    $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · stop at least ${cfg.min_sl_atr ?? 1.5} ATR (${cfg.min_sl_points ?? 20} pts) · entries ${cfg.entry_windows || ''} IST${cfg.one_per_side === 'on' ? ' · only the first BUY per side each day' : ''}${cfg.daily_target_rs ? ` · stop for the day at ₹${Number(cfg.daily_target_rs).toLocaleString('en-IN')} profit` : ''}${cfg.trend_entry && cfg.trend_entry !== 'off' ? ' · strong-trend entries: ' + cfg.trend_entry : ''}.`;
   }
 }
 
@@ -179,7 +181,9 @@ async function saveAtr(reset) {
   const msg = $('atrMsg'); msg.textContent = 'Saving…';
   const optBody = () => ({opt_steps: Number($('optSteps').value), opt_moneyness: $('optMoney').value, opt_lots: Number($('optLots').value) || 1,
                           opt_charges_rs: Number($('optCharges').value) || 0, opt_min_rr: Number($('optRr').value) || 1.5, opt_exit_plan: $('optExit').value,
-                          ...($('optOnePer') ? {opt_one_per_side: $('optOnePer').value} : {})});
+                          ...($('optOnePer') ? {opt_one_per_side: $('optOnePer').value} : {}),
+                          ...($('optDayTarget') ? {opt_daily_target_rs: Number($('optDayTarget').value)} : {}),
+                          ...($('optTrendEntry') ? {opt_trend_entry: $('optTrendEntry').value} : {})});
   const keepAtr = cfg.custom ? {sl_atr: cfg.sl_atr, target_atr: cfg.target_atr} : {};
   const keepCost = $('costPts').value === '' ? {} : {cost_points: Number($('costPts').value)};
   const body = reset === 'opt' ? {...optBody(), ...keepAtr, ...keepCost} : reset ? optBody() : {...optBody(), sl_atr: $('slAtr').value === '' ? null : Number($('slAtr').value), target_atr: $('tgtAtr').value === '' ? null : Number($('tgtAtr').value),
@@ -323,3 +327,26 @@ function noteHint(e, st) {            // v1.20.10: say why there is no AI note i
   if (e.kind === 'FEED' || e.kind === 'OPTION' || e.severity === 'info') return 'Explained by the finding itself';
   return st && st.ai ? 'Waiting for the AI - retried every 2 minutes' : 'No AI connected';
 }
+
+
+// v1.20.28: save the AI (Gemini / Claude) review shown above, plus the findings of the same day, as a text file
+$('monReport').onclick = async () => {
+  const i = +($('monReviewPick').value || 0), r = monReviews[i];
+  if (!r) { $('monSaved').textContent = 'No AI review yet - press "Run review now" first.'; return; }
+  const day = String(r.created_at || '').slice(0, 10);
+  let evs = [];
+  try { const q = await fetch(`/api/monitor?start=${day}&end=${day}&limit=300`, {credentials: 'same-origin'}); if (q.ok) evs = (await q.json()).events || []; } catch {}
+  const lines = [`Option Intelligence - AI strategy report`, `Day: ${day}`,
+    `Review: ${r.kind === 'eod' ? 'end of day' : r.kind} at ${timeOnly(r.created_at).slice(11, 16)} IST · ${r.model ? r.model : 'code findings only'}`, '',
+    '=== AI REVIEW ===', r.text || '', '', `=== FINDINGS (${evs.length}) ===`];
+  for (const e of evs) {
+    lines.push(`${timeOnly(e.created_at).slice(11, 16)}  ${e.kind}${e.symbol ? ' ' + e.symbol : ''}  ${e.title}`);
+    const d = e.detail || {};
+    if (Array.isArray(d.blocked_by) && d.blocked_by.length) lines.push('    Blocked by: ' + d.blocked_by.join(' · '));
+    if (e.claude_note) lines.push('    AI: ' + e.claude_note);
+  }
+  lines.push('', 'Code findings are facts from the app; the AI text is a second opinion - check it before changing any rule.');
+  const name = `ai-report-${day}-${timeOnly(r.created_at).slice(11, 16).replace(':', '')}.txt`;
+  try { $('monSaved').textContent = window.oiSave ? await window.oiSave(name, lines.join('\n'), 'text/plain') : 'Saving is not available on this page.'; }
+  catch (e) { $('monSaved').textContent = 'Could not save the report: ' + e.message; }
+};

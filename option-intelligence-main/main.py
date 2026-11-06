@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.27"
+APP_VERSION = "1.20.28"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1647,6 +1647,31 @@ def one_per_side_on():
     return ONE_TRADE_PER_SIDE_DEFAULT if v in (None, "") else str(v).lower() == "on"
 
 
+DAILY_TARGET_RS_DEFAULT = float(os.getenv("DAILY_TARGET_RS", "2000") or 0)   # owner: ₹2,000-3,000 a day is enough
+
+
+def daily_target_rs():
+    """v1.20.28: stop taking new BUYs once today's booked profit reaches this (₹). Signals page (owner) wins; else DAILY_TARGET_RS env."""
+    v = OPTION_OVERRIDES.get("daily_target_rs")
+    try:
+        return max(0.0, float(v)) if v not in (None, "") else DAILY_TARGET_RS_DEFAULT
+    except (TypeError, ValueError):
+        return DAILY_TARGET_RS_DEFAULT
+
+
+def booked_rs_today(interval, mode):
+    """Today's booked (closed-trade) profit in ₹, after charges, for one timeframe / mode across NIFTY and BANKNIFTY."""
+    try:
+        today = datetime.now(IST).date().isoformat()
+        with SIGNAL_LOG_LOCK, sqlite3.connect(SIGNAL_LOG_DB, timeout=5) as db:
+            r = db.execute("SELECT COALESCE(SUM(net_pnl_rs), 0), COUNT(net_pnl_rs) FROM signal_log WHERE session_date=? AND interval=? AND mode=? "
+                           "AND net_pnl_rs IS NOT NULL", (today, int(interval), mode)).fetchone()
+        return float(r[0] or 0)
+    except Exception as exc:
+        logger.debug("booked_rs_today failed: %s", str(exc)[:120])
+        return None
+
+
 def side_buys_today(symbol, interval, mode):
     """{side: count} of BUY signals logged today for this symbol / timeframe / mode (the 'one trade per side per day' rule)."""
     try:
@@ -3047,7 +3072,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry")
 
 
 def _set_option_overrides(d):
@@ -3061,9 +3086,13 @@ def _set_option_overrides(d):
     if _cpm.set_minutes(OPTION_OVERRIDES.get("pattern_minutes") or os.getenv("CHART_PATTERN_MINUTES", "90")) != _PAT_MIN[0]:
         _PAT_MIN[0] = _cpm.PATTERN_MINUTES
         _AN_CACHE.clear()                                   # recompute with the new pattern window at once
+    import trend_entry as _tem
+    if _tem.set_variant(OPTION_OVERRIDES.get("trend_entry") or os.getenv("TREND_ENTRY", "off")) != _PAT_MIN[1]:
+        _PAT_MIN[1] = _tem.TREND_ENTRY
+        _AN_CACHE.clear()                                   # recompute with / without strong-trend entries at once
 
 
-_PAT_MIN = [None]
+_PAT_MIN = [None, None]
 
 
 class PatternWindow(BaseModel):
@@ -3104,6 +3133,8 @@ async def signal_log_config():
             "exit_plans": {k: v["label"] for k, v in op.EXIT_PLANS.items()},
             "leading_trigger": __import__("leading").LEADING_TRIGGER, "chart_pattern_mode": __import__("indicators").CHART_PATTERN_MODE,
             "one_per_side": "on" if one_per_side_on() else "off",
+            "daily_target_rs": daily_target_rs(),
+            "trend_entry": __import__("trend_entry").TREND_ENTRY,
             "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
             "option": {"steps": oc["steps"], "moneyness": oc["moneyness"], "lots": oc["lots"], "charges_rs": oc["charges_rs"], "min_rr": oc["min_rr"],
                        "custom": bool(OPTION_OVERRIDES)}}
@@ -3121,6 +3152,8 @@ class SignalLogConfig(BaseModel):
     opt_exit_plan: Optional[str] = None     # v1.19.1: balanced | winrate
     opt_pattern_minutes: Optional[int] = None   # v1.20.18: chart-pattern window 60-120 min
     opt_one_per_side: Optional[str] = None      # v1.20.23: "on" | "off" - only the first BUY per side per day
+    opt_daily_target_rs: Optional[float] = None  # v1.20.28: stop for the day after this booked profit (₹, 0 = off)
+    opt_trend_entry: Optional[str] = None       # v1.20.28: off | rsi | continuation (trend_entry.py)
 
 
 @app.post("/api/signals/config")
@@ -3165,6 +3198,15 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         if payload.opt_one_per_side.lower() not in ("on", "off"):
             raise HTTPException(400, "One trade per side must be on or off")
         new["opt_one_per_side"] = payload.opt_one_per_side.lower()
+    if payload.opt_daily_target_rs is not None:
+        if not 0 <= float(payload.opt_daily_target_rs) <= 100000:
+            raise HTTPException(400, "Daily profit target must be 0-100000 ₹")
+        new["opt_daily_target_rs"] = float(payload.opt_daily_target_rs)
+    if payload.opt_trend_entry:
+        import trend_entry as _tem
+        if payload.opt_trend_entry.lower() not in _tem.VARIANTS:
+            raise HTTPException(400, "Strong-trend entries must be off, rsi or continuation")
+        new["opt_trend_entry"] = payload.opt_trend_entry.lower()
     import chart_patterns as _cpm
     if payload.opt_pattern_minutes is not None:
         if payload.opt_pattern_minutes not in _cpm.ALLOWED_MINUTES:
@@ -3423,7 +3465,9 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                         reconfirm={"tracker": RECONFIRM, "name": rc_name, "window": reconfirm, "price": live_px, "ts": time.time()} if sym in INDEX_KEYS else None,
                         daily_losses=stopouts_today(sym) if MAX_DAILY_LOSSES else None, max_daily_losses=MAX_DAILY_LOSSES,
                         side_buys=side_buys_today(sym, interval, mode) if (one_per_side_on() and sym in INDEX_KEYS) else None,
-                        current_bar=str(a.get("last_closed_bar") or ""))
+                        current_bar=str(a.get("last_closed_bar") or ""),
+                        day_pnl_rs=booked_rs_today(interval, mode) if (daily_target_rs() and sym in INDEX_KEYS) else None,
+                        daily_target_rs=daily_target_rs())
         a["reconfirm"] = fused.get("reconfirm")
         final = fused["final"]
         # v1.19: WATCH / PENDING / CONFIRMED -> the option 2 strikes from ATM on the trade side (the terminal switches its chart to it)

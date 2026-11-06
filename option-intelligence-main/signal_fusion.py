@@ -227,7 +227,7 @@ def signal_age_limits(rules, interval):
 
 
 def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="standard", reconfirm=None, daily_losses=None, max_daily_losses=0,
-         side_buys=None, current_bar=None):
+         side_buys=None, current_bar=None, day_pnl_rs=None, daily_target_rs=0):
     """Combine technical analysis `a` (indicators.analyze output) with the dashboard final signal `dash`
     (dashboard_data.final_signal output). `reconfirm` = {"tracker", "name", "window", "price", "ts"} switches on the hold-and-recheck
     step: a setup that passes every other gate is PENDING until the tracker has seen it hold for `window` seconds. Returns {"gates": [...extra hard gates...], "final": {...}, "timing": {...}, "dashboard": {...}}."""
@@ -340,6 +340,12 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
         gates.append({"label": "One trade per side per day", "pass": n_ == 0 or same_bar,
                       "detail": (f"no {side} BUY yet today" if n_ == 0 else "this is today's first " + side + " BUY") if (n_ == 0 or same_bar)
                                 else f"{n_} {side} BUY already taken today (first at {got.get('first')}) — later same-side signals lost in the replay"})
+    if side and daily_target_rs and day_pnl_rs is not None:
+        # v1.20.28: a small buyer's daily goal - once today's booked profit reaches it, no new BUYs (protects the day's profit)
+        hit = day_pnl_rs >= daily_target_rs
+        gates.append({"label": f"Daily profit target not reached (₹{daily_target_rs:,.0f})", "pass": not hit,
+                      "detail": (f"booked today ₹{day_pnl_rs:,.0f} - target reached, done for the day" if hit
+                                 else f"booked today ₹{day_pnl_rs:,.0f} of ₹{daily_target_rs:,.0f}")})
     rc = None
     cand = bool(side) and tech_level == "CONFIRMED" and all(g["pass"] for g in gates)
     if reconfirm:

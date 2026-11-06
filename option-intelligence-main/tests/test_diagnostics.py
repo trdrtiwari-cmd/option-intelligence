@@ -232,15 +232,15 @@ def test_strong_trend_rsi_whatif():
     cs = [{"_dt": t0 + timedelta(minutes=5 * i), "open": 100 + 3 * i, "high": 102 + 3 * i, "low": 99 + 3 * i, "close": 101 + 3 * i}
           for i in range(60)]
     rsi_lbl = "Momentum not overextended (RSI < 68 for CE)"
-    rep = [{"i": 30, "side": "CE", "atr": 3.0, "rsi": 72.0, "vwap": 150.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},
-           {"i": 31, "side": "CE", "atr": 3.0, "rsi": 80.0, "vwap": 150.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},          # RSI beyond cap
-           {"i": 45, "side": "CE", "atr": 3.0, "rsi": 72.0, "vwap": 150.0, "signal": "WATCH_CE", "failed": [rsi_lbl, "Score ≥ 70"]},  # another gate
-           {"i": 50, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 500.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},          # below VWAP
-           {"i": 52, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 150.0, "signal": "WATCH_CE",
-            "failed": [rsi_lbl, "Not a fresh breakout / breakdown bar (wait for the retest)"]}]
-    strict = dg.strong_trend_events(cs, rep, "strict")
-    assert [r["i"] for r in strict] == [30] and strict[0]["trend_eff"] == 1.0
-    loose = dg.strong_trend_events(cs, rep, "loose")
-    assert [r["i"] for r in loose] == [30, 52]
+    fresh = "Not a fresh breakout / breakdown bar (wait for the retest)"
+    rep = [{"i": 30, "side": "CE", "atr": 3.0, "rsi": 72.0, "vwap": 150.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},
+           {"i": 40, "side": "CE", "atr": 3.0, "rsi": 78.0, "vwap": 150.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},   # 75 < RSI <= 80
+           {"i": 45, "side": "CE", "atr": 3.0, "rsi": 72.0, "vwap": 150.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl, "Score ≥ 70"]},
+           {"i": 50, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 500.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},   # below VWAP
+           {"i": 55, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 150.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl, fresh]},
+           {"i": 57, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 150.0, "stretch_atr": 2.5, "signal": "WATCH_CE", "failed": [rsi_lbl, fresh]}]  # too stretched
+    assert [r["i"] for r in dg.strong_trend_events(cs, rep, "rsi")] == [30]
+    cont = dg.strong_trend_events(cs, rep, "continuation")
+    assert [r["i"] for r in cont] == [30, 40, 55] and cont[0]["trend_eff"] == 1.0
     choppy = [dict(c, close=100 + (5 if k % 2 else 0)) for k, c in enumerate(cs)]
-    assert dg.strong_trend_events(choppy, rep, "strict") == []                                                            # not a clean trend
+    assert dg.strong_trend_events(choppy, rep, "rsi") == []

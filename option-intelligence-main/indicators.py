@@ -106,6 +106,7 @@ LAG_RELIEF = _os.getenv("LAG_RELIEF", "1") != "0"
 CHART_PATTERN_MODE = (_os.getenv("CHART_PATTERN_MODE", "include").strip().lower() or "include")
 import chart_patterns as _cp
 import leading as _lead
+import trend_entry as _te
 RSI_MOMENTUM = float(_os.getenv("RSI_MOMENTUM", "40"))
 
 
@@ -487,7 +488,7 @@ def breakout_quality(cs, atr, side, n=20):
 
 
 def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard", score_min=70,
-            pattern_minutes=None):
+            pattern_minutes=None, trend_entry_variant=None):
     rules = mode_rules(mode)
     mode = mode if mode in MODES else "standard"
     cs, forming_dropped = drop_forming(normalize_candles(raw_candles), interval, now)
@@ -699,6 +700,18 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
                               "detail": pb_detail if ok_pb else ("Chart pattern: " + pat_txt) if (pat_on and pat_ok) else
                                         f"Leading trigger: {_lead.LABELS[_lead.LEADING_TRIGGER]}" if lead_ok else pb_detail})
     failed = [g for g in gates if not g["pass"]]
+    trend_entry = None
+    te_var = trend_entry_variant if trend_entry_variant is not None else _te.TREND_ENTRY
+    if side and failed and te_var != "off" and atr:
+        # v1.20.28: strong one-way trend - relax only the pullback rules (see trend_entry.py); every other gate stays
+        stretch_te = ((e9[-1] - last) if side == "PE" else (last - e9[-1])) / atr
+        trend_entry = _te.check(cs, side, atr, rsi, vwap, stretch_te, [g["label"] for g in failed], te_var)
+        if trend_entry:
+            for g in failed:
+                g["pass"] = True
+                g["detail"] = f"relaxed on a strong trend · was: {g.get('detail') or 'failing'}"
+            gates.append({"label": "Strong-trend entry", "pass": True, "detail": trend_entry["detail"]})
+            failed = []
     if side and not failed:
         signal = f"CONFIRMED_{side}"
         decision = f"CONFIRMED {side} SETUP — " + ("enter on this continuation break; aim for 20–40 pts" if rules["micro_trigger"] else "enter only on a retest that holds")
@@ -712,7 +725,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         "mode_rules": {k: rules[k] for k in ("room_atr", "fresh_bars", "expire_bars", "max_chase_atr")},
         "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
         "regime": regime, "regime_label": regime_label, "regime_phase": regime_phase, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
-        "chart_pattern": chart_pattern, "pattern_effects": pattern_effects,
+        "chart_pattern": chart_pattern, "pattern_effects": pattern_effects, "trend_entry": trend_entry,
         "trend_evidence": ds["evidence"], "candle_confirmation": candle_confirmation(cs, side) if side else {"pattern": "NO_DIRECTIONAL_BIAS", "confirmed": False, "detail": "No CE/PE bias to confirm."},
         "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
                   "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"], "broke_out": ds["broke_out"]}, "checks": checks, "gates": gates,

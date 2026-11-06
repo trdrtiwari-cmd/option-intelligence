@@ -189,3 +189,11 @@ def test_one_trade_per_side_per_day():
     other = "PE" if side == "CE" else "CE"
     assert sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5,
                    side_buys={other: {"count": 3, "first": "x"}}, current_bar="y")["final"]["level"] == "CONFIRMED"
+
+
+def test_daily_profit_target_gate():
+    ok = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, day_pnl_rs=1200.0, daily_target_rs=2000)
+    assert ok["final"]["level"] == "CONFIRMED" and any(g["label"].startswith("Daily profit target") and g["pass"] for g in ok["gates"])
+    hit = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, day_pnl_rs=2150.0, daily_target_rs=2000)
+    assert hit["final"]["level"] != "CONFIRMED"
+    assert sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, day_pnl_rs=9999.0, daily_target_rs=0)["final"]["level"] == "CONFIRMED"

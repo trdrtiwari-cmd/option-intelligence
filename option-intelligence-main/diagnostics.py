@@ -52,7 +52,8 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
             h += 1
         sub = htf[:h]
         a = analyze(cs[max(0, i + 1 - window):i + 1], symbol, interval, htf_raw=sub or None, htf_interval=htf_interval if sub else None,
-                    volume_source=volume_source, now=close_dt, mode=mode, score_min=score_min, pattern_minutes=pattern_minutes)
+                    volume_source=volume_source, now=close_dt, mode=mode, score_min=score_min, pattern_minutes=pattern_minutes,
+                    trend_entry_variant="off")   # v1.20.28: replay the base rules; strong-trend entries are measured as a what-if
         if a.get("status") != "ok":
             continue
         side, atr = a.get("side"), a.get("atr")
@@ -624,48 +625,30 @@ def trend_day_whatif(cs, replayed, conf_rows, interval, horizon, cost, target, s
     return out
 
 
-# ---------------------------------------------------------------- v1.20.27 strong trend: allow RSI up to 75 (CE) / down to 25 (PE)
-RSI_EXT_LABELS = ("Momentum not overextended (RSI < ", "Momentum not overextended (RSI > ")
-STRONG_RELAX = {"strict": RSI_EXT_LABELS,
-                "loose": RSI_EXT_LABELS + ("Not a fresh breakout / breakdown bar", "Not chasing")}
+# ---------------------------------------------------------------- v1.20.27/28 strong trend entries (trend_entry.py)
+import trend_entry as _te
 
 
-def strong_trend_events(cs, replayed, variant="strict", rsi_cap=75.0, min_eff=0.6, min_move_atr=4.0, max_per_day=3):
-    """Extra entries if the 'RSI overextended' rule were relaxed on STRONG trends only. Strictly causal:
-      * strong trend when the bar closed: the last 20 closes moved >= `min_move_atr` ATR in the trade's direction with a Kaufman
-        efficiency >= `min_eff` (a clean, one-way move), and price is on the trade side of the session VWAP;
-      * RSI is past the normal limit but not beyond `rsi_cap` (CE: 68-75, PE: 25-32);
-      * every other gate passes (variant 'loose' also allows a fresh-breakout bar and > 1 ATR beyond EMA 9) - the entry window,
-        score, trend, HTF and dashboard-free gates all still apply;
-      * one trade at a time, at most `max_per_day` per day, never on a bar that is already a confirmed signal."""
-    relax = STRONG_RELAX[variant]
+def strong_trend_events(cs, replayed, variant="rsi", max_per_day=3):
+    """Extra entries the strong-trend rule (trend_entry.check, the same code the live app uses) would add: bars blocked only by the
+    relaxable pullback rules, on a strong one-way trend. One trade at a time, at most `max_per_day` per day, never on a bar that is
+    already a confirmed signal. The entry window and every other gate still apply."""
+    variant = {"strict": "rsi", "loose": "continuation"}.get(variant, variant)
     out, busy_until, taken_day = [], -1, {}
     for r in replayed:
-        i, side, atr, rsi = r["i"], r.get("side"), r.get("atr"), r.get("rsi")
-        if not side or not atr or rsi is None or r["signal"].startswith("CONFIRMED") or i <= busy_until or i < 20:
+        i, side, atr = r["i"], r.get("side"), r.get("atr")
+        if not side or not atr or r["signal"].startswith("CONFIRMED") or i <= busy_until or i < 20:
             continue
-        failed = r["failed"]
-        if not any(f.startswith(RSI_EXT_LABELS) for f in failed):
-            continue
-        if any(not f.startswith(relax) for f in failed):
-            continue
-        if (side == "CE" and rsi > rsi_cap) or (side == "PE" and rsi < 100 - rsi_cap):
-            continue
-        closes = [c["close"] for c in cs[i - 20:i + 1]]
-        d = 1 if side == "CE" else -1
-        move = (closes[-1] - closes[0]) * d
-        if move < min_move_atr * atr or efficiency_ratio(closes) < min_eff:
-            continue
-        vw = r.get("vwap")
-        if vw is not None and (closes[-1] - vw) * d <= 0:
+        te = _te.check(cs[:i + 1], side, atr, r.get("rsi"), r.get("vwap"), r.get("stretch_atr"), r["failed"], variant)
+        if not te:
             continue
         day = cs[i]["_dt"].astimezone(IST).date()
         if taken_day.get(day, 0) >= max_per_day:
             continue
-        res, k = _touch(cs, i, d, atr)
+        res, k = _touch(cs, i, 1 if side == "CE" else -1, atr)
         busy_until = k if k is not None else i + 12
         taken_day[day] = taken_day.get(day, 0) + 1
-        out.append({**r, "trend_eff": round(efficiency_ratio(closes), 2), "trend_move_atr": round(move / atr, 1)})
+        out.append({**r, "trend_eff": te["efficiency"], "trend_move_atr": te["move_atr"]})
     return out
 
 
@@ -676,8 +659,8 @@ def strong_trend_whatif(cs, replayed, conf_rows, interval, horizon, cost, target
     tr = lambda rows: [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
     base = tr(conf_rows)
     out = {"baseline": stats(base), "variants": []}
-    for variant, label in (("strict", "Strong trend: allow RSI up to 75 (CE) / down to 25 (PE)"),
-                           ("loose", "Strong trend: RSI up to 75 + fresh-breakout bar + chasing allowed")):
+    for variant, label in (("rsi", "Strong trend: allow RSI up to 75 (CE) / down to 25 (PE)"),
+                           ("continuation", "Strong trend continuation: break of the last 3 bars, pullback rules relaxed")):
         rows = evaluate(cs, strong_trend_events(cs, replayed, variant), interval, horizon, cost, target, stop, with_extras=True)
         v = {"variant": variant, "label": label, "trail": stats(tr(rows)), "combined": stats(base + tr(rows)),
              "fixed_atr": stats([r["atr_grid"]["1.5/1.5"] for r in rows if "1.5/1.5" in r.get("atr_grid", {})]),
@@ -696,7 +679,7 @@ def strong_trend_whatif(cs, replayed, conf_rows, interval, horizon, cost, target
                         "fragile - positive in both halves with 15+ trades, but inside its noise or the fixed exit loses; do not switch on"
                         if both and e["n"] >= 15 and e["avg"] > 0 else
                         "positive, not proven (need 15+ trades, positive in both halves)" if e.get("avg", 0) > 0 else
-                        "loses - keep the RSI limit")
+                        "loses - keep it off")
         out["variants"].append(v)
     return out
 
