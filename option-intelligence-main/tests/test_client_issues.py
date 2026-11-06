@@ -25,3 +25,13 @@ def test_collect_dedupe_summary_and_mirror(tmp_path):
     data = [r for r in cis.dump(db, keep_days=10000)]
     cis.load(db2, data)
     assert len(cis.query(db2, "2026-11-06", "2026-11-06")) == 2
+
+
+def test_merge_volume_refuses_futures_that_end_a_session_early():
+    import indicators as ind
+    idx = [{"time": f"2026-11-0{d}T10:{m:02d}:00+05:30", "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 0} for d in (5, 6) for m in range(0, 60, 5)]
+    fut_old = [dict(c, volume=100) for c in idx if c["time"].startswith("2026-11-05")]
+    assert ind.merge_volume(idx, fut_old + fut_old[:1]) is None                        # 6 Nov would get volume 0
+    full = [dict(c, volume=100) for c in idx]
+    m = ind.merge_volume(idx, full)
+    assert m and all(r["volume"] == 100 for r in m)

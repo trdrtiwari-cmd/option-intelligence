@@ -84,6 +84,8 @@
   const fmt = (v, n = 2) => v == null || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("en-IN", { minimumFractionDigits: n, maximumFractionDigits: n });
   const sgn = (v, n = 2) => v == null || !Number.isFinite(v) ? "—" : (v > 0 ? "+" : "") + fmt(v, n);
   const col = v => v == null || !Number.isFinite(v) ? "" : v > 0 ? "color:var(--green)" : v < 0 ? "color:var(--red)" : "";
+  const fmtVol = v => v == null || !Number.isFinite(Number(v)) ? "—" : v >= 1e7 ? (v / 1e7).toFixed(2) + " Cr" : v >= 1e5 ? (v / 1e5).toFixed(2) + " L" : v >= 1e3 ? (v / 1e3).toFixed(1) + " K" : String(Math.round(v));
+  let VOLINFO = { source: "", note: "" };
   const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   // ------------------------------------------------------------------ time (IST axis, like the terminal)
@@ -181,13 +183,15 @@
   function build() {
     clearSeries();
     const I = S.ind, m = C.main;
+    m.applyOptions({ leftPriceScale: { visible: false } });
     if (S.candle === "bar") ser.price = m.addBarSeries({ upColor: S.up, downColor: S.down, thinBars: false });
     else if (S.candle === "line") ser.price = m.addLineSeries({ color: "#5aa7ff", lineWidth: 2 });
     else ser.price = m.addCandlestickSeries({ upColor: S.candle === "hollow" ? "rgba(0,0,0,0)" : S.up, downColor: S.down, borderUpColor: S.up, borderDownColor: S.down, wickUpColor: S.up, wickDownColor: S.down });
     if (I.vol.on) {
-      ser.vol = m.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
-      m.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-      if (I.vol.ma > 0) ser.volMa = m.addLineSeries({ priceScaleId: "vol", color: I.vol.maColor, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: { type: "volume" } });
+      const vs = isPhone() ? "vol" : "left";                 // computers: volume values on a left axis; phones: legend / data only
+      ser.vol = m.addHistogramSeries({ priceScaleId: vs, priceFormat: { type: "volume" }, lastValueVisible: !isPhone(), priceLineVisible: false });
+      m.priceScale(vs).applyOptions({ scaleMargins: { top: 0.8, bottom: 0 }, visible: vs === "left", borderColor: "#27384d" });
+      if (I.vol.ma > 0) ser.volMa = m.addLineSeries({ priceScaleId: vs, color: I.vol.maColor, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: { type: "volume" } });
     }
     if (I.bb.on) { ser.bbU = line(m, I.bb.color, 1); ser.bbM = line(m, I.bb.color, 1, { lineStyle: 2 }); ser.bbL = line(m, I.bb.color, 1); }
     ["ema3", "sma", "ema2", "ema1"].forEach(k => { if (I[k].on) ser[k] = line(m, I[k].color, I[k].width); });
@@ -211,8 +215,8 @@
     IND = calc(cs);
     const I = S.ind;
     ser.price.setData(S.candle === "line" ? cs.map(c => ({ time: c.time, value: c.close })) : cs.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
-    if (ser.vol) ser.vol.setData(cs.map(c => ({ time: c.time, value: c.volume || 0, color: (c.close >= c.open ? I.vol.up : I.vol.down) + "66" })));
-    if (ser.volMa) ser.volMa.setData(pts(sma(cs.map(c => c.volume || 0), I.vol.ma)));
+    if (ser.vol) ser.vol.setData(cs.map(c => c.volume == null ? { time: c.time } : { time: c.time, value: c.volume, color: (c.close >= c.open ? I.vol.up : I.vol.down) + "66" }));
+    if (ser.volMa) ser.volMa.setData(pts(volAvg(I.vol.ma)));
     ["ema1", "ema2", "ema3", "sma", "vwap"].forEach(k => { if (ser[k]) ser[k].setData(pts(IND[k])); });
     if (ser.bbU) { ser.bbU.setData(pts(IND.bb.up)); ser.bbM.setData(pts(IND.bb.mid)); ser.bbL.setData(pts(IND.bb.lo)); }
     if (ser.stU) {
@@ -230,6 +234,14 @@
     if (fit) { const n = cs.length, show = Math.min(n, isPhone() ? 70 : 160); C.main.timeScale().setVisibleLogicalRange({ from: n - show, to: n + 3 }); }
     legend(null);
     panel();
+  }
+  // average of the known volumes over the last n candles (candles without volume data are skipped, not counted as 0)
+  function volAvg(n) {
+    return cs.map((c, i) => {
+      if (n <= 0 || c.volume == null) return null;
+      const w = cs.slice(Math.max(0, i - n + 1), i + 1).filter(x => x.volume != null);
+      return w.length >= Math.min(n, 5) ? w.reduce((a, x) => a + x.volume, 0) / w.length : null;
+    });
   }
   function sessions() {
     const days = []; cs.forEach((c, i) => { const d = dayKey(c.time); if (!days.length || days[days.length - 1].d !== d) days.push({ d, from: i, to: i }); else days[days.length - 1].to = i; });
@@ -352,7 +364,7 @@
     if (I.st.on && IND) items.push(`<span style="color:${IND.st.dir[i] === 1 ? I.st.up : I.st.down}">ST ${fmt(IND.st.line[i])}</span>`);
     if (I.bb.on && IND) items.push(`<span style="color:${I.bb.color}">BB ${fmt(IND.bb.up[i])} / ${fmt(IND.bb.lo[i])}</span>`);
     $("legend").innerHTML = `<div><b>${esc(OPT ? OPT.name : S.sym)}</b> ${S.tf}m · ${crossFmt(c.time)}</div>` +
-      `<div>O <b>${fmt(c.open)}</b> H <b>${fmt(c.high)}</b> L <b>${fmt(c.low)}</b> C <b style="${col(ch)}">${fmt(c.close)}</b> <span style="${col(ch)}">${sgn(ch)}</span>${c.volume ? ` · Vol ${Number(c.volume).toLocaleString("en-IN")}${I.vol.on && I.vol.ma > 0 && i >= I.vol.ma - 1 ? ` (avg ${Math.round(cs.slice(i - I.vol.ma + 1, i + 1).reduce((a, x) => a + (x.volume || 0), 0) / I.vol.ma).toLocaleString("en-IN")})` : ""}` : ""}</div>` +
+      `<div>O <b>${fmt(c.open)}</b> H <b>${fmt(c.high)}</b> L <b>${fmt(c.low)}</b> C <b style="${col(ch)}">${fmt(c.close)}</b> <span style="${col(ch)}">${sgn(ch)}</span>${c.volume != null && c.volume > 0 ? ` · Vol <b>${fmtVol(c.volume)}</b>${I.vol.on && I.vol.ma > 0 && volAvg(I.vol.ma)[i] ? ` (avg ${fmtVol(volAvg(I.vol.ma)[i])} · ${(c.volume / volAvg(I.vol.ma)[i]).toFixed(2)}×)` : ""}` : VOLINFO.note ? ` · <span style="color:var(--yellow)">no volume</span>` : ""}</div>` +
       `<div class="ind">${items.join("")}</div>`;
     if (I.rsi.on) $("rsiTag").textContent = `RSI ${I.rsi.len}: ${fmt(v("rsi"), 1)}`;
     if (I.macd.on && IND) $("macdTag").textContent = `MACD ${I.macd.fast},${I.macd.slow},${I.macd.sig}: ${fmt(IND.macd.line[i])} · signal ${fmt(IND.macd.sig[i])} · hist ${fmt(IND.macd.hist[i])}`;
@@ -384,6 +396,14 @@
         [`MACD hist (${I.macd.fast},${I.macd.slow},${I.macd.sig})`, fmt(h), col(h)], ["ATR (14)", at == null ? "—" : `${fmt(at)} pts (${fmt(at / last * 100, 2)}%)`],
         ["Bollinger %B (engine)", a.bollinger ? `${fmt(a.bollinger.percent_b, 2)}${a.bollinger.squeeze ? " · squeeze" : ""}` : "—"],
         ["Relative volume", a.relative_volume != null ? fmt(a.relative_volume, 2) + "×" : "—"]]),
+      rows("Volume", (() => {
+        const v = c.volume, av = S.ind.vol.ma > 0 ? volAvg(S.ind.vol.ma)[n] : null, today = cs.filter(x => dayKey(x.time) === dayKey(c.time) && x.volume != null);
+        return [["Last candle", v == null ? "—" : fmtVol(v)], [`Average (${S.ind.vol.ma || "—"} candles)`, fmtVol(av)],
+          ["Relative volume", v != null && av ? `${(v / av).toFixed(2)}×${v / av >= 1.5 ? " · high" : v / av <= 0.6 ? " · low" : ""}` : "—", v != null && av ? (v / av >= 1.5 ? "color:var(--green)" : v / av <= 0.6 ? "color:var(--yellow)" : "") : ""],
+          ["Today so far", today.length ? fmtVol(today.reduce((a2, x) => a2 + x.volume, 0)) : "—"],
+          ["Source", OPT ? "option contract" : esc(VOLINFO.source || "—")],
+          ...(VOLINFO.note ? [["Note", esc(VOLINFO.note), "color:var(--yellow)"]] : [])];
+      })()),
       rows("Support / resistance", [
         ...(SR ? [...SR.resistances.map((l, i) => ["R" + (i + 1) + " · " + l.strength, `${fmt(l.price)} (+${fmt(l.distance)} · ${l.atrMult == null ? "—" : fmt(l.atrMult, 1) + " ATR"})`, "color:var(--red)"]).reverse(),
           ...SR.supports.map((l, i) => ["S" + (i + 1) + " · " + l.strength, `${fmt(l.price)} (−${fmt(l.distance)} · ${l.atrMult == null ? "—" : fmt(l.atrMult, 1) + " ATR"})`, "color:var(--green)"])] : [["Auto S/R", S.ind.sr.on ? "not enough candles" : "off"]]),
@@ -397,7 +417,7 @@
     $("groups").innerHTML = html.join("");
     $("strip").innerHTML = [["Signal", esc(act), `color:${sigCol}`], ["Last", fmt(last), col(chg)], ["Chg", chg == null ? "—" : sgn(chg), col(chg)], ["RSI", fmt(r, 1)], ["ATR", fmt(at)],
       ["VWAP", vw == null ? "—" : sgn(last - vw), vw == null ? "" : col(last - vw)], ["EMA", e1 == null || e2 == null ? "—" : e1 > e2 ? "Up" : "Down", e1 != null && e2 != null ? col(e1 - e2) : ""],
-      ["ST", st.dir[n] == null ? "—" : st.dir[n] === 1 ? "Up" : "Down"], ["Score", a.status === "ok" ? a.score : "—"], ["S1", SR && SR.supports[0] ? fmt(SR.supports[0].price) : "—", "color:var(--green)"], ["R1", SR && SR.resistances[0] ? fmt(SR.resistances[0].price) : "—", "color:var(--red)"], ["Day H/L", `${fmt(d.high, 0)} / ${fmt(d.low, 0)}`]]
+      ["ST", st.dir[n] == null ? "—" : st.dir[n] === 1 ? "Up" : "Down"], ["Vol", c.volume == null ? "—" : fmtVol(c.volume)], ["Score", a.status === "ok" ? a.score : "—"], ["S1", SR && SR.supports[0] ? fmt(SR.supports[0].price) : "—", "color:var(--green)"], ["R1", SR && SR.resistances[0] ? fmt(SR.resistances[0].price) : "—", "color:var(--red)"], ["Day H/L", `${fmt(d.high, 0)} / ${fmt(d.low, 0)}`]]
       .map(([k, v, s]) => `<div><span>${k}</span><b style="${s || ""}">${v}</b></div>`).join("");
   }
 
@@ -524,9 +544,15 @@
       const d = await api(`/api/candles?symbol=${S.sym}&interval=${S.tf}&days=${S.days}${optQ()}`);
       if (g !== loadGen) return;
       cs = prep(d.candles); tick = null;
+      VOLINFO = { source: d.volume_source || "", note: d.volume_note || "" };
+      if (!OPT && !cs.some(c => c.volume > 0)) {
+        const fv = new Map((d.fut_volume || []).map(([t, v]) => [toT(t), +v]));
+        cs.forEach(c => { c.volume = fv.has(c.time) ? fv.get(c.time) : null; });           // unknown, not 0
+        if (fv.size) VOLINFO.source = "futures (partial)";
+      }
       if (!cs.length) { $("live").textContent = "No candles yet"; return; }
       draw(true); renderDrawings();
-      $("live").textContent = `${cs.length} candles · ${OPT ? "option premium" : d.volume_source ? "volume: " + d.volume_source : "no volume"}`;
+      $("live").textContent = `${cs.length} candles · ${OPT ? "option premium" : d.volume_source ? "volume: " + d.volume_source : VOLINFO.note ? "volume: see note" : "no volume"}`;
     } catch (e) { $("live").textContent = "Candles unavailable: " + e.message; }
   }
   async function load() {
@@ -540,6 +566,7 @@
     let appended = false;
     for (const b of prep(list)) {
       const j = cs.findIndex((c, i) => i >= cs.length - 6 && c.time === b.time);
+      if (!OPT && !(b.volume > 0)) b.volume = j >= 0 ? cs[j].volume : (cs.some(c => c.volume > 0) && !VOLINFO.note ? 0 : null);
       if (j >= 0) cs[j] = b; else if (b.time > cs.at(-1).time) { cs.push(b); appended = true; }
     }
     tick = null;

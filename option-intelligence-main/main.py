@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.52"
+APP_VERSION = "1.20.53"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1187,15 +1187,27 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
             _pin_keys(symbol.upper(), [key])
         data = overlay_live_tick(data, key, interval)
     volume_source = None
+    volume_note = None
+    fut_volume = None
     feed = None
     if not instrument_key.strip() and symbol.upper() in INDEX_KEYS:
         # Indices carry no volume: borrow the front-month future's volume so VWAP / volume checks work.
         try:
             fut = await get_front_future(symbol.upper())
             if fut:
-                merged = merge_volume(data, await fetch_candles(fut["instrument_key"], interval, days))
+                fut_rows = await fetch_candles(fut["instrument_key"], interval, days)
+                merged = merge_volume(data, fut_rows)
+                if not merged and fut_rows and data:
+                    # v1.20.53: the futures history can stop a session before the index (Upstox publishes it later): fetch the
+                    # latest sessions of the future separately and try again
+                    extra = await fetch_candles(fut["instrument_key"], interval, 2)
+                    fut_rows = [{k: v for k, v in c.items() if k != "_dt"} for c in normalize_candles(list(extra) + list(fut_rows))]
+                    merged = merge_volume(data, fut_rows)
                 if merged:
                     data, volume_source = merged, fut["trading_symbol"]
+                else:
+                    volume_note = _volume_note(data, fut_rows, fut["trading_symbol"])
+                    fut_volume = [[c["time"], c.get("volume") or 0] for c in (fut_rows or [])][-3000:]
         except HTTPException as exc:
             if exc.status_code == 401:
                 raise
@@ -1205,7 +1217,27 @@ async def candles(symbol: str = "NIFTY", interval: int = 5, days: int = 5, instr
         # Last step, after the volume merge: fold in the freshest price (WebSocket tick, else REST quote).
         data, src, behind = await overlay_index_price(data, key, symbol.upper(), interval)
         feed = {"price_source": src, "bars_behind": behind, "server_time": utc_now_iso()}
-    return {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": data, "volume_source": volume_source, "feed": feed}
+    out = {"symbol": symbol, "instrument_key": key, "interval": interval, "candles": data, "volume_source": volume_source, "feed": feed}
+    if volume_note:
+        out["volume_note"] = volume_note           # why the index candles carry no volume this time
+    if fut_volume:
+        out["fut_volume"] = fut_volume             # the futures volume that does exist (the chart draws it where the times match)
+    return out
+
+
+def _volume_note(idx_rows, fut_rows, name):
+    """v1.20.53: a short reason the futures volume was not merged, for the chart and the review file."""
+    ic, fc = normalize_candles(idx_rows or []), normalize_candles(fut_rows or [])
+    if not fc:
+        return f"No volume: Upstox returned no candles for {name}."
+    if sum(c["volume"] for c in fc) <= 0:
+        return f"No volume: {name} candles carry no volume."
+    last_i, last_f = ic[-1]["_dt"].astimezone(IST), fc[-1]["_dt"].astimezone(IST)
+    if last_f.date() < last_i.date():
+        return f"Volume only up to {last_f:%d %b %H:%M}: Upstox has not sent {name} candles for {last_i:%d %b} yet."
+    vol = {c["_dt"].timestamp() for c in fc}
+    m = sum(1 for c in ic if c["_dt"].timestamp() in vol)
+    return f"No volume: only {m} of {len(ic)} index candles line up with {name} candles."
 
 
 @app.get("/api/pin-option")
