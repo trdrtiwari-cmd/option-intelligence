@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.47";
+const FRONTEND_VERSION="1.20.48";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -792,9 +792,9 @@ $("symbol").addEventListener("change",()=>{lastAutoSide=null;lastAutoOptionKey=n
   loadContracts(true); // expiry list -> chain -> derivatives for that real expiry
 });
 $("interval").addEventListener("change",refresh);
-(function(){const m=$("scoreMin");if(!m)return;try{const v=localStorage.getItem("oi-score-min-v2");if(v&&["60","65","70"].includes(v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-score-min-v2",m.value)}catch{}refresh()})})();
+(function(){const m=$("scoreMin");if(!m)return;try{const v=localStorage.getItem("oi-score-min-v2");if(v&&["60","65","70"].includes(v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-score-min-v2",m.value);localStorage.setItem("oi-score-min",m.value)}catch{}refresh()})})();
 (function(){const m=$("reconfirmSec");if(!m)return;try{const v=localStorage.getItem("oi-reconfirm");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-reconfirm",m.value)}catch{}runAnalysis(true)})})();
-(function(){const m=$("signalMode");if(!m)return;try{const v=localStorage.getItem("oi-signal-mode-v2");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-signal-mode-v2",m.value)}catch{}refresh()})})();
+(function(){const m=$("signalMode");if(!m)return;try{const v=localStorage.getItem("oi-signal-mode-v2");if(v&&[...m.options].some(o=>o.value===v))m.value=v}catch{}m.addEventListener("change",()=>{try{localStorage.setItem("oi-signal-mode-v2",m.value);localStorage.setItem("oi-signal-mode",m.value)}catch{}refresh()})})();
 $("loadContracts").addEventListener("click",()=>loadContracts(true));
 $("loadChain").addEventListener("click",()=>loadChain());
 $("chartView").addEventListener("change",refreshChartSource);
@@ -1460,9 +1460,13 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
     line.textContent=`Server monitor: ${m.running?"running":s.market_open?"NOT running":"idle (market closed)"} · last check ${ago(m.last_check_ago_s)} · phones registered: ${(dev.web||0)+(dev.native||0)}`+(sy?` · ${sy}`:"");
     el.appendChild(line);
     (s.problems||[]).forEach(p=>{const d=document.createElement("div");d.style.color="var(--yellow)";d.textContent="⚠ "+p;el.appendChild(d)});
+    const lc=window.oiLiveCfg;   // v1.20.48: say when this Terminal shows different signals from the phone alerts and the BUY log
+    if(lc){const diff=[];if(getMode()!==lc.mode)diff.push(`signal mode ${getMode()} (alerts: ${lc.mode})`);if(getScoreMin()!==Number(lc.score_min))diff.push(`minimum score ${getScoreMin()} (alerts: ${lc.score_min})`);if(getInterval()!==Number(lc.interval))diff.push(`timeframe ${getInterval()} min (alerts: ${lc.interval} min)`);
+      if(diff.length){const d=document.createElement("div");d.style.color="var(--yellow)";d.textContent="⚠ This Terminal is set to "+diff.join(", ")+" - it can show signals your phone alerts and the BUY log do not. Set it back to match, unless you are only comparing.";el.appendChild(d)}}
     if(s.last_alert){const d=document.createElement("div");d.textContent=`Last alert: ${s.last_alert.event} ${s.last_alert.symbol} ${s.last_alert.side||""} · ${new Date(s.last_alert.at*1000).toLocaleTimeString()}`;el.appendChild(d)}
   }
-  async function loadPushStatus(){try{const s=await api("/api/push/status");showPushStatus(s);return s}catch{return null}}
+  async function loadPushStatus(){try{if(!window.oiLiveCfg)try{window.oiLiveCfg=await api("/api/diagnostics/live-settings")}catch{}const s=await api("/api/push/status");window.oiLastPushStatus=s;showPushStatus(s);return s}catch{return null}}
+  ["signalMode","scoreMin","interval"].forEach(id=>$(id)&&$(id).addEventListener("change",()=>{if(window.oiLastPushStatus)showPushStatus(window.oiLastPushStatus)}));
   window.oiLoadPushStatus=loadPushStatus;
   // v1.20.42: inside the Windows app there is no browser push service (Electron has none), so web push always failed with
   // "Registration failed - push service not available". The app keeps the terminal running while minimised and shows every alert

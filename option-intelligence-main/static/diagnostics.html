@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.47">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.47">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.48">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.48">
 </head>
 <body>
 <header class="topbar">
@@ -33,6 +33,7 @@
       <button id="runBtn" type="button">Run diagnostics</button>
     </div>
     <p id="liveWarn" hidden style="margin:0 0 10px;font-weight:600;color:var(--red)"></p>
+    <p id="termWarn" hidden style="margin:0 0 10px;color:var(--yellow)"></p>
     <details id="tuneBox" class="dg-tune" style="margin:4px 0 10px">
       <summary style="cursor:pointer;font-weight:650">Indicator values (CE / PE) - test other ranges</summary>
       <p class="sub" style="margin:6px 0 8px">These values are used by the run above. Change them, run, and compare with a run on the tested defaults. "Apply to live signals" makes the live app use them (owner only); "Reset" goes back to the tested values. <span id="tuneState"></span></p>
@@ -70,6 +71,6 @@
   </div>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/savefile.js?v=1.20.47"></script><script src="/static/sync.js?v=1.20.47" data-next="/static/diagnostics.js?v=1.20.47"></script>
-<script src="/static/mobile.js?v=1.20.47" defer></script><script src="/static/sections.js?v=1.20.47" defer></script><script src="/static/tables.js?v=1.20.47" defer></script>
+<script src="/static/savefile.js?v=1.20.48"></script><script src="/static/sync.js?v=1.20.48" data-next="/static/diagnostics.js?v=1.20.48"></script>
+<script src="/static/mobile.js?v=1.20.48" defer></script><script src="/static/sections.js?v=1.20.48" defer></script><script src="/static/tables.js?v=1.20.48" defer></script>
 </body></html>

@@ -52,11 +52,20 @@
     const msgs = [];
     if (LIVE) for (const k of ["score_min", "mode", "interval"]) if (String(LIVE[k]) !== run[k])
       msgs.push(`${names[k]} ${run[k]}${k === "interval" ? " min" : ""} (live signals: ${LIVE[k]}${k === "interval" ? " min" : ""})`);
-    let term = null; try { term = localStorage.getItem("oi-score-min-v2"); } catch {}
-    if (term && term !== run.score_min && !(LIVE && String(LIVE.score_min) !== run.score_min)) msgs.push(`minimum score ${run.score_min} (your Terminal: ${term})`);
+    // v1.20.48: the Terminal's own choice is read fresh every time (this tab stays open in the background), and it is a separate,
+    // yellow note: a run that matches the live alert settings is valid even if the Terminal is set differently.
+    let tScore = null, tMode = null; try { tScore = localStorage.getItem("oi-score-min-v2"); tMode = localStorage.getItem("oi-signal-mode-v2"); } catch {}
+    const tdiff = [];
+    if (tScore && LIVE && tScore !== String(LIVE.score_min)) tdiff.push(`minimum score ${tScore} (alerts: ${LIVE.score_min})`);
+    if (tMode && LIVE && tMode !== LIVE.mode) tdiff.push(`signal mode ${tMode} (alerts: ${LIVE.mode})`);
     w.textContent = msgs.length ? "⚠ This run will not match your live signals: " + msgs.join(", ") + ". Results won't describe your live trades and Auto decision rules won't be updated from it." : "";
     w.hidden = !msgs.length;
+    const tw = $("termWarn");
+    if (tw) { tw.textContent = tdiff.length ? "Note: your Terminal is set to " + tdiff.join(", ") + ", so it can show signals the alerts and this test do not. This run is still valid for the live alerts." : ""; tw.hidden = !tdiff.length; }
   }
+  window.addEventListener("storage", e => { if (/^oi-(score-min|signal-mode)/.test(e.key || "")) liveWarn(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") liveWarn(); });
+  setInterval(liveWarn, 5000);
   ["scoreMin", "mode", "interval"].forEach(id => { if ($(id)) $(id).addEventListener("change", liveWarn); });
   api("/api/diagnostics/live-settings").then(v => { LIVE = v; liveWarn(); }).catch(() => liveWarn());
 

@@ -511,6 +511,7 @@
     ws.onclose = () => { if (g === wsGen) setTimeout(() => { if (g === wsGen && document.visibilityState === "visible") connect(); }, 4000); };
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && (!ws || ws.readyState > 1)) connect(); });
+  window.addEventListener("storage", e => { if (/^oi-(score-min|signal-mode)-v2$/.test(e.key || "")) { A = null; connect(); } });   // Terminal changed its signal settings
   let lastPoll = 0;
   setInterval(() => {                      // option candles (the socket only pushes index candles), or the index when the socket is quiet
     if (document.visibilityState !== "visible" || !cs.length) return;
