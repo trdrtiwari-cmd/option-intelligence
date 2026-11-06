@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.30"
+APP_VERSION = "1.20.31"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2422,9 +2422,10 @@ async def _monitor_export_impl(request, day="", fresh=0, client=None):
     if client:
         ctx["page"] = json.loads(json.dumps(client, default=str)[:20000]) if len(json.dumps(client, default=str)) <= 20000 else {"note": "page snapshot too large"}
     try:
-        ctx["checks"] = mon.consistency_checks(ctx)
+        checks = mon.consistency_checks(ctx)
     except Exception as exc:
-        ctx["checks"] = [f"checks failed: {exc}"[:120]]
+        checks = [f"checks failed: {exc}"[:120]]
+    ctx = {"checks": checks, **{k: v for k, v in ctx.items() if k != "checks"}}      # v1.20.31: issues first in the file
     blob = json.dumps(mon.chat_bundle(ctx), default=str, ensure_ascii=False, separators=(",", ":"))   # compact: fits a paste
     return Response(blob, media_type="application/json",
                     headers={"Content-Disposition": f"attachment; filename=strategy-review-{day}.json", "Cache-Control": "no-store"})

@@ -508,6 +508,7 @@ SYSTEM_REVIEW = ("You are reviewing an intraday options signal strategy (NIFTY/B
                  "feed state, today's log and board summary) and, when sent from the terminal, 'page' (chart trendlines, S/R map, selected option). "
                  "Check that the settings are consistent with the evidence and point out anything in the live state that looks wrong. Feed/rule "
                  "discrepancies, and a replay of the last days with code-generated suggestions. Write for the owner, in plain English:\n"
+                 "0. Problems the app found ('checks'): one short line each with what to do; skip if empty.\n"
                  "1. What happened today (2-3 sentences, numbers).\n2. Why moves were missed (which gates, and whether relaxing them would "
                  "have paid according to the near-miss data).\n3. What caused the losses (patterns, not single trades).\n4. Suggested changes, "
                  "ranked, max 5. For each: the exact setting or rule, the evidence, and the risk (sample size, overfitting). Prefer 'keep' when "
@@ -545,6 +546,45 @@ def consistency_checks(ctx):
                      if x.get("symbol") == pg.get("symbol") and x.get("mode") == pg.get("mode")), None)
         if lean and so.get("type") and lean != so.get("type"):
             out.append(f"CHART ON THE WRONG SIDE: the terminal shows {so.get('name')} ({so.get('type')}) while the engine leans {lean}.")
+    # v1.20.31: live-state problems (feeds, token, stale analyses, AI, version, strong trend with the trend setting off)
+    mk = t.get("market") or {}
+    if t.get("token_state") and t.get("token_state") != "VALID":
+        out.append(f"UPSTOX TOKEN: state {t.get('token_state')} - live data and signals stop until it is renewed.")
+    for sym_, f in (t.get("feeds") or {}).items():
+        if mk.get("open") and not f.get("stream_running"):
+            out.append(f"FEED {sym_}: the live stream is not running during market hours.")
+        elif mk.get("open") and (f.get("tick_age_s") or 0) > 60:
+            out.append(f"FEED {sym_}: last tick {f.get('tick_age_s'):.0f} s old during market hours - prices on screen are stale.")
+    for x in t.get("live_analyses") or []:
+        an = x.get("analysis") or {}
+        name = f"{x.get('symbol')} {x.get('interval')}m {x.get('mode')}"
+        if mk.get("open") and (x.get("age_s") or 0) > 300:
+            out.append(f"STALE ANALYSIS {name}: last computed {x['age_s'] / 60:.0f} min ago during market hours.")
+        if an.get("status") and an.get("status") != "ok":
+            out.append(f"ANALYSIS {name}: status {an.get('status')}.")
+        note = str(an.get("regime_note") or "")
+        import re as _re2
+        mm_ = _re2.search(r"([\d.]+) ATR move (up|down) in 20 bars \(efficiency ([\d.]+)\)", note)
+        if mm_ and float(mm_.group(1)) >= 4 and float(mm_.group(3)) >= 0.55 and sc.get("trend_entry", "off") == "off":
+            out.append(f"STRONG TREND {name}: {mm_.group(1)} ATR {mm_.group(2)} in 20 bars (efficiency {mm_.group(3)}) but 'Strong-trend entries' is Off - "
+                       "the pullback rules cannot buy this kind of move (check the Diagnostics strong-trend table before switching it on).")
+        fin = an.get("final") or {}
+        if fin.get("level") in ("WATCH", "PENDING", "CONFIRMED") and not an.get("option_pick"):
+            out.append(f"NO OPTION PICKED {name}: signal is {fin.get('level')} but no option was chosen (option chain unavailable?).")
+    ms = t.get("monitor_status") or {}
+    if ms.get("error"):
+        out.append(f"AI MONITOR ERROR: {str(ms.get('error'))[:160]}")
+    pg_ = (ctx or {}).get("page") or {}
+    if pg_.get("page_version") and t.get("app_version") and pg_["page_version"] != t["app_version"]:
+        out.append(f"OLD PAGE: the terminal runs page version {pg_['page_version']} but the server is {t['app_version']} - close and reopen the app.")
+    for it in pg_.get("issues") or []:
+        if it.get("level") in ("high", "medium"):
+            out.append(f"PAGE ({it['level']}): {it.get('text')}")
+    if pg_.get("js_errors"):
+        out.append(f"PAGE ERRORS: {len(pg_['js_errors'])} - last: {str(pg_['js_errors'][-1].get('msg'))[:120]}")
+    if pg_.get("failed_requests"):
+        fr = pg_["failed_requests"][-1]
+        out.append(f"FAILED REQUESTS: {len(pg_['failed_requests'])} - last: {fr.get('url')} → {str(fr.get('error'))[:100]}")
     blk = {b.get("gate"): b for b in (ctx or {}).get("today_blocking_rules") or []}
     if blk:
         out.append("ONE DAY: today_blocking_rules and the signal board come from today only - setups in the same move are one piece of evidence.")

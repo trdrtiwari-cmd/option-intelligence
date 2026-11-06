@@ -1,11 +1,16 @@
-const FRONTEND_VERSION="1.20.30";
+const FRONTEND_VERSION="1.20.31";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
 let chart, candleSeries, ema9Series, ema21Series, vwapSeries, currentCandles=[], srLines=[], chartSource="index", chartRequestId=0;
 let lastOptionAnalysis=null, lastVolumeSource=null, lastAnalysis=null, lastSR=null, lastIndexSR=null, lastOptionVol=null, marketOpen=false, chartFitKey=null, chainLotSize=null;
 const $ = id => document.getElementById(id);
-function toast(msg){const el=$("toast");el.textContent=msg;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),4500)}
+// v1.20.31: issue log for "Download for Claude" - page errors, failed requests and the messages shown, last 25 of each
+var OIIssueLog={errors:[],requests:[],toasts:[]};
+function oiLog(kind,item){try{const a=OIIssueLog[kind];a.push({t:new Date().toLocaleTimeString("en-IN",{hour12:false}),...item});if(a.length>25)a.shift()}catch{}}
+window.addEventListener("error",e=>oiLog("errors",{msg:String(e.message||e.error||"").slice(0,200),at:String(e.filename||"").split("/").pop().split("?")[0]+":"+(e.lineno||"")}));
+window.addEventListener("unhandledrejection",e=>oiLog("errors",{msg:"promise: "+String((e.reason&&e.reason.message)||e.reason||"").slice(0,200)}));
+function toast(msg){oiLog("toasts",{msg:String(msg).slice(0,200)});const el=$("toast");el.textContent=msg;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),4500)}
 function fmt(v,n=2){return v===null||v===undefined||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("en-IN",{maximumFractionDigits:n,minimumFractionDigits:n})}
 function getSymbol(){return $("symbol").value}
 function getInterval(){return Number($("interval").value)}
@@ -351,7 +356,7 @@ function renderBuyPlan(a){
 }
 let lastAutoOptionKey=null,lastAutoSide=null,autoIdleSince=null,autoPicking=false;
 try{lastAutoOptionKey=sessionStorage.getItem("oiAutoPick")||null}catch{}
-// v1.20.30: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
+// v1.20.31: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
 // morning while NIFTY rallied to 25,030). If the contract on screen was picked automatically (not by you) and there has been no
 // setup for 10 minutes - or 2 minutes when the engine now leans the other side - the chart goes back to the index.
 function autoRevertOption(a){
@@ -535,6 +540,10 @@ async function refreshChartSource(){
 }
 
 async function api(url, options={}){
+  try{return await apiRaw(url,options)}
+  catch(e){const [path,q]=String(url).split("?");oiLog("requests",{url:path,q:(q||"").slice(0,90),error:String(e&&e.message||e).slice(0,160)});throw e}
+}
+async function apiRaw(url, options={}){
   // Preserve caller-supplied method, headers and body. Push registration uses POST;
   // dropping options here silently converted it to GET and caused HTTP 405.
   // v1.18.11: every request has a deadline. When a phone suspends the tab mid-request the promise can stay pending forever,
@@ -1622,7 +1631,35 @@ function pageSnapshot(){
     trendlines:lastTrendlines?{support:tl(lastTrendlines.support),resistance:tl(lastTrendlines.resistance)}:null,
     sr:{supports:(sr.supports||[]).slice(0,3).map(lv),resistances:(sr.resistances||[]).slice(0,3).map(lv)},
     chart_indicators:{ema9:$("ema9")?.textContent,ema21:$("ema21")?.textContent,vwap:$("vwap")?.textContent,rsi:$("rsi")?.textContent,atr:$("atr")?.textContent,rel_vol:$("relVol")?.textContent},
-    page_version:FRONTEND_VERSION};
+    page_version:FRONTEND_VERSION,issues:pageIssues(),js_errors:OIIssueLog.errors.slice(-15),failed_requests:OIIssueLog.requests.slice(-15),recent_messages:OIIssueLog.toasts.slice(-15)};
+}
+// v1.20.31: problems only the page can see (what is on screen), collected when the review file is made
+function pageIssues(){
+  const out=[],add=(level,text)=>out.push({level,text}),a=lastAnalysis||{},sel=paperSelected,view=$("chartView")?.value;
+  const idx=Number(a.last_close)||null,today=new Date(Date.now()+330*60000).toISOString().slice(0,10);
+  try{
+    if(a.status&&a.status!=="ok")add("high",`Analysis not available: ${a.message||a.status}`);
+    if(marketOpen&&lastAnalysisAt&&Date.now()-lastAnalysisAt>90000)add("high",`Analysis on screen is ${Math.round((Date.now()-lastAnalysisAt)/1000)} s old during market hours - the page stopped updating`);
+    if(marketOpen&&!/live|connected/i.test($("streamStatus")?.textContent||""))add("medium",`Live stream status shows "${$("streamStatus")?.textContent||"—"}" during market hours`);
+    if(view==="option"&&!sel)add("medium","Chart view is 'Selected option premium' but no option is selected");
+    if(sel){
+      if(a.side&&sel.type!==a.side)add("high",`Chart shows ${sel.type} ${sel.strike} but the engine leans ${a.side} (decision: ${$("bigDecision")?.textContent||"—"})`);
+      if(/^\d{4}-\d{2}-\d{2}$/.test(String(sel.expiry))&&sel.expiry<today)add("high",`Selected option ${sel.type} ${sel.strike} expired on ${sel.expiry}`);
+      if(idx&&sel.strike){const otm=sel.type==="CE"?sel.strike-idx:idx-sel.strike;
+        if(otm>idx*0.01)add("medium",`Selected option ${sel.type} ${sel.strike} is ${Math.round(otm)} pts out of the money (index ${fmt(idx)}) - far from the 2-strikes-ITM rule`);}
+      if(view==="option"&&($("lastPrice")?.textContent||"—")==="—"&&sel.ltp)add("medium",`Last price shows "—" while the option's price is known (${sel.ltp})`);
+      if(($("autoOption")?.value)==="off")add("info","Signal option is 'Keep my selection' - the chart does not follow setups");
+    }
+    const empty=["ema9","ema21","vwap","rsi","atr"].filter(k=>($(k)?.textContent||"—")==="—");
+    if(a.status==="ok"&&empty.length)add("medium",`Market intelligence shows "—" for ${empty.join(", ")} although the analysis loaded`);
+    const sr=lastSR||{};if(a.status==="ok"&&!(sr.supports||[]).length&&!(sr.resistances||[]).length)add("medium","Support / resistance map is empty");
+    const fin=a.final||{};
+    if(fin.level==="CONFIRMED"&&!(fin.buy&&fin.buy.ok))add("info","Setup CONFIRMED but no BUY plan (profit check failed or option unavailable)");
+    if(["WATCH","PENDING","CONFIRMED"].includes(fin.level)&&!a.option_pick)add("medium",`Signal is ${fin.level} but no option was picked (option chain unavailable?)`);
+    if(OIIssueLog.errors.length)add("medium",`${OIIssueLog.errors.length} page error(s) - see js_errors`);
+    if(OIIssueLog.requests.length)add("medium",`${OIIssueLog.requests.length} failed request(s) - see failed_requests`);
+  }catch(e){add("info","page check failed: "+e.message)}
+  return out;
 }
 (function(){const b=$("claudeExport");if(!b)return;b.addEventListener("click",async()=>{
   b.disabled=true;const old=b.textContent;b.textContent="Preparing…";
@@ -1648,7 +1685,7 @@ function escapeHtml(t){return String(t??"").replace(/[&<>"']/g,c=>({"&":"&amp;",
   });})();
 
 
-// v1.20.30: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
+// v1.20.31: AI view on the terminal - "Ask AI now" plus automatic comments when a BUY fires or a setup is blocked by only one rule.
 // The server dedupes moments across tabs/phones and caps calls per day; the AI never changes the signal.
 const aiLive={busy:false,lastKey:"",combo:""};
 function aiLiveCombo(){return `${getSymbol()}|${getInterval()}|${getMode()}`}

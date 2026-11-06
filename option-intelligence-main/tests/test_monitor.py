@@ -361,3 +361,22 @@ def test_consistency_checks_6_nov():
     assert "PROTECTING: 'Data Check dashboard" in c
     assert mon.consistency_checks({}) == []
     assert "STRICT RULES" in mon.SYSTEM_REVIEW and "STRICT RULES" in mon.SYSTEM_NOTE
+
+
+def test_consistency_checks_live_state():
+    import monitor as mon
+    ctx = {"terminal": {"app_version": "1.20.31", "token_state": "EXPIRED", "market": {"open": True},
+                        "settings": {"signals_config": {"trend_entry": "off"}},
+                        "feeds": {"NIFTY": {"stream_running": True, "tick_age_s": 240.0}, "BANKNIFTY": {"stream_running": False}},
+                        "live_analyses": [{"symbol": "NIFTY", "interval": 5, "mode": "standard", "age_s": 900,
+                                           "analysis": {"status": "ok", "regime_note": "UPTREND (trend): 6.3 ATR move up in 20 bars (efficiency 0.62) · x",
+                                                        "final": {"level": "WATCH"}, "option_pick": None}}],
+                        "monitor_status": {"error": "Gemini API 503"}},
+           "page": {"page_version": "1.20.29", "issues": [{"level": "high", "text": "Chart shows PE 24600 but the engine leans CE"}, {"level": "info", "text": "x"}],
+                    "js_errors": [{"msg": "boom"}], "failed_requests": [{"url": "/api/analysis", "error": "timed out"}]}}
+    c = " | ".join(mon.consistency_checks(ctx))
+    for k in ("UPSTOX TOKEN", "FEED NIFTY: last tick 240", "FEED BANKNIFTY: the live stream is not running", "STALE ANALYSIS NIFTY 5m standard",
+              "STRONG TREND NIFTY 5m standard: 6.3 ATR up", "NO OPTION PICKED", "AI MONITOR ERROR", "OLD PAGE", "PAGE (high): Chart shows PE",
+              "PAGE ERRORS: 1", "FAILED REQUESTS: 1"):
+        assert k in c, k
+    assert "PAGE (info)" not in c
