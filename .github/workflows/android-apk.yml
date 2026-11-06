@@ -9,7 +9,7 @@ on:
       app_url:
         description: "Deployed site address"
         required: false
-        default: "https://option-intelligence-vqtl.onrender.com"
+        default: "https://option-intelligence-vqit.onrender.com"
   push:
     branches: [main]
     paths:
@@ -21,7 +21,7 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     env:
-      APP_URL: ${{ inputs.app_url || 'https://option-intelligence-vqtl.onrender.com' }}
+      APP_URL: ${{ inputs.app_url || 'https://option-intelligence-vqit.onrender.com' }}
       GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
     defaults:
       run:

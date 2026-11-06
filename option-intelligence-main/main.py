@@ -894,6 +894,7 @@ async def auth_logout(request: Request):
     await _acc(acc.end_session, request.scope.get("oi_token"))
     response = JSONResponse({"ok": True})
     response.delete_cookie(acc.COOKIE_NAME, path="/")
+    response.delete_cookie(acc.REVIEW_COOKIE, path="/")
     return response
 
 
