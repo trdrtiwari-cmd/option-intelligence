@@ -12,7 +12,7 @@
   const prefs = () => window.OIPrefs || { get: (k, d) => d, set() { }, onChange() { } };
 
   // ------------------------------------------------------------- service worker
-  if ("serviceWorker" in navigator && window.isSecureContext) {
+  if ("serviceWorker" in navigator && window.isSecureContext && window.self === window.top) {
     window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => { }));
   }
 
@@ -154,8 +154,66 @@
     prefs().onChange(name => { if (name === "app.controlsOpen" || name === "*") show(prefs().get("app.controlsOpen", false) === true); });
   }
 
+  // ------------------------------------------------------------- v1.20.39: tabs stay alive
+  // Opening another tab (bottom bar, or any link to Terminal / Data / Signals / Tests) no longer reloads the app: each tab is kept
+  // running in its own frame, so the terminal's live feed, alerts and AI view keep working while Signals or Tests are open.
+  const framed = window.self !== window.top;
+  const TAB_PATHS = TABS.map(t => t[0]);
+  const frames = {};
+  const hostPath = path;
+  function tabOf(a) {
+    try {
+      const u = new URL(a.getAttribute("href"), location.href);
+      if (u.origin !== location.origin) return null;
+      const p = u.pathname.replace(/\/+$/, "") || "/";
+      return TAB_PATHS.includes(p) ? p : null;
+    } catch { return null; }
+  }
+  function markNav(p) {
+    document.querySelectorAll(".m-nav a").forEach(a => {
+      const on = tabOf(a) === p;
+      a.classList.toggle("on", on);
+      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    });
+  }
+  function showTab(p, push) {
+    Object.entries(frames).forEach(([k, f]) => { f.style.display = k === p ? "block" : "none"; });
+    if (p !== hostPath && !frames[p]) {
+      const f = document.createElement("iframe");
+      f.className = "oi-tab-frame"; f.title = p; f.src = p;
+      f.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0;z-index:800;background:var(--bg,#0b1420)";
+      document.body.appendChild(f); frames[p] = f;
+    }
+    document.documentElement.classList.toggle("m-framed", p !== hostPath);
+    document.body.style.overflow = p !== hostPath ? "hidden" : "";
+    markNav(p);
+    if (push) { try { history.pushState({ oiTab: p }, "", p); } catch { } }
+  }
+  function mountKeepAlive() {
+    if (isAuth) return;
+    if (framed) {                                   // inside a tab frame: ask the app shell to switch instead of navigating
+      document.addEventListener("click", e => {
+        const a = e.target.closest && e.target.closest("a[href]");
+        const p = a && !a.target && !e.ctrlKey && !e.metaKey && !e.shiftKey && tabOf(a);
+        if (p) { e.preventDefault(); try { window.parent.postMessage({ oiTab: p }, location.origin); } catch { } }
+      }, true);
+      return;
+    }
+    if (!TAB_PATHS.includes(hostPath)) return;
+    document.addEventListener("click", e => {
+      const a = e.target.closest && e.target.closest("a[href]");
+      const p = a && !a.target && !e.ctrlKey && !e.metaKey && !e.shiftKey && tabOf(a);
+      if (p) { e.preventDefault(); showTab(p, true); }
+    }, true);
+    window.addEventListener("message", e => { if (e.origin === location.origin && e.data && e.data.oiTab) showTab(e.data.oiTab, true); });
+    window.addEventListener("popstate", e => showTab((e.state && e.state.oiTab) || (location.pathname.replace(/\/+$/, "") || "/"), false));
+    try { history.replaceState({ oiTab: hostPath }, "", location.href); } catch { }
+  }
+
   function init() {
-    if (!isAuth) { mountNav(); mountToggle(); }
+    if (!isAuth && !framed) { mountNav(); mountToggle(); }
+    if (!isAuth && framed) mountToggle();
+    mountKeepAlive();
     mountOffline();
     applyWake();
   }

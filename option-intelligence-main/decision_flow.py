@@ -12,6 +12,8 @@ Two separate scores are shown: the TECHNICAL CONFIRMATION score (the engine's 0-
 """
 from datetime import datetime, timedelta
 
+MODES = {"strict": "Strict - your full rules: room 0.25-0.5 ATR needs a retest-holding breakout; same-side re-entry needs a fresh breakout + retest",
+         "balanced": "Balanced - room below 0.25 ATR blocked; 0.25-0.5 ATR and same-side re-entry treated as normal"}
 ROOM_BLOCK_ATR = 0.25
 ROOM_NORMAL_ATR = 0.5
 MAX_TICK_AGE_S = 30.0
@@ -46,13 +48,15 @@ def pattern_quality(pattern, side):
     return "forming"
 
 
-def room_gate(room_atr, quality):
+def room_gate(room_atr, quality, mode="strict"):
     """< 0.25 ATR: block. 0.25-0.5 ATR: only with exceptional confirmation (breakout with its retest holding). > 0.5 ATR: normal."""
     label = f"Room to the next support / resistance (≥ {ROOM_BLOCK_ATR:g} ATR; {ROOM_BLOCK_ATR:g}-{ROOM_NORMAL_ATR:g} needs a retest-holding breakout)"
     if room_atr is None:
         return {"label": label, "pass": True, "detail": "no opposite level found nearby - open space", "zone": "open"}
     if room_atr < ROOM_BLOCK_ATR:
         return {"label": label, "pass": False, "detail": f"only {room_atr:.2f} ATR to the next level - blocked", "zone": "block"}
+    if room_atr < ROOM_NORMAL_ATR and mode == "balanced":
+        return {"label": label, "pass": True, "detail": f"{room_atr:.2f} ATR to the next level (tight - allowed in Balanced mode)", "zone": "tight"}
     if room_atr < ROOM_NORMAL_ATR:
         ok = quality == "retest"
         return {"label": label, "pass": ok, "zone": "tight",
@@ -67,7 +71,7 @@ def _bar_dt(t):
         return None
 
 
-def reentry_gate(side, side_buys, pattern, last_closed_bar, interval, structure_ok=True):
+def reentry_gate(side, side_buys, pattern, last_closed_bar, interval, structure_ok=True, mode="strict"):
     """A second (or later) same-side signal today needs a FRESH structure, a FRESH breakout and a SUCCESSFUL retest: a breakout on the
     trade side that happened after the previous BUY, whose retest is holding, with the price structure still in the trade's direction."""
     label = "Same-side re-entry: fresh structure, fresh breakout and retest after the last BUY"
@@ -78,6 +82,8 @@ def reentry_gate(side, side_buys, pattern, last_closed_bar, interval, structure_
     last = str(got.get("last") or got.get("first") or "")
     if last and str(last_closed_bar or "") == last:
         return {"label": label, "pass": True, "detail": f"this is the bar of today's {side} BUY"}
+    if mode == "balanced":
+        return {"label": label, "pass": True, "detail": f"{n} {side} BUY already today - allowed in Balanced mode (all other checks still apply)"}
     p = pattern or {}
     q = pattern_quality(p, side)
     bar_dt, last_dt = _bar_dt(last_closed_bar), _bar_dt(last)
@@ -129,11 +135,11 @@ def feasibility(room_atr, own_atr, stretch_atr, atr, atr_median, quality):
 
 # ---- the ordered flow shown to the trader ----
 STEPS = [
-    ("signal", "Technical signal (BUY CE / BUY PE candidate)"),
-    ("count", "Daily signal count / repeated same-side signal"),
-    ("room", "Support / resistance room (min 0.25 ATR)"),
-    ("pattern", "Breakout and retest (forming patterns do not confirm)"),
-    ("market", "Market and option confirmation (breadth, sectors, premium, data freshness)"),
+    ("signal", "Technical signal generated", "BUY CE / BUY PE candidate"),
+    ("count", "Check daily signal count", "Repeated same-side signal?"),
+    ("room", "Check support/resistance room", "Minimum 0.25 ATR clearance"),
+    ("pattern", "Check breakout and retest", "Reject weak forming patterns"),
+    ("market", "Check market and option confirmation", "Breadth, sector, premium movement and data freshness"),
 ]
 
 
@@ -150,15 +156,15 @@ def _step_of(label):
     return "signal"
 
 
-def build(tech_gates, fused_gates, final_level, side, tech_score, feas, quality, buy_ok=None, buy_checks=None):
+def build(tech_gates, fused_gates, final_level, side, tech_score, feas, quality, buy_ok=None, buy_checks=None, mode=None, mode_note=None):
     """Ordered decision flow: each step passes only when all of its gates pass; the first failing step is where the decision stops."""
-    groups = {k: [] for k, _ in STEPS}
+    groups = {k: [] for k, _, _ in STEPS}
     for g in list(tech_gates or []) + list(fused_gates or []):
         groups[_step_of(g.get("label"))].append(g)
     for c in (buy_checks or []):
         groups["market"].append({"label": "Profit check: " + str(c.get("label")), "pass": bool(c.get("pass")), "detail": c.get("detail")})
     flow, stopped = [], None
-    for key, title in STEPS:
+    for key, title, sub in STEPS:
         gs = groups[key]
         ok = all(g.get("pass") for g in gs) and (bool(side) if key == "signal" else True)
         failed = [g for g in gs if not g.get("pass")]
@@ -168,10 +174,20 @@ def build(tech_gates, fused_gates, final_level, side, tech_score, feas, quality,
                             "none": "no chart pattern"}.get(quality, ""),
                 "room": next((g["detail"] for g in gs if str(g.get("label")).startswith("Room to")), ""),
                 }.get(key, "")
-        flow.append({"step": key, "title": title, "pass": ok, "note": note,
+        flow.append({"step": key, "title": title, "sub": sub, "pass": ok, "note": note, "reached": stopped is None,
                      "failed": [f"{g['label']}: {g.get('detail', '')}" for g in failed][:4]})
         if not ok and stopped is None:
             stopped = key
     final = ("BUY " + side) if (side and final_level == "CONFIRMED" and buy_ok is not False and stopped is None) else "WAIT"
     return {"steps": flow, "stopped_at": stopped, "final": final, "technical_score": tech_score,
-            "feasibility": feas}
+            "feasibility": feas, "mode": mode, "mode_note": mode_note}
+
+
+def advise(strict, balanced):
+    """Which rule set to use, from a Diagnostics run: Balanced unless Strict made at least as much in total (then the cleaner set wins)."""
+    st, bt = (strict or {}).get("total"), (balanced or {}).get("total")
+    if st is None and bt is None:
+        return None
+    if bt is None or (st is not None and st >= bt):
+        return "strict"
+    return "balanced"

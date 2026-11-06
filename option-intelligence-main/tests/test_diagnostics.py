@@ -277,3 +277,5 @@ def test_decision_flow_whatif():
     whys = {r["time"]: r["why"] for r in out["removed_trades"]}
     assert "re-entry" in whys["10:30"] and "room 0.1" in whys["10:00"] and "room 0.4" in whys["10:10"]
     assert out["verdict"].startswith("the new rules help")
+    bal = dg.decision_flow_whatif(rows, "balanced")              # only room < 0.25 blocks
+    assert bal["kept"]["n"] == 4 and [r["time"] for r in bal["removed_trades"]] == ["10:00"]

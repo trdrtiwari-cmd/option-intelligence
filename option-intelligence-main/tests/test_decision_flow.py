@@ -49,3 +49,15 @@ def test_feasibility_and_flow():
 
 def test_freshness():
     assert dfl.freshness_gate(5, True)["pass"] and not dfl.freshness_gate(45, True)["pass"] and dfl.freshness_gate(45, False) is None
+
+
+def test_modes_and_advice():
+    sb = {"CE": {"count": 1, "first": "2026-11-06 10:00", "last": "2026-11-06 10:00"}}
+    assert dfl.room_gate(0.4, "none", "balanced")["pass"] and not dfl.room_gate(0.4, "none", "strict")["pass"]
+    assert not dfl.room_gate(0.2, "retest", "balanced")["pass"]                        # below 0.25 blocks in both modes
+    assert dfl.reentry_gate("CE", sb, None, "2026-11-06 11:00", 5, mode="balanced")["pass"]
+    assert not dfl.reentry_gate("CE", sb, None, "2026-11-06 11:00", 5, mode="strict")["pass"]
+    assert dfl.advise({"total": 122}, {"total": 212}) == "balanced" and dfl.advise({"total": 212}, {"total": 212}) == "strict"
+    assert dfl.advise({}, {}) is None
+    f = dfl.build([], [dfl.room_gate(0.2, "none")], "WATCH", "CE", 70, None, "none", mode="balanced", mode_note="x")
+    assert [s["reached"] for s in f["steps"]] == [True, True, True, False, False] and f["steps"][0]["sub"] == "BUY CE / BUY PE candidate"

@@ -604,7 +604,9 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     # v1.20.38: chart patterns count in the technical score. A confirmed breakout scores, a breakout whose retest is holding scores more,
     # a FORMING pattern counts in the total but scores nothing (it is not a confirmation). No pattern at all: no change to the score.
     cp_ = chart_pattern or {}
-    has_cp = cp_.get("stage") in ("breakout", "forming") and cp_.get("side") in ("CE", "PE")
+    # v1.20.39: only a BREAKOUT counts (adds weight); a forming pattern is ignored - in the 30-day NIFTY replay the forming penalty
+    # removed a winner (28 Oct 09:55) and cost ~41 pts. Forming patterns still never confirm an entry.
+    has_cp = cp_.get("stage") == "breakout" and cp_.get("side") in ("CE", "PE")
     retest_ = "retest holding" in str(cp_.get("name") or "")
     brk_ = cp_.get("stage") == "breakout"
     checks += [

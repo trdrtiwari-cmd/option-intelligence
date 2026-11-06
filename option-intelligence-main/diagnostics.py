@@ -1029,7 +1029,7 @@ def window_slots(cs, near, interval, horizon, cost, target, stop):
 
 
 # ---------------------------------------------------------------- v1.20.38 the live decision-flow rules on the replayed signals
-def decision_flow_whatif(conf_rows):
+def decision_flow_whatif(conf_rows, mode="strict"):
     """Applies the live decision-flow rules to the confirmed signals (needs sr_features first): S/R room (< 0.25 ATR blocked, 0.25-0.5
     only with a retest-holding breakout) and the same-side re-entry rule (a later same-side signal needs a breakout after the previous
     kept signal whose retest is holding). The Data Check dashboard / data freshness have no history and are not replayed."""
@@ -1039,10 +1039,10 @@ def decision_flow_whatif(conf_rows):
         name = str(r.get("pattern") or "")
         q = dfl.pattern_quality({"side": r.get("pattern_side"), "stage": r.get("pattern_stage"), "name": name}, r["side"])
         why = None
-        if not dfl.room_gate(r.get("sr_room"), q)["pass"]:
+        if not dfl.room_gate(r.get("sr_room"), q, mode)["pass"]:
             why = f"room {r.get('sr_room')} ATR"
         k = (r["day"], r["side"])
-        if why is None and k in last_kept:
+        if why is None and k in last_kept and mode == "strict":
             brk_i = r["i"] - int(r.get("pattern_bars_ago") or 0)
             if not (q == "retest" and brk_i > last_kept[k]):
                 why = "same-side re-entry without a fresh breakout + retest"
@@ -1315,16 +1315,20 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                   "text": f"Big moves: {mm['moves']} clean moves of ≥ 2.5 ATR in this period; the engine confirmed {mm['caught']} in time and missed {mm['missed']}."
                                   + (f" The gate that blocked the most missed moves: “{top['gate']}” ({top['moves']} of {mm['missed']}, {top['pct']}%). "
                                      "Check the near-miss table below before relaxing it: if the setups it alone blocked lost money, it is protecting you." if top else "")})
-    try:                       # v1.20.38: what the live decision-flow rules do to these signals
-        dfw = decision_flow_whatif(conf_rows)
-        rep["decision_flow_rules"] = dfw
-        if dfw["all"].get("n"):
-            rm_ = dfw["removed"]
-            rep["verdict"].insert(1, {"level": "action" if "cost" in dfw["verdict"] else "info",
-                                      "text": f"Live decision-flow rules (S/R room ≥ 0.25 ATR, 0.25-0.5 only with a retest-holding breakout; same-side re-entry "
-                                              f"only after a fresh breakout + retest): keep {dfw['kept'].get('n', 0)} of {dfw['all']['n']} signals, "
-                                              f"{dfw['kept'].get('avg', 0):+.1f} pts each (live trailing exit) vs {dfw['all'].get('avg', 0):+.1f} for all; the "
-                                              f"{rm_.get('n', 0)} removed made {rm_.get('total', 0):+.0f} pts in total. Verdict: {dfw['verdict']}."})
+    try:                       # v1.20.38/39: what the live decision-flow rules do to these signals, Strict and Balanced, and which to use
+        import decision_flow as dfl
+        both = {m: decision_flow_whatif(conf_rows, m) for m in ("strict", "balanced")}
+        adv = dfl.advise(both["strict"]["kept"], both["balanced"]["kept"])
+        rep["decision_flow_rules"] = {**both["strict"], "strict": both["strict"], "balanced": both["balanced"], "advice": adv}
+        if both["strict"]["all"].get("n"):
+            parts = []
+            for m in ("strict", "balanced"):
+                d_ = both[m]
+                parts.append(f"{m.title()} keeps {d_['kept'].get('n', 0)} of {d_['all']['n']} signals, {d_['kept'].get('avg', 0):+.1f} pts each, "
+                             f"{d_['kept'].get('total', 0):+.0f} total (removed {d_['removed'].get('n', 0)}: {d_['removed'].get('total', 0):+.0f} pts)")
+            rep["verdict"].insert(1, {"level": "action",
+                                      "text": "Decision rules (live trailing exit; all signals " + f"{both['strict']['all'].get('total', 0):+.0f} pts): "
+                                              + "; ".join(parts) + f". Advised: {(adv or 'balanced').title()} - Auto mode switches to it."})
     except Exception as exc:
         rep["decision_flow_rules"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.36 what-if: fade the confirmed signals

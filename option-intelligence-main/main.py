@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.38"
+APP_VERSION = "1.20.39"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1024,6 +1024,8 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
     except Exception as exc:
         logger.info("Diagnostics: option lot / delta unavailable: %s", str(getattr(exc, "detail", exc))[:120])
 
+    loop_ = asyncio.get_running_loop()
+
     def work():
         job = DIAG_JOBS[job_id]
         job["stage"] = "Replaying signals bar by bar"
@@ -1035,6 +1037,10 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
                           progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
             rep["params"]["volume_source"] = result.get("volume_source")
             job.update(status="done", report=rep, progress=1.0, stage="Done")
+            try:
+                asyncio.run_coroutine_threadsafe(_store_rules_advice(sym, rep), loop_)
+            except Exception as exc:
+                logger.info("Rules advice not stored: %s", str(exc)[:120])
         except Exception as exc:
             logger.warning("Diagnostics failed: %s", exc)
             job.update(status="error", error=f"{type(exc).__name__}: {str(exc)[:150]}")
@@ -1669,6 +1675,38 @@ def one_per_side_on():
 BUY_SYMBOLS_DEFAULT = os.getenv("BUY_SYMBOLS", "NIFTY")   # v1.20.35: BANKNIFTY off - 6 Oct-6 Nov replay: worse than random entries
 
 
+RULES_ADVICE = {}           # v1.20.39: {symbol: {"mode", "at", "days", "strict", "balanced"}} from the latest Diagnostics run
+DECISION_RULES_DEFAULT = os.getenv("DECISION_RULES", "auto")
+
+
+def rules_mode(sym):
+    """(mode, note) - strict / balanced. 'auto' follows the advice of the latest Diagnostics run of this index (Balanced until there is one)."""
+    v = OPTION_OVERRIDES.get("decision_rules") or DECISION_RULES_DEFAULT
+    if v in ("strict", "balanced"):
+        return v, f"{v.title()} (chosen on the Signals page)"
+    adv = RULES_ADVICE.get(str(sym).upper()) or {}
+    if adv.get("mode") in ("strict", "balanced"):
+        st, bt = adv.get("strict") or {}, adv.get("balanced") or {}
+        return adv["mode"], (f"{adv['mode'].title()} - auto-advised by Diagnostics {adv.get('days', '')}: Strict {st.get('total', 0):+.0f} pts "
+                             f"({st.get('n', 0)} trades), Balanced {bt.get('total', 0):+.0f} pts ({bt.get('n', 0)} trades)")
+    return "balanced", "Balanced - auto (no Diagnostics run yet for this index; run one to get advice)"
+
+
+async def _store_rules_advice(sym, rep):
+    dfr = (rep or {}).get("decision_flow_rules") or {}
+    if dfr.get("advice") not in ("strict", "balanced"):
+        return
+    days = (rep.get("params") or {}).get("days") or []
+    keep = lambda d: {k: (d.get("kept") or {}).get(k) for k in ("n", "total", "avg", "win_rate")}
+    RULES_ADVICE[sym] = {"mode": dfr["advice"], "at": ist_now().isoformat(timespec="minutes"),
+                         "days": f"{days[0]} to {days[-1]}" if days else "", "strict": keep(dfr["strict"]), "balanced": keep(dfr["balanced"]),
+                         "interval": (rep.get("params") or {}).get("interval"), "mode_signal": (rep.get("params") or {}).get("mode")}
+    try:
+        await asyncio.to_thread(acc.meta_set, "rules_advice", json.dumps(RULES_ADVICE))
+    except Exception as exc:
+        logger.warning("Rules advice not saved: %s", str(exc)[:120])
+
+
 STRATEGY_DEFAULTS = {"NIFTY": os.getenv("STRATEGY_NIFTY", "pullback"), "BANKNIFTY": os.getenv("STRATEGY_BANKNIFTY", "off")}
 
 
@@ -1965,6 +2003,9 @@ async def _restore_signal_log_and_config():
         ms = await asyncio.to_thread(acc.meta_get, "monitor_settings")
         if ms:
             _apply_monitor_settings(json.loads(ms))
+        ra = await asyncio.to_thread(acc.meta_get, "rules_advice")
+        if ra:
+            RULES_ADVICE.update(json.loads(ra))
         n = await asyncio.to_thread(restore_signal_log)
         _SIGNAL_LOG_DIRTY.set()          # first mirror of anything already in the local file
         if n:
@@ -3177,7 +3218,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols", "strategy_nifty", "strategy_banknifty")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols", "strategy_nifty", "strategy_banknifty", "decision_rules")
 
 
 def _set_option_overrides(d):
@@ -3286,6 +3327,8 @@ async def signal_log_config():
             "daily_target_rs": daily_target_rs(),
             "buy_symbols": ",".join(buy_symbols()),
             "strategy_nifty": strategy_for("NIFTY"), "strategy_banknifty": strategy_for("BANKNIFTY"),
+            "decision_rules": OPTION_OVERRIDES.get("decision_rules") or DECISION_RULES_DEFAULT,
+            "decision_rules_now": {s_: dict(zip(("mode", "note"), rules_mode(s_))) for s_ in INDEX_KEYS},
             "trend_entry": __import__("trend_entry").TREND_ENTRY,
             "indicator_changes": __import__("indicators").tune_changes(),
             "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
@@ -3310,6 +3353,7 @@ class SignalLogConfig(BaseModel):
     opt_buy_symbols: Optional[str] = None       # v1.20.35: "NIFTY" | "NIFTY,BANKNIFTY" | "BANKNIFTY"
     opt_strategy_nifty: Optional[str] = None    # v1.20.36: pullback | orb30 | off
     opt_strategy_banknifty: Optional[str] = None
+    opt_decision_rules: Optional[str] = None    # v1.20.39: auto | strict | balanced
 
 
 @app.post("/api/signals/config")
@@ -3363,6 +3407,10 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         if not syms_ or any(x not in INDEX_KEYS for x in syms_):
             raise HTTPException(400, "BUY indices must be NIFTY and / or BANKNIFTY")
         new["opt_buy_symbols"] = ",".join(syms_)
+    if payload.opt_decision_rules:
+        if payload.opt_decision_rules not in ("auto", "strict", "balanced"):
+            raise HTTPException(400, "Decision rules must be auto, strict or balanced")
+        new["opt_decision_rules"] = payload.opt_decision_rules
     import orb_live as _orbm
     for k_, v_ in (("opt_strategy_nifty", payload.opt_strategy_nifty), ("opt_strategy_banknifty", payload.opt_strategy_banknifty)):
         if v_:
@@ -3652,9 +3700,10 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                 sbi = side_buys_today(sym, interval, mode)
                 with STREAM_LOCK:
                     tv = _tick_view(INDEX_KEYS[sym], time.time())
-                flow_extra = [dfl.reentry_gate(side_, sbi, a.get("chart_pattern"), a.get("last_closed_bar"), interval),
-                              dfl.room_gate(rm["room_atr"], q), dfl.freshness_gate(tv["age_seconds"] if tv else None, market["open"])]
-                flow_ctx = {"quality": q, "feasibility": dict(feas, room_atr=rm["room_atr"], own_level_atr=rm["own_atr"],
+                rmode, rnote = rules_mode(sym)
+                flow_extra = [dfl.reentry_gate(side_, sbi, a.get("chart_pattern"), a.get("last_closed_bar"), interval, mode=rmode),
+                              dfl.room_gate(rm["room_atr"], q, rmode), dfl.freshness_gate(tv["age_seconds"] if tv else None, market["open"])]
+                flow_ctx = {"mode": rmode, "mode_note": rnote, "quality": q, "feasibility": dict(feas, room_atr=rm["room_atr"], own_level_atr=rm["own_atr"],
                                                               stretch_atr=round(stretch, 2) if stretch is not None else None)}
             except Exception as exc:
                 logger.warning("Decision flow checks failed for %s: %s", sym, str(exc)[:160])
@@ -3719,7 +3768,8 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
             a["decision_flow"] = dfl.build(tech_gates_, fused["gates"], fin_.get("level"), fin_.get("side") or a.get("side"),
                                            max(a.get("bull_score") or 0, a.get("bear_score") or 0), flow_ctx.get("feasibility"),
                                            flow_ctx.get("quality") or "none",
-                                           buy_ok=(a.get("buy_plan") or {}).get("ok") if fin_.get("level") in ("CONFIRMED", "WATCH") and a.get("buy_plan") else None)
+                                           buy_ok=(a.get("buy_plan") or {}).get("ok") if fin_.get("level") in ("CONFIRMED", "WATCH") and a.get("buy_plan") else None,
+                                           mode=flow_ctx.get("mode") or rules_mode(sym)[0], mode_note=flow_ctx.get("mode_note") or rules_mode(sym)[1])
             a["feasibility"] = flow_ctx.get("feasibility")
         except Exception as exc:
             logger.warning("Decision flow build failed: %s", str(exc)[:160])

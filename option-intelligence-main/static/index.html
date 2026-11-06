@@ -8,10 +8,11 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.38">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.38">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.39">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.39">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
+<style>.dflow{margin-top:10px}.dflow .df-step{border:1px solid var(--line);border-radius:10px;padding:8px 10px;text-align:center;background:var(--panel2)}.dflow .df-step b{display:block;font-size:13px}.dflow .df-step small{color:var(--muted);font-size:11px}.dflow .df-step .df-st{font-size:11px;margin-top:3px}.dflow .df-ok{border-color:#24634f}.dflow .df-bad{border-color:#6c3542}.dflow .df-off{opacity:.45}.dflow .df-arrow{text-align:center;color:var(--muted);font-size:13px;line-height:16px}.dflow .df-final{border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center;background:#0d1f17}.dflow .df-final b{display:block;font-size:12px;letter-spacing:1px;color:var(--muted)}.dflow .df-final span{font-size:20px;font-weight:900}.dflow .df-fail{color:var(--muted);font-size:11px;text-align:left;margin-top:4px}</style>
 </head>
 <body>
 <header class="topbar">
@@ -35,6 +36,55 @@
     <button id="refreshBtn">Refresh data</button>
     <span id="lastUpdated" class="sub">Waiting for data</span>
     <span id="alertChannels" class="sub"></span><div id="pushStatus" class="sub" style="flex-basis:100%;margin-top:4px"></div>
+  </section>
+
+  <!-- v1.20.39: highest priority first: the decision, then the AI view -->
+  <section class="panel confirm-panel" id="confirmPanel">
+    <div class="section-head"><div><h2>Signal confirmation</h2><p>Weighted checks + hard gates · a setup is CONFIRMED only when every gate passes</p></div><span id="confirmBadge" class="pill muted">WAIT</span></div>
+    <div class="confirm-grid">
+      <div>
+        <div class="signal-box"><div class="signal-label">Final signal</div><div id="finalSignal" class="signal-value">WAIT</div><div id="finalSignalSub" class="sub">Waiting for enough candles.</div><div id="scorePair" class="sub" style="margin-top:6px"></div><div id="decisionFlow" class="dflow"></div></div>
+        <div class="buy-plan" id="buyPlanBox" hidden>
+          <div class="bp-head"><span id="bpTitle">Buy plan</span><b id="bpState" class="pill muted">—</b></div>
+          <div class="bp-grid">
+            <div><span>Option</span><b id="bpOption">—</b></div>
+            <div><span>Buy price</span><b id="bpBuy">—</b></div>
+            <div><span>Stop-loss</span><b id="bpSl">—</b></div>
+            <div><span>Target</span><b id="bpTgt">—</b></div>
+            <div><span>Index entry / SL / target</span><b id="bpIndex">—</b></div>
+            <div><span>Reward : risk</span><b id="bpRr">—</b></div>
+            <div><span>At target / at stop (₹, after charges)</span><b id="bpMoney">—</b></div>
+            <div><span>Target basis</span><b id="bpBasis">—</b></div>
+          </div>
+          <div class="sub small" id="bpNote"></div>
+        </div>
+        <div class="signal-time" id="signalTimeBox" hidden>
+          <div class="st-row"><span>Signal generated</span><b id="stGenerated">—</b></div>
+          <div class="st-row"><span>Age</span><b id="stAge">—</b></div>
+          <div class="st-row"><span>Price at signal → now</span><b id="stPrice">—</b></div>
+          <div class="st-row"><span>Entry window</span><b id="stState">—</b></div>
+          <div class="sub small" id="stNote"></div>
+        </div>
+        <h3 class="mini-h">Data Check dashboard <a href="/dashboard" target="_blank" class="mini-link">open ↗</a></h3>
+        <div class="sub small" id="dashSummary">Waiting for the dashboard read…</div>
+        <ul id="dashChecks" class="gate-list dash-checks"></ul>
+        <h3 class="mini-h">Hard gates (terminal + dashboard + timing)</h3><ul id="gateList" class="gate-list"></ul>
+      </div>
+      <div>
+        <h3 class="mini-h">Weighted checks</h3>
+        <div class="table-wrap sr-wrap"><table class="sr-table cardify"><thead><tr><th>Check</th><th>Weight</th><th>Reading</th><th>Detail</th></tr></thead><tbody id="checkRows"></tbody></table></div>
+        <div class="metric-list" id="extraInd"></div>
+      </div>
+    </div>
+    <div class="notice warning">Confirmation lowers false signals; it cannot remove losses or guarantee profit. Validate the rules on your own history (TradingView strategy tester) and keep per-trade risk small.</div>
+  </section>
+
+  <section class="panel ai-live-panel" id="aiLivePanel" style="margin-bottom:16px">
+    <div class="section-head" style="flex-wrap:wrap"><div><h2>AI view (live)</h2><p id="aiLiveSub">Chart read and 15-30 min outlook · a second opinion, never creates or cancels a signal</p></div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><label style="display:flex;gap:6px;align-items:center;color:var(--muted);font-size:12px"><input type="checkbox" id="aiLiveAuto" checked> Auto at BUY / near-miss</label><button type="button" id="aiLiveAsk">Ask AI now</button></div></div>
+    <div class="notice" id="aiLiveText" style="white-space:pre-line;overflow-wrap:anywhere">Press "Ask AI now" (or "AI: read chart" above the chart) for a read of this chart and a short outlook. With Auto on, it also comments by itself when a BUY fires or a setup is blocked by only one rule (market hours, limited per day).</div>
+    <div class="sub small" id="aiLiveMeta"></div>
+    <details id="aiLiveOlder" style="margin-top:8px" hidden><summary class="sub" style="cursor:pointer">Earlier comments today</summary><div id="aiLiveList"></div></details>
   </section>
 
   <section class="stats">
@@ -87,53 +137,9 @@
     <div class="notice" id="srNote">Levels are zones, not exact prices.</div>
   </section>
 
-  <section class="panel confirm-panel" id="confirmPanel">
-    <div class="section-head"><div><h2>Signal confirmation</h2><p>Weighted checks + hard gates · a setup is CONFIRMED only when every gate passes</p></div><span id="confirmBadge" class="pill muted">WAIT</span></div>
-    <div class="confirm-grid">
-      <div>
-        <div class="signal-box"><div class="signal-label">Final signal</div><div id="finalSignal" class="signal-value">WAIT</div><div id="finalSignalSub" class="sub">Waiting for enough candles.</div><div id="scorePair" class="sub" style="margin-top:6px"></div><ol id="decisionFlow" class="sub" style="margin:8px 0 0;padding-left:18px"></ol></div>
-        <div class="buy-plan" id="buyPlanBox" hidden>
-          <div class="bp-head"><span id="bpTitle">Buy plan</span><b id="bpState" class="pill muted">—</b></div>
-          <div class="bp-grid">
-            <div><span>Option</span><b id="bpOption">—</b></div>
-            <div><span>Buy price</span><b id="bpBuy">—</b></div>
-            <div><span>Stop-loss</span><b id="bpSl">—</b></div>
-            <div><span>Target</span><b id="bpTgt">—</b></div>
-            <div><span>Index entry / SL / target</span><b id="bpIndex">—</b></div>
-            <div><span>Reward : risk</span><b id="bpRr">—</b></div>
-            <div><span>At target / at stop (₹, after charges)</span><b id="bpMoney">—</b></div>
-            <div><span>Target basis</span><b id="bpBasis">—</b></div>
-          </div>
-          <div class="sub small" id="bpNote"></div>
-        </div>
-        <div class="signal-time" id="signalTimeBox" hidden>
-          <div class="st-row"><span>Signal generated</span><b id="stGenerated">—</b></div>
-          <div class="st-row"><span>Age</span><b id="stAge">—</b></div>
-          <div class="st-row"><span>Price at signal → now</span><b id="stPrice">—</b></div>
-          <div class="st-row"><span>Entry window</span><b id="stState">—</b></div>
-          <div class="sub small" id="stNote"></div>
-        </div>
-        <h3 class="mini-h">Data Check dashboard <a href="/dashboard" target="_blank" class="mini-link">open ↗</a></h3>
-        <div class="sub small" id="dashSummary">Waiting for the dashboard read…</div>
-        <ul id="dashChecks" class="gate-list dash-checks"></ul>
-        <h3 class="mini-h">Hard gates (terminal + dashboard + timing)</h3><ul id="gateList" class="gate-list"></ul>
-      </div>
-      <div>
-        <h3 class="mini-h">Weighted checks</h3>
-        <div class="table-wrap sr-wrap"><table class="sr-table cardify"><thead><tr><th>Check</th><th>Weight</th><th>Reading</th><th>Detail</th></tr></thead><tbody id="checkRows"></tbody></table></div>
-        <div class="metric-list" id="extraInd"></div>
-      </div>
-    </div>
-    <div class="notice warning">Confirmation lowers false signals; it cannot remove losses or guarantee profit. Validate the rules on your own history (TradingView strategy tester) and keep per-trade risk small.</div>
-  </section>
+  
 
-  <section class="panel ai-live-panel" id="aiLivePanel">
-    <div class="section-head" style="flex-wrap:wrap"><div><h2>AI view (live)</h2><p id="aiLiveSub">Chart read and 15-30 min outlook · a second opinion, never creates or cancels a signal</p></div>
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><label style="display:flex;gap:6px;align-items:center;color:var(--muted);font-size:12px"><input type="checkbox" id="aiLiveAuto" checked> Auto at BUY / near-miss</label><button type="button" id="aiLiveAsk">Ask AI now</button></div></div>
-    <div class="notice" id="aiLiveText" style="white-space:pre-line;overflow-wrap:anywhere">Press "Ask AI now" (or "AI: read chart" above the chart) for a read of this chart and a short outlook. With Auto on, it also comments by itself when a BUY fires or a setup is blocked by only one rule (market hours, limited per day).</div>
-    <div class="sub small" id="aiLiveMeta"></div>
-    <details id="aiLiveOlder" style="margin-top:8px" hidden><summary class="sub" style="cursor:pointer">Earlier comments today</summary><div id="aiLiveList"></div></details>
-  </section>
+  
 
   <section class="panel derivatives-panel">
     <div class="section-head"><div><h2>Live derivatives intelligence</h2><p>Upstox V3 WebSocket ticks + same-expiry option-chain snapshot</p></div><span id="streamStatus" class="pill muted">CONNECTING</span></div>
@@ -259,6 +265,6 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/trendlines.js?v=1.20.38"></script><script src="/static/savefile.js?v=1.20.38"></script><script src="/static/boot.js?v=1.20.38"></script><script src="/static/sync.js?v=1.20.38" data-next="/static/app.js?v=1.20.38"></script>
-<script src="/static/mobile.js?v=1.20.38" defer></script><script src="/static/tables.js?v=1.20.38" defer></script>
+<script src="/static/trendlines.js?v=1.20.39"></script><script src="/static/savefile.js?v=1.20.39"></script><script src="/static/boot.js?v=1.20.39"></script><script src="/static/sync.js?v=1.20.39" data-next="/static/app.js?v=1.20.39"></script>
+<script src="/static/mobile.js?v=1.20.39" defer></script><script src="/static/sections.js?v=1.20.39" defer></script><script src="/static/tables.js?v=1.20.39" defer></script>
 </body></html>
