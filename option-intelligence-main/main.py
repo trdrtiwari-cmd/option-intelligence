@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.34"
+APP_VERSION = "1.20.35"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1666,6 +1666,15 @@ def one_per_side_on():
     return ONE_TRADE_PER_SIDE_DEFAULT if v in (None, "") else str(v).lower() == "on"
 
 
+BUY_SYMBOLS_DEFAULT = os.getenv("BUY_SYMBOLS", "NIFTY")   # v1.20.35: BANKNIFTY off - 6 Oct-6 Nov replay: worse than random entries
+
+
+def buy_symbols():
+    """Indices allowed to give BUY signals. Signals page (owner) wins; else BUY_SYMBOLS env (default NIFTY only)."""
+    v = OPTION_OVERRIDES.get("buy_symbols") or BUY_SYMBOLS_DEFAULT
+    return [x.strip().upper() for x in str(v).split(",") if x.strip().upper() in INDEX_KEYS] or ["NIFTY"]
+
+
 DAILY_TARGET_RS_DEFAULT = float(os.getenv("DAILY_TARGET_RS", "0") or 0)   # off: ₹2,000-3,000 is the owner's minimum goal, not a cap
 
 
@@ -3106,7 +3115,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols")
 
 
 def _set_option_overrides(d):
@@ -3213,6 +3222,7 @@ async def signal_log_config():
             "leading_trigger": __import__("leading").LEADING_TRIGGER, "chart_pattern_mode": __import__("indicators").CHART_PATTERN_MODE,
             "one_per_side": "on" if one_per_side_on() else "off",
             "daily_target_rs": daily_target_rs(),
+            "buy_symbols": ",".join(buy_symbols()),
             "trend_entry": __import__("trend_entry").TREND_ENTRY,
             "indicator_changes": __import__("indicators").tune_changes(),
             "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
@@ -3234,6 +3244,7 @@ class SignalLogConfig(BaseModel):
     opt_one_per_side: Optional[str] = None      # v1.20.23: "on" | "off" - only the first BUY per side per day
     opt_daily_target_rs: Optional[float] = None  # v1.20.28: stop for the day after this booked profit (₹, 0 = off)
     opt_trend_entry: Optional[str] = None       # v1.20.28: off | rsi | continuation (trend_entry.py)
+    opt_buy_symbols: Optional[str] = None       # v1.20.35: "NIFTY" | "NIFTY,BANKNIFTY" | "BANKNIFTY"
 
 
 @app.post("/api/signals/config")
@@ -3282,6 +3293,11 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
         if not 0 <= float(payload.opt_daily_target_rs) <= 100000:
             raise HTTPException(400, "Daily profit target must be 0-100000 ₹")
         new["opt_daily_target_rs"] = float(payload.opt_daily_target_rs)
+    if payload.opt_buy_symbols:
+        syms_ = [x.strip().upper() for x in payload.opt_buy_symbols.split(",") if x.strip()]
+        if not syms_ or any(x not in INDEX_KEYS for x in syms_):
+            raise HTTPException(400, "BUY indices must be NIFTY and / or BANKNIFTY")
+        new["opt_buy_symbols"] = ",".join(syms_)
     if payload.opt_trend_entry:
         import trend_entry as _tem
         if payload.opt_trend_entry.lower() not in _tem.VARIANTS:
@@ -3549,7 +3565,8 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                         side_buys=side_buys_today(sym, interval, mode) if (one_per_side_on() and sym in INDEX_KEYS) else None,
                         current_bar=str(a.get("last_closed_bar") or ""),
                         day_pnl_rs=booked_rs_today(interval, mode) if (daily_target_rs() and sym in INDEX_KEYS) else None,
-                        daily_target_rs=daily_target_rs())
+                        daily_target_rs=daily_target_rs(),
+                        symbol_enabled=(sym not in INDEX_KEYS) or sym in buy_symbols())
         a["reconfirm"] = fused.get("reconfirm")
         final = fused["final"]
         # v1.19: WATCH / PENDING / CONFIRMED -> the option 2 strikes from ATM on the trade side (the terminal switches its chart to it)

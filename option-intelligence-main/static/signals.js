@@ -143,6 +143,7 @@ async function loadConfig() {
     if ($('optOnePer')) $('optOnePer').value = cfg.one_per_side || 'off';
     if ($('optDayTarget')) $('optDayTarget').value = String(cfg.daily_target_rs ?? 0);
     if ($('optTrendEntry')) $('optTrendEntry').value = cfg.trend_entry || 'off';
+    if ($('optBuySyms')) $('optBuySyms').value = cfg.buy_symbols || 'NIFTY';
     $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · stop at least ${cfg.min_sl_atr ?? 1.5} ATR (${cfg.min_sl_points ?? 20} pts) · entries ${cfg.entry_windows || ''} IST${cfg.one_per_side === 'on' ? ' · only the first BUY per side each day' : ''}${cfg.daily_target_rs ? ` · stop for the day at ₹${Number(cfg.daily_target_rs).toLocaleString('en-IN')} profit` : ''}${cfg.trend_entry && cfg.trend_entry !== 'off' ? ' · strong-trend entries: ' + cfg.trend_entry : ''}.`;
   }
 }
@@ -183,7 +184,8 @@ async function saveAtr(reset) {
                           opt_charges_rs: Number($('optCharges').value) || 0, opt_min_rr: Number($('optRr').value) || 1.5, opt_exit_plan: $('optExit').value,
                           ...($('optOnePer') ? {opt_one_per_side: $('optOnePer').value} : {}),
                           ...($('optDayTarget') ? {opt_daily_target_rs: Number($('optDayTarget').value)} : {}),
-                          ...($('optTrendEntry') ? {opt_trend_entry: $('optTrendEntry').value} : {})});
+                          ...($('optTrendEntry') ? {opt_trend_entry: $('optTrendEntry').value} : {}),
+                          ...($('optBuySyms') ? {opt_buy_symbols: $('optBuySyms').value} : {})});
   const keepAtr = cfg.custom ? {sl_atr: cfg.sl_atr, target_atr: cfg.target_atr} : {};
   const keepCost = $('costPts').value === '' ? {} : {cost_points: Number($('costPts').value)};
   const body = reset === 'opt' ? {...optBody(), ...keepAtr, ...keepCost} : reset ? optBody() : {...optBody(), sl_atr: $('slAtr').value === '' ? null : Number($('slAtr').value), target_atr: $('tgtAtr').value === '' ? null : Number($('tgtAtr').value),
@@ -329,7 +331,7 @@ function noteHint(e, st) {            // v1.20.10: say why there is no AI note i
 }
 
 
-// v1.20.34: save the AI (Gemini / Claude) review shown above, plus the findings of the same day, as a text file
+// v1.20.35: save the AI (Gemini / Claude) review shown above, plus the findings of the same day, as a text file
 $('monReport').onclick = async () => {
   const i = +($('monReviewPick').value || 0), r = monReviews[i];
   if (!r) { $('monSaved').textContent = 'No AI review yet - press "Run review now" first.'; return; }

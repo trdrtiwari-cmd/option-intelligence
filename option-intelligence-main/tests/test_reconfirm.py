@@ -197,3 +197,9 @@ def test_daily_profit_target_gate():
     hit = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, day_pnl_rs=2150.0, daily_target_rs=2000)
     assert hit["final"]["level"] != "CONFIRMED"
     assert sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, day_pnl_rs=9999.0, daily_target_rs=0)["final"]["level"] == "CONFIRMED"
+
+
+def test_index_switched_off_for_buys():
+    off = sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, symbol_enabled=False)
+    assert off["final"]["level"] != "CONFIRMED" and any(g["label"] == "Index enabled for BUY signals" and not g["pass"] for g in off["gates"])
+    assert sf.fuse(F.tech(), F.dash(), F.run_of(1), None, F.NOW, True, 5, symbol_enabled=True)["final"]["level"] == "CONFIRMED"

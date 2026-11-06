@@ -11,7 +11,7 @@
     if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Request failed (" + res.status + ")");
     return data;
   }
-  // v1.20.34: indicator values (CE / PE) - test here, apply to live (owner)
+  // v1.20.35: indicator values (CE / PE) - test here, apply to live (owner)
   const TK = ["rsi_ce_min", "rsi_ce_max", "rsi_pe_min", "rsi_pe_max", "adx_min", "chase_atr", "rsi_slope"];
   let tuneDefaults = null;
   function tuneInputs() {
