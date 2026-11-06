@@ -1,3 +1,7 @@
-// Tells the page it runs inside the Windows app (nothing else is exposed to the page).
-const { contextBridge } = require("electron");
-contextBridge.exposeInMainWorld("oiDesktop", { platform: "windows", version: "1.20.41" });
+// Tells the page it runs inside the Windows app; the connection page can also change the site address.
+const { contextBridge, ipcRenderer } = require("electron");
+contextBridge.exposeInMainWorld("oiDesktop", {
+  platform: "windows", version: "1.20.42",
+  setUrl: url => ipcRenderer.invoke("oi:set-url", url),
+  resetUrl: () => ipcRenderer.invoke("oi:reset-url"),
+});
