@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, sys, socket, threading, time, logging
+import os, sys, socket, threading, time, logging, sqlite3
 from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox, QStatusBar
