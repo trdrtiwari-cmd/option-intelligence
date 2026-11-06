@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.42";
+const FRONTEND_VERSION="1.20.43";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1773,3 +1773,11 @@ function renderDecisionFlow(a){
     +`<div class="df-arrow">↓</div><div class="df-final"><b>FINAL DECISION</b><span style="color:${finCol}">${escapeHtml(fin)}</span>`
     +`<div class="small" style="color:var(--muted);margin-top:4px">Rules: ${escapeHtml(df.mode_note||df.mode||"")}</div></div>`;
 }
+
+// v1.20.43: chart window - its own browser / app window on a computer, the Chart tab on a phone
+(function(){const b=$("chartWindowBtn");if(!b)return;b.addEventListener("click",()=>{
+  const url=`/chart?symbol=${encodeURIComponent(getSymbol())}&interval=${getInterval()}`;
+  const tab=window.matchMedia("(max-width:820px)").matches&&document.querySelector('.m-nav a[href="/chart"]');
+  if(tab){tab.click();return}
+  const w=window.open(url,"oi-chart","width=1400,height=880");if(!w)location.href=url;else try{w.focus()}catch{}
+})})();

@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.42"
+APP_VERSION = "1.20.43"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -953,6 +953,12 @@ def _diag_prune():
     now = time.time()
     for jid in [j for j, v in DIAG_JOBS.items() if now - v["created"] > 1800 and v["status"] != "running"]:
         DIAG_JOBS.pop(jid, None)
+
+
+@app.get("/chart")
+async def chart_page():
+    """v1.20.43: the chart window - full-size candles, more indicators with editable settings, the key numbers beside it."""
+    return FileResponse(BASE_DIR / "static" / "chart.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/diagnostics")

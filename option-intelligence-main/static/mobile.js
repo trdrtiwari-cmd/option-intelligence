@@ -50,10 +50,11 @@
     terminal: '<path d="M4 19V5M4 19h16"/><path d="M8 15l3-4 3 2 4-6"/>',
     data: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
     signals: '<path d="M5 6h14M5 12h14M5 18h9"/>',
+    chart: '<path d="M7 4v16M17 4v16"/><rect x="4.5" y="8" width="5" height="7" rx="1"/><rect x="14.5" y="6" width="5" height="9" rx="1"/>',
     diag: '<path d="M4 14l4-6 4 8 3-5 5 3"/>',
     more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
   };
-  const TABS = [["/", "Terminal", "terminal"], ["/dashboard", "Data", "data"], ["/signals", "Signals", "signals"], ["/diagnostics", "Tests", "diag"]];
+  const TABS = [["/", "Terminal", "terminal"], ["/chart", "Chart", "chart"], ["/dashboard", "Data", "data"], ["/signals", "Signals", "signals"], ["/diagnostics", "Tests", "diag"]];
   const svg = k => '<svg viewBox="0 0 24 24" aria-hidden="true">' + ICONS[k] + "</svg>";
 
   let sheet = null, installRow = null;
