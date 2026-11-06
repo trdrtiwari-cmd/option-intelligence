@@ -21,7 +21,7 @@ jobs:
           pip install -r desktop/windows/requirements.txt
       - name: Build desktop app
         run: |
-          pyinstaller --noconfirm --clean --windowed --name "Option Intelligence" --collect-all PySide6 --collect-all uvicorn --collect-all psycopg --hidden-import=main --hidden-import=accounts --hidden-import=indicators --hidden-import=instruments --hidden-import=feed_parser --hidden-import=dashboard_data --hidden-import=diagnostics --hidden-import=signal_fusion --hidden-import=signal_exits --hidden-import=notifier --hidden-import=option_plan --hidden-import=signal_board --hidden-import=monitor --add-data "option-intelligence-main;option-intelligence-main" --add-data "option-intelligence-main/static;static" desktop/windows/launcher.py
+          pyinstaller --noconfirm --clean --windowed --name "Option Intelligence" --collect-all PySide6 --collect-all uvicorn --collect-all psycopg --hidden-import=sqlite3 --hidden-import=sqlite3.dbapi2 --hidden-import=_sqlite3 --hidden-import=main --hidden-import=accounts --hidden-import=indicators --hidden-import=instruments --hidden-import=feed_parser --hidden-import=dashboard_data --hidden-import=diagnostics --hidden-import=signal_fusion --hidden-import=signal_exits --hidden-import=notifier --hidden-import=option_plan --hidden-import=signal_board --hidden-import=monitor --add-data "option-intelligence-main;option-intelligence-main" --add-data "option-intelligence-main/static;static" desktop/windows/launcher.py
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
