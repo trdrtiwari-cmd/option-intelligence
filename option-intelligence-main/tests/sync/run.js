@@ -125,6 +125,15 @@ const get = async (user) => (await (await fetch(BASE + "/api/userdata", { header
     assert.strictEqual(v["terminal.symbol"][0], "BANKNIFTY", "older write (ts 500) must not beat the newer one (ts 1000)");
     assert.strictEqual(v["terminal.showEma"][0], false); assert.strictEqual(v["terminal.chartView"][0], "option");
     console.log("ok 10 settings merge field by field across devices");
+
+    // 11. v1.20.55 read-only review link: local changes stay on the device, nothing is sent, and no "Offline - unsaved" warning
+    let r = device("review", { [MODE]: "scalp" }); await r.ready();
+    r.ls.setItem(CAP, "200000"); await sleep(2200);
+    const st = r.sync.status();
+    assert.strictEqual(st.offline, false, "a reviewer must not be shown as offline"); assert.deepStrictEqual(st.dirty, []);
+    assert.strictEqual(r.ls.getItem(CAP), "200000"); assert.strictEqual(st.user.read_only, true);
+    assert.strictEqual(Object.keys(await get("review")).length, 0, "nothing saved to the review account");
+    console.log("ok 11 read-only review account never saves and never shows offline");
     console.log("all sync tests passed");
   } catch (e) { console.error(e); process.exitCode = 1; }
   finally { srv.kill(); }

@@ -112,7 +112,9 @@
     statusEl.className = "save-state " + kind;
     statusEl.textContent = text;
   }
+  const readOnly = () => !!(user && user.read_only);                // review link: nothing is saved to the account
   function refreshStatus() {
+    if (readOnly()) return setStatus("ok", "Read-only");
     const pending = Object.values(meta.keys).some(m => m.dirty);
     if (offline) return setStatus("err", pending ? "Offline — unsaved, will retry" : "Offline");
     if (Object.keys(inflight).length) return setStatus("busy", "Saving…");
@@ -195,6 +197,7 @@
     if (redirecting || inflight[sKey]) { if (inflight[sKey]) schedule(sKey, 800); return; }
     const lsKey = REV[sKey], m = kmeta(sKey), raw = ls.get(lsKey);
     if (!m.dirty) return;
+    if (readOnly()) { m.dirty = false; saveMeta(); refreshStatus(); return; }   // keep the change on this device only
     inflight[sKey] = true; refreshStatus();
     try {
       let res;
@@ -287,6 +290,7 @@
       Object.keys(MAP).forEach(ls.del); ls.del(META_KEY); ls.del("oi-sync-user"); try { window.OIBootCache && window.OIBootCache.clear(); } catch { }   // nothing left behind for the next person on this browser
       location.replace("/login");
     };
+    if (readOnly()) statusEl.title = "Read-only review link: you can look around, but nothing is saved";
     chip.append(statusEl, name, out); host.appendChild(chip);
     if (!user.is_admin) document.querySelectorAll('a[href="/api/login"]').forEach(a => { a.hidden = true; });
     refreshStatus();

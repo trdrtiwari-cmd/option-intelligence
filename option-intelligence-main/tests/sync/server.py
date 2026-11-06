@@ -9,6 +9,7 @@ import accounts as acc
 
 acc.SIGNUP_CODE = "x"
 USERS = {n: acc.create_user(n, "pass-word-1", "x") for n in ("alice", "bob")}
+USERS["review"] = acc.ensure_review_user()          # read-only review link account (the real middleware refuses its writes)
 STATE = {"down": False, "calls": []}
 
 
@@ -31,6 +32,8 @@ class H(BaseHTTPRequestHandler):
         if STATE["down"]: return self._send(503, {"detail": "down"})
         if not user: return self._send(401, {"detail": "Login required", "login_required": True})
         STATE["calls"].append(f"{method} {self.path}")
+        if user.get("read_only") and method not in ("GET", "HEAD"):
+            return self._send(403, {"detail": "Read-only review link: changes are disabled.", "read_only": True})
         if self.path == "/api/userdata" and method == "GET":
             return self._send(200, {"user": user, "data": acc.get_all_data(user["id"])})
         if self.path.startswith("/api/userdata/"):
