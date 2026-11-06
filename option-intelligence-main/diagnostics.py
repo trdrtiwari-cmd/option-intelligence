@@ -1027,9 +1027,50 @@ def window_slots(cs, near, interval, horizon, cost, target, stop):
     return out
 
 
+# ---------------------------------------------------------------- v1.20.34 rupees per day for 1 / 2 / 3 lots
+PLAN_KEYS = {"t1.5": "1.5/1.5", "t2": "2/1.5", "t3": "3/1.5"}
+DEFAULT_LOTS = {"NIFTY": 65, "BANKNIFTY": 30}       # fallback only, when the option chain does not give the lot size
+
+
+def rupee_estimate(conf_rows, days, plan, cost, lot, delta, charges, lots=(1, 2, 3), goal=2000.0):
+    """Estimated option profit in ₹ per trading day. Each confirmed trade's index points (before the cost allowance) x option delta x
+    quantity, minus charges per lot. Days without a trade count as ₹0. Assumes the delta stays the same during the trade (in reality
+    an ITM option's delta rises as it wins and falls as it loses), no slippage, and that you take every signal."""
+    def pts(r):
+        if plan == "trail":
+            v = (r.get("strat") or {}).get(TRAIL_NAME)
+        else:
+            v = (r.get("atr_grid") or {}).get(PLAN_KEYS.get(plan, "1.5/1.5"))
+        return None if v is None else v + cost
+    per_day = {d: [] for d in days}
+    for r in conf_rows:
+        g = pts(r)
+        if g is not None:
+            per_day.setdefault(r["day"], []).append(g)
+    out = []
+    for n in lots:
+        qty = lot * n
+        daily = [sum(g * delta * qty - charges * n for g in v) for d, v in sorted(per_day.items())]
+        if not daily:
+            continue
+        eq, peak, dd = 0.0, 0.0, 0.0
+        for x in daily:
+            eq += x
+            peak = max(peak, eq)
+            dd = min(dd, eq - peak)
+        traded = [x for x in daily if x != 0]
+        out.append({"lots": n, "qty": qty, "avg_day": round(sum(daily) / len(daily)), "total": round(sum(daily)),
+                    "best_day": round(max(daily)), "worst_day": round(min(daily)), "max_drawdown": round(dd),
+                    "days": len(daily), "trade_days": len(traded), "losing_days": sum(1 for x in traded if x < 0),
+                    "goal_days": sum(1 for x in daily if x >= goal),
+                    "avg_trade_rs": round(sum(traded) / max(1, sum(len(v) for v in per_day.values()))) if traded else 0})
+    return {"plan": plan, "lot": lot, "delta": delta, "charges_per_lot": charges, "goal": goal, "rows": out,
+            "trades": sum(len(v) for v in per_day.values())}
+
+
 # ---------------------------------------------------------------- entry points
 def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None,
-        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=60, live_window=True, pattern_minutes=None, live_plan=None, tune=None):
+        horizon=12, cost=4.0, target=30, stop=20, progress=None, score_min=60, live_window=True, pattern_minutes=None, live_plan=None, tune=None, money=None):
     cs, replayed = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, progress=progress, score_min=score_min,
                           live_window=live_window, pattern_minutes=pattern_minutes, tune=tune)
     confirmed, near = events_from(replayed)
@@ -1206,6 +1247,24 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                   "text": f"Big moves: {mm['moves']} clean moves of ≥ 2.5 ATR in this period; the engine confirmed {mm['caught']} in time and missed {mm['missed']}."
                                   + (f" The gate that blocked the most missed moves: “{top['gate']}” ({top['moves']} of {mm['missed']}, {top['pct']}%). "
                                      "Check the near-miss table below before relaxing it: if the setups it alone blocked lost money, it is protecting you." if top else "")})
+    try:                       # v1.20.34: what the signals mean in rupees per day, for 1 / 2 / 3 lots
+        m = money or {}
+        lot = int(m.get("lot") or DEFAULT_LOTS.get(symbol, 65))
+        delta = float(m.get("delta") or 0.65)
+        charges = float(m.get("charges") or 60.0)
+        plan = live_plan if live_plan in ("trail", "t1.5", "t2", "t3") else "trail"
+        ru = rupee_estimate(conf_rows, days, plan, cost, lot, delta, charges, goal=float(m.get("goal") or 2000))
+        ru["assumed"] = [k for k in ("lot", "delta") if not m.get(k)]
+        rep["rupees"] = ru
+        if ru["rows"]:
+            parts = [f"{x['lots']} lot{'s' if x['lots'] > 1 else ''}: avg ₹{x['avg_day']:,}/day, worst day ₹{x['worst_day']:,}, "
+                     f"₹{ru['goal']:,.0f}+ on {x['goal_days']} of {x['days']} days" for x in ru["rows"]]
+            rep["verdict"].insert(0, {"level": "info",
+                                      "text": f"Rupees per day (estimate, {ru['trades']} trades in {ru['rows'][0]['days']} days, exit plan {plan}, "
+                                              f"lot {lot}{' (assumed)' if 'lot' in ru['assumed'] else ''}, delta {delta:g}{' (assumed)' if 'delta' in ru['assumed'] else ''}, "
+                                              f"₹{charges:,.0f} charges per lot): " + "; ".join(parts) + ". Profit and loss both grow with lots."})
+    except Exception as exc:
+        rep["rupees"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     ch = rep["params"].get("indicator_changes") or {}
     if ch:                     # v1.20.33: this run used indicator values other than the tested defaults - say so first
         names = {"rsi_ce_min": "CE RSI min", "rsi_ce_max": "CE RSI max", "rsi_pe_min": "PE RSI min", "rsi_pe_max": "PE RSI max",

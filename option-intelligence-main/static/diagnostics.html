@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.33">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.33">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.34">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.34">
 </head>
 <body>
 <header class="topbar">
@@ -23,8 +23,8 @@
     <div class="toolbar dg-toolbar">
       <label>Underlying<select id="symbol"><option value="NIFTY">NIFTY 50</option><option value="BANKNIFTY">BANK NIFTY</option></select></label>
       <label>Timeframe<select id="interval"><option value="5">5 minutes</option><option value="3">3 minutes</option><option value="1">1 minute</option><option value="15">15 minutes</option></select></label>
-      <label>Days of history<input id="days" type="number" min="2" max="30" value="15"></label>
-      <label>Signal mode<select id="mode"><option value="scalp">Scalp</option><option value="standard">Standard</option></select></label>
+      <label>Days of history<input id="days" type="number" min="2" max="30" value="30"></label>
+      <label>Signal mode<select id="mode"><option value="scalp">Scalp</option><option value="standard" selected>Standard</option></select></label>
       <label>Minimum score<select id="scoreMin"><option value="60" selected>60 · Default</option><option value="65">65 · Medium</option><option value="70">70 · Strict</option><option value="0">0 · Research only</option></select></label>
       <label>Target (pts)<input id="target" type="number" min="5" max="100" value="30"></label>
       <label>Stop (pts)<input id="stop" type="number" min="5" max="100" value="20"></label>
@@ -51,6 +51,7 @@
   </section>
   <div id="results" hidden>
     <section class="panel"><div class="section-head"><h2>What the data says</h2><button id="dlBtn" type="button" class="secondary">Download full report (JSON)</button></div><ul id="verdict" class="dg-verdict"></ul><div id="headline" class="dg-big"></div></section>
+    <section class="panel"><div class="section-head"><div><h2>Rupees per day - 1, 2 and 3 lots (estimate)</h2><p id="rsNote">Each confirmed signal of this run, at your live exit plan, converted to the option: index points × option delta × quantity − charges. Days without a signal count as ₹0. An estimate: no slippage, delta kept constant, every signal taken.</p></div></div><div class="table-wrap"><table id="rsTable"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>Exit grid — points per trade for each target / stop pair</h2><p>Confirmed signals only. Green = profitable after cost. Cells with fewer than 8 trades are dimmed.</p></div></div><div class="table-wrap"><table id="gridTable" class="dg-grid"></table></div></section>
     <section class="panel"><div class="section-head"><div><h2>Exit styles — fixed targets vs trailing vs scaling out</h2><p>Same entries, different ways of getting out. Cost is already deducted.</p></div></div><div class="table-wrap"><table id="strategies"></table></div>
       <h3 class="dg-sub">How sensitive is the result to your cost allowance?</h3><div class="table-wrap"><table id="costTable"></table></div></section>
@@ -68,6 +69,6 @@
   </div>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/savefile.js?v=1.20.33"></script><script src="/static/sync.js?v=1.20.33" data-next="/static/diagnostics.js?v=1.20.33"></script>
-<script src="/static/mobile.js?v=1.20.33" defer></script><script src="/static/tables.js?v=1.20.33" defer></script>
+<script src="/static/savefile.js?v=1.20.34"></script><script src="/static/sync.js?v=1.20.34" data-next="/static/diagnostics.js?v=1.20.34"></script>
+<script src="/static/mobile.js?v=1.20.34" defer></script><script src="/static/tables.js?v=1.20.34" defer></script>
 </body></html>

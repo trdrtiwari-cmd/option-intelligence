@@ -11,7 +11,7 @@
     if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Request failed (" + res.status + ")");
     return data;
   }
-  // v1.20.33: indicator values (CE / PE) - test here, apply to live (owner)
+  // v1.20.34: indicator values (CE / PE) - test here, apply to live (owner)
   const TK = ["rsi_ce_min", "rsi_ce_max", "rsi_pe_min", "rsi_pe_max", "adx_min", "chase_atr", "rsi_slope"];
   let tuneDefaults = null;
   function tuneInputs() {
@@ -137,6 +137,17 @@
         const best = ob.variants.filter(v => v.trail.n).sort((a, b) => (b.trail.total || 0) - (a.trail.total || 0))[0];
         table($("orbTrades"), [`Trades - ${best ? best.label : "none"}`, "Side", "Range (ATR)", "Result (pts, trailing)"],
           best && best.trades.length ? best.trades.map(x => [`${x.day} ${x.time}`, x.side, x.or_width_atr, { text: num(x.pts), cls: x.pts > 0 ? "green" : "red" }]) : [["None", "", "", ""]]);
+      }
+    }
+    const ru = rep.rupees;
+    if (ru && $("rsTable")) {
+      const rs = v => (v < 0 ? "−₹" : "₹") + Math.abs(Math.round(v)).toLocaleString("en-IN");
+      if (ru.error) table($("rsTable"), ["Rupees per day"], [["Could not calculate: " + ru.error]]);
+      else {
+        $("rsNote").textContent = `${ru.trades} trades · exit plan ${ru.plan} · lot ${ru.lot}${(ru.assumed || []).includes("lot") ? " (assumed)" : ""} · delta ${ru.delta}${(ru.assumed || []).includes("delta") ? " (assumed)" : ""} · ₹${ru.charges_per_lot} charges per lot. Index points × delta × quantity − charges; days without a signal count as ₹0. An estimate: no slippage, delta kept constant, every signal taken.`;
+        table($("rsTable"), ["Lots (qty)", "Average per day", "Best day", "Worst day", "Biggest fall from a high", `Days ≥ ₹${Number(ru.goal).toLocaleString("en-IN")}`, "Losing days", "Average per trade", `Total (${ru.rows.length ? ru.rows[0].days : 0} days)`],
+          ru.rows.map(x => [`${x.lots} (${x.qty})`, { text: rs(x.avg_day), cls: x.avg_day >= 0 ? "green" : "red" }, rs(x.best_day), { text: rs(x.worst_day), cls: x.worst_day < 0 ? "red" : "" },
+            { text: rs(x.max_drawdown), cls: x.max_drawdown < 0 ? "red" : "" }, `${x.goal_days} of ${x.days}`, `${x.losing_days} of ${x.trade_days} trading days`, rs(x.avg_trade_rs), rs(x.total)]));
       }
     }
     const stw = rep.strong_trend;

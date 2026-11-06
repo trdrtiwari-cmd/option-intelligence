@@ -244,3 +244,18 @@ def test_strong_trend_rsi_whatif():
     assert [r["i"] for r in cont] == [30, 40, 55] and cont[0]["trend_eff"] == 1.0
     choppy = [dict(c, close=100 + (5 if k % 2 else 0)) for k, c in enumerate(cs)]
     assert dg.strong_trend_events(choppy, rep, "rsi") == []
+
+
+def test_rupee_estimate():
+    import diagnostics as dg
+    rows = [{"day": "2026-11-02", "strat": {dg.TRAIL_NAME: 26.0}, "atr_grid": {"1.5/1.5": 20.0}},
+            {"day": "2026-11-02", "strat": {dg.TRAIL_NAME: -24.0}, "atr_grid": {"1.5/1.5": -24.0}},
+            {"day": "2026-11-04", "strat": {dg.TRAIL_NAME: 36.0}, "atr_grid": {"1.5/1.5": 26.0}}]
+    ru = dg.rupee_estimate(rows, ["2026-11-02", "2026-11-03", "2026-11-04"], "trail", 4.0, 65, 0.65, 60.0, goal=1500)
+    one, two = ru["rows"][0], ru["rows"][1]
+    # day 1: (30 x .65 x 65 - 60) + (-20 x .65 x 65 - 60) = 1207.5 - 905 = 302.5 ; day 3: 40 x .65 x 65 - 60 = 1630
+    assert one["total"] == round(302.5 + 1630) and one["days"] == 3 and one["avg_day"] == round((302.5 + 1630) / 3)
+    assert one["worst_day"] == 0 and one["best_day"] == 1630 and one["goal_days"] == 1 and one["trade_days"] == 2
+    assert two["total"] == round(2 * (302.5 + 1630)) and two["qty"] == 130
+    fixed = dg.rupee_estimate(rows, ["2026-11-02"], "t1.5", 4.0, 65, 0.65, 60.0)
+    assert fixed["rows"][0]["total"] == round((24 * .65 * 65 - 60) + (-20 * .65 * 65 - 60) + (30 * .65 * 65 - 60))

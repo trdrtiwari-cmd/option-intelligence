@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.33">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.33">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.34">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.34">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -23,7 +23,7 @@
   <section class="toolbar panel">
     <label>Underlying<select id="symbol"><option value="NIFTY">NIFTY 50</option><option value="BANKNIFTY">BANK NIFTY</option></select></label>
     <label>Timeframe<select id="interval"><option value="5">5 minutes</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></label>
-    <label>Signal mode<select id="signalMode"><option value="scalp">Scalp · 20–40 pt moves</option><option value="standard">Standard · strict</option></select></label>
+    <label>Signal mode<select id="signalMode"><option value="scalp">Scalp · 20–40 pt moves</option><option value="standard" selected>Standard · default</option></select></label>
     <label>Minimum score<select id="scoreMin"><option value="60" selected>60 · Default</option><option value="65">65 · Medium</option><option value="70">70 · Strict</option></select></label>
     <label>Chart view<select id="chartView"><option value="index">Underlying index</option><option value="option">Selected option premium</option></select></label>
     <label title="On WATCH / confirmed CE or PE the chart switches to the option 2 strikes in the money on that side (strike offset is set on the Signals page)">Signal option<select id="autoOption"><option value="on" selected>Auto-switch chart</option><option value="off">Keep my selection</option></select></label>
@@ -259,6 +259,6 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/trendlines.js?v=1.20.33"></script><script src="/static/savefile.js?v=1.20.33"></script><script src="/static/boot.js?v=1.20.33"></script><script src="/static/sync.js?v=1.20.33" data-next="/static/app.js?v=1.20.33"></script>
-<script src="/static/mobile.js?v=1.20.33" defer></script><script src="/static/tables.js?v=1.20.33" defer></script>
+<script src="/static/trendlines.js?v=1.20.34"></script><script src="/static/savefile.js?v=1.20.34"></script><script src="/static/boot.js?v=1.20.34"></script><script src="/static/sync.js?v=1.20.34" data-next="/static/app.js?v=1.20.34"></script>
+<script src="/static/mobile.js?v=1.20.34" defer></script><script src="/static/tables.js?v=1.20.34" defer></script>
 </body></html>

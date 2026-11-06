@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.33"
+APP_VERSION = "1.20.34"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -961,7 +961,7 @@ async def diagnostics_page():
 
 
 @app.post("/api/diagnostics/start")
-async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 15, mode: str = "scalp",
+async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 30, mode: str = "standard",
                             cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 60, pattern_minutes: int = 0,
                             tune: str = ""):
     """Replays the technical engine over the last `days` of candles and measures what happened after every signal.
@@ -1013,13 +1013,24 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
         DIAG_JOBS[job_id].update(status="error", error=f"{type(exc).__name__}: {str(exc)[:150]}")
         return {"job_id": job_id}
 
+    money = {"charges": _opt_cfg().get("charges_rs")}
+    try:                       # v1.20.34: lot size and delta of the option the live app would buy (for the ₹ per day estimate)
+        pk = await asyncio.wait_for(_option_pick(sym, "CE"), timeout=6)
+        if pk:
+            money["lot"] = pk.get("lot_size")
+            d_ = abs(float(pk.get("delta") or 0))
+            if 0.3 <= d_ <= 0.95:
+                money["delta"] = round(d_, 2)
+    except Exception as exc:
+        logger.info("Diagnostics: option lot / delta unavailable: %s", str(getattr(exc, "detail", exc))[:120])
+
     def work():
         job = DIAG_JOBS[job_id]
         job["stage"] = "Replaying signals bar by bar"
         try:
             rep = dgn.run(result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw, htf_interval=htf_interval,
                           volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop, score_min=score_min,
-                          pattern_minutes=pattern_minutes or None, tune=tune_d,
+                          pattern_minutes=pattern_minutes or None, tune=tune_d, money=money,
                           live_plan=OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
                           progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
             rep["params"]["volume_source"] = result.get("volume_source")
@@ -2863,7 +2874,7 @@ def _poller_cfg():
     syms = [x.strip().upper() for x in os.getenv("ALERT_SYMBOLS", "NIFTY,BANKNIFTY").split(",") if x.strip().upper() in INDEX_KEYS] or ["NIFTY", "BANKNIFTY"]
     try: interval = int(os.getenv("ALERT_INTERVAL", "5"))
     except ValueError: interval = 5
-    mode = os.getenv("ALERT_MODE", "scalp") if os.getenv("ALERT_MODE", "scalp") in MODES else "scalp"
+    mode = os.getenv("ALERT_MODE", "standard") if os.getenv("ALERT_MODE", "standard") in MODES else "standard"
     try: score_min = int(os.getenv("ALERT_SCORE_MIN", "60"))
     except ValueError: score_min = 60
     try: delay = max(5, int(os.getenv("ALERT_POLL_SECONDS", "10") or 10))
