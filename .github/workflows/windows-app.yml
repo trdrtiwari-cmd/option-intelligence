@@ -30,7 +30,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
-      - run: node -e "require('fs').writeFileSync('app-url.json', JSON.stringify({url: process.env.APP_URL.replace(/\/+$/, '')}) + '\n')"
+      - name: Point the app at the site
+        run: |
+          node -e "require('fs').writeFileSync('app-url.json', JSON.stringify({url: process.env.APP_URL.replace(/[/]+$/, '')}) + '\n')"
+          cat app-url.json
       - run: npm install --no-audit --no-fund
       - run: npx electron-builder --win nsis portable --x64 --publish never
         env:
