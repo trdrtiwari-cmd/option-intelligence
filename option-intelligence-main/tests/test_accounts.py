@@ -215,6 +215,49 @@ def test_middleware():
     assert acc.safe_next("/dashboard") == "/dashboard" and acc.safe_next("//evil.com") == "/" and acc.safe_next("https://evil.com") == "/"
 
 
+def test_review_link():
+    fresh()
+    acc._REVIEW_USER.clear()
+    run = lambda *a, **k: asyncio.run(call(None, *a, **k))
+    acc.REVIEW_KEY = ""
+    sent, _ = run("/review", query=b"key=anything"); assert sent[0][1] == 404, sent        # disabled without a key
+    acc.REVIEW_KEY = "k" * 24
+    try:
+        sent, _ = run("/review", query=b"key=wrong"); assert sent[0][1] == 403, sent
+        msgs = []
+        async def send(m): msgs.append(m)
+        asyncio.run(acc.SessionAuthMiddleware(None)({"type": "http", "path": "/review", "method": "GET",
+                    "query_string": ("key=" + "k" * 24 + "&next=//evil.com").encode(),
+                    "headers": [(b"x-forwarded-proto", b"https")]}, None, send))
+        hdr = dict(msgs[0]["headers"])
+        assert msgs[0]["status"] == 302 and hdr[b"location"] == b"/", msgs
+        assert b"HttpOnly" in hdr[b"set-cookie"] and b"Secure" in hdr[b"set-cookie"] and ("k" * 24).encode() not in hdr[b"set-cookie"]
+        rc = [(b"cookie", ("oi_review=" + acc.review_cookie_value()).encode())]
+        sent, seen = run("/dashboard", headers=rc); assert sent[0][0] == "APP", sent
+        assert seen["user"]["username"] == "review" and seen["user"]["read_only"] and not seen["user"]["is_admin"]
+        sent, _ = run("/api/analysis", headers=rc); assert sent[0][0] == "APP"
+        sent, _ = run("/ws/live", typ="websocket", headers=rc); assert sent[0][0] == "APP"
+        for method in ("POST", "PUT", "DELETE", "PATCH"):
+            sent, _ = run("/api/userdata/paper-trades", method, headers=rc); assert sent[0][1] == 403, (method, sent)
+        sent, _ = run("/api/login", headers=rc); assert sent[0][1] == 403            # Upstox login changes the shared token
+        sent, _ = run("/api/auth/logout", "POST", headers=rc); assert sent[0][0] == "APP"
+        sent, _ = run("/api/analysis", headers=[(b"cookie", b"oi_review=forged")]); assert sent[0][1] == 401
+        sent, seen = run("/api/analysis", headers=[(b"x-review-key", b"k" * 24)]); assert sent[0][0] == "APP" and seen["user"]["read_only"]
+        sent, _ = run("/api/userdata/x", "PUT", headers=[(b"x-review-key", b"k" * 24)]); assert sent[0][1] == 403
+        sent, _ = run("/api/analysis", headers=[(b"x-review-key", b"wrong")]); assert sent[0][1] == 401
+        old = acc.review_cookie_value(); acc.REVIEW_KEY = "z" * 24                    # rotating the key revokes old links
+        sent, _ = run("/api/analysis", headers=[(b"cookie", ("oi_review=" + old).encode())]); assert sent[0][1] == 401
+        fresh(); acc._REVIEW_USER.clear(); acc.ensure_review_user()                    # a reviewer arriving first must not
+        u = acc.create_user("trader", "pass-word-1"); assert u["is_admin"]              # take the owner's first-sign-up slot
+        tok = acc.create_session(u["id"])                                               # and a real login wins over the cookie
+
+        both = [(b"cookie", f"oi_session={tok}; oi_review={acc.review_cookie_value()}".encode())]
+        sent, seen = run("/api/userdata/x", "PUT", headers=both); assert sent[0][0] == "APP" and seen["user"]["username"] == "trader"
+        acc.ensure_review_user(); raises(lambda: acc.authenticate("review", "disabled"), 401)   # it has no password
+    finally:
+        acc.REVIEW_KEY = ""
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

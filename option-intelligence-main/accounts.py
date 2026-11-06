@@ -280,7 +280,7 @@ def _public_user(row):
 
 def user_count():
     with db() as c:
-        return c.one("SELECT COUNT(*) AS n FROM users")["n"]
+        return c.one("SELECT COUNT(*) AS n FROM users WHERE username <> ?", (REVIEW_USERNAME,))["n"]
 
 
 def signup_status():
@@ -297,7 +297,7 @@ def create_user(username, password, code=""):
     validate_username(username)
     validate_password(password, username)
     with db() as c:
-        n = c.one("SELECT COUNT(*) AS n FROM users")["n"]
+        n = c.one("SELECT COUNT(*) AS n FROM users WHERE username <> ?", (REVIEW_USERNAME,))["n"]
         if SIGNUP_CODE:
             if not hmac.compare_digest(str(code or ""), SIGNUP_CODE):
                 raise AccountError("Invalid invite code.", 403)
@@ -362,7 +362,7 @@ def delete_user(user_id, password=None, check_password=True):
         if check_password and not verify_password(str(password or ""), row["pw_hash"]):
             raise AccountError("Password is wrong.", 403)
         if row["is_admin"] and c.one("SELECT COUNT(*) AS n FROM users WHERE is_admin = 1 AND id <> ?", (user_id,))["n"] == 0 and \
-                c.one("SELECT COUNT(*) AS n FROM users WHERE id <> ?", (user_id,))["n"] > 0:
+                c.one("SELECT COUNT(*) AS n FROM users WHERE id <> ? AND username <> ?", (user_id, REVIEW_USERNAME))["n"] > 0:
             raise AccountError("You are the only owner. Make another account the owner first (python manage_users.py make-admin NAME).", 409)
         c.run("DELETE FROM user_data WHERE user_id = ?", (user_id,))
         c.run("DELETE FROM sessions WHERE user_id = ?", (user_id,))
@@ -500,6 +500,54 @@ def delete_data(user_id, key):
         c.run("DELETE FROM user_data WHERE user_id = ? AND key = ?", (user_id, key))
 
 
+# ---------------------------------------------------------------- read-only review link
+# REVIEW_KEY (at least 16 characters) enables https://YOUR-APP/review?key=<REVIEW_KEY>. Opening it sets a cookie that lets the
+# visitor browse every page as the "review" account without signing in. Reviewers can only read: every POST/PUT/PATCH/DELETE
+# is refused (except sign-out) and so is the Upstox login. Changing or removing REVIEW_KEY invalidates every review cookie.
+# Scripts and checkers can send the key in an "X-Review-Key" header instead of using the cookie.
+REVIEW_KEY = os.getenv("REVIEW_KEY", "").strip()
+REVIEW_COOKIE = "oi_review"
+REVIEW_DAYS = 7
+REVIEW_USERNAME = "review"
+REVIEW_BLOCKED_PATHS = {"/api/login", "/auth/callback"}          # GET routes that change shared state (Upstox token)
+REVIEW_ALLOWED_WRITES = {"/api/auth/logout"}
+_REVIEW_USER = {}
+
+
+def review_enabled():
+    return len(REVIEW_KEY) >= 16
+
+
+def review_cookie_value():
+    """Cookie value derived from the key, so the key itself is never stored in the browser."""
+    return hmac.new(REVIEW_KEY.encode("utf-8"), b"oi-review-v1", hashlib.sha256).hexdigest()
+
+
+def review_key_ok(key):
+    return review_enabled() and hmac.compare_digest(str(key or "").encode("utf-8"), REVIEW_KEY.encode("utf-8"))
+
+
+def review_cookie_ok(value):
+    return review_enabled() and bool(value) and hmac.compare_digest(str(value).encode("utf-8"), review_cookie_value().encode("utf-8"))
+
+
+def ensure_review_user():
+    """The shared read-only account reviewers browse as (never an admin, cannot sign in with a password)."""
+    if _REVIEW_USER.get("path") == (SQLITE_PATH, DATABASE_URL):
+        return dict(_REVIEW_USER["user"])
+    with db() as c:
+        row = c.one("SELECT * FROM users WHERE username = ?", (REVIEW_USERNAME,))
+        if not row:
+            uid = c.insert_returning_id("INSERT INTO users (username, display_name, pw_hash, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
+                                        (REVIEW_USERNAME, "Reviewer (read-only)", "disabled", 0, time.time()))
+            row = c.one("SELECT * FROM users WHERE id = ?", (uid,))
+        user = _public_user(row)
+    user["is_admin"] = False
+    user["read_only"] = True
+    _REVIEW_USER.update(path=(SQLITE_PATH, DATABASE_URL), user=user)
+    return dict(user)
+
+
 # ---------------------------------------------------------------- ASGI middleware
 PUBLIC_PATHS = {"/health", "/login", "/api/auth/login", "/api/auth/signup", "/api/auth/config", "/api/tradingview/webhook",
                 "/static/login.js", "/static/style.css", "/favicon.ico",
@@ -509,11 +557,11 @@ PUBLIC_PATHS = {"/health", "/login", "/api/auth/login", "/api/auth/signup", "/ap
                 "/static/icons/apple-touch-icon.png", "/static/icons/favicon-32.png"}
 
 
-def _cookie(headers):
+def _cookie(headers, cookie_name=None):
     raw = dict(headers or []).get(b"cookie", b"").decode("latin-1")
     for part in raw.split(";"):
         name, _, val = part.strip().partition("=")
-        if name == COOKIE_NAME:
+        if name == (cookie_name or COOKIE_NAME):
             return val
     return ""
 
@@ -551,6 +599,8 @@ class SessionAuthMiddleware:
         if scope["type"] == "http" and method not in ("GET", "HEAD", "OPTIONS") and path != "/api/tradingview/webhook" \
                 and not _same_origin(scope.get("headers")):
             return await self._json(send, 403, {"detail": "Cross-site request blocked."})
+        if path == "/review" and scope["type"] == "http":
+            return await self._review_entry(scope, send)
         token = _cookie(scope.get("headers"))
         user = None
         if token:
@@ -561,6 +611,16 @@ class SessionAuthMiddleware:
                     user = None
                 else:
                     return await self._json(send, 503, {"detail": "Account database is unavailable. Try again shortly."})
+        if not user and path not in PUBLIC_PATHS and (review_cookie_ok(_cookie(scope.get("headers"), REVIEW_COOKIE))
+                                                      or review_key_ok(dict(scope.get("headers") or []).get(b"x-review-key", b"").decode("latin-1"))):
+            if (scope["type"] == "http" and method not in ("GET", "HEAD", "OPTIONS") and path not in REVIEW_ALLOWED_WRITES) \
+                    or path in REVIEW_BLOCKED_PATHS:
+                return await self._json(send, 403, {"detail": "Read-only review link: changes are disabled.", "read_only": True})
+            try:
+                user = await asyncio.to_thread(ensure_review_user)
+            except Exception:
+                return await self._json(send, 503, {"detail": "Account database is unavailable. Try again shortly."})
+            token = ""
         scope["oi_user"], scope["oi_token"] = user, token
         if user or path in PUBLIC_PATHS:
             return await self.app(scope, receive, send)
@@ -572,6 +632,26 @@ class SessionAuthMiddleware:
         qs = scope.get("query_string", b"").decode("latin-1")
         nxt = quote(path + ("?" + qs if qs else ""), safe="/")
         await send({"type": "http.response.start", "status": 302, "headers": [(b"location", f"/login?next={nxt}".encode()), (b"cache-control", b"no-store")]})
+        await send({"type": "http.response.body", "body": b""})
+
+    @staticmethod
+    async def _review_entry(scope, send):
+        """GET /review?key=... : check the key, swap it for a cookie and redirect, so the key leaves the address bar."""
+        if not review_enabled():
+            return await SessionAuthMiddleware._json(send, 404, {"detail": "Not Found"})
+        from urllib.parse import parse_qs
+        qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+        if not review_key_ok((qs.get("key") or [""])[0]):
+            return await SessionAuthMiddleware._json(send, 403, {"detail": "Invalid review link."})
+        h = dict(scope.get("headers") or [])
+        proto = h.get(b"x-forwarded-proto", b"").decode("latin-1").split(",")[0].strip() or scope.get("scheme", "http")
+        cookie = f"{REVIEW_COOKIE}={review_cookie_value()}; Max-Age={REVIEW_DAYS * 86400}; Path=/; HttpOnly; SameSite=Lax"
+        if proto == "https":
+            cookie += "; Secure"
+        nxt = safe_next((qs.get("next") or ["/"])[0])
+        await send({"type": "http.response.start", "status": 302, "headers": [
+            (b"location", nxt.encode("latin-1", "ignore") or b"/"), (b"set-cookie", cookie.encode()),
+            (b"cache-control", b"no-store"), (b"referrer-policy", b"no-referrer")]})
         await send({"type": "http.response.body", "body": b""})
 
     @staticmethod
