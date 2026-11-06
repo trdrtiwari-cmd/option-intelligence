@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.41";
+const FRONTEND_VERSION="1.20.42";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1464,6 +1464,21 @@ window.addEventListener("oi-sync-pulled",ev=>{if((ev.detail?.changed||[]).includ
   }
   async function loadPushStatus(){try{const s=await api("/api/push/status");showPushStatus(s);return s}catch{return null}}
   window.oiLoadPushStatus=loadPushStatus;
+  // v1.20.42: inside the Windows app there is no browser push service (Electron has none), so web push always failed with
+  // "Registration failed - push service not available". The app keeps the terminal running while minimised and shows every alert
+  // as a Windows notification itself (showNotice), so push is not needed there: no push bar, no failing registration.
+  if(window.oiDesktop){
+    try{if("Notification"in window&&Notification.permission!=="granted")await Notification.requestPermission()}catch{}
+    btn.dataset.on="1";btn.textContent="Windows alerts: ON";
+    btn.title="Signal alerts show as Windows notifications while this app is open (minimised is fine). Closing the window stops them.";
+    const bar=document.getElementById("pushBar");if(bar)bar.remove();
+    btn.addEventListener("click",()=>{
+      try{new Notification("Option Intelligence",{body:"Windows alerts work. Keep the app open or minimised to get signal alerts.",tag:"oi-test"})}catch{}
+      toast("Windows alerts are on - signals show as Windows notifications while the app is open (minimised is fine).");
+    });
+    loadPushStatus();setInterval(()=>{if(document.visibilityState==="visible")loadPushStatus()},30000);
+    return;
+  }
 
   // Native Capacitor Android/iOS push (FCM). ask=false never shows a permission prompt.
   async function registerNative(ask){
