@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.53";
+const FRONTEND_VERSION="1.20.54";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -600,7 +600,23 @@ async function refreshSignalContext(){
   $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
   renderSignal();
 }
+// v1.20.54: a contract of the OTHER index must never stay selected (seen: NIFTY 50 chosen, chart / price on a BANKNIFTY 58900 CE
+// with the NIFTY index price beside it). Dropped on every index change and checked on each refresh.
+function dropForeignContract(){
+  if(!paperSelected||paperSelected.symbol===getSymbol())return false;
+  const old=paperSelectedLabel?paperSelectedLabel():paperSelected.symbol;
+  paperSelected=null;lastAutoOptionKey=null;lastAutoSide=null;autoIdleSince=null;try{sessionStorage.removeItem("oiAutoPick")}catch{}
+  try{window.OIPrefs&&window.OIPrefs.set("terminal.contract",null)}catch{}
+  const sc=$("paperSelectedContract");if(sc)sc.textContent="Select CE or PE using the option-chain table above.";
+  const bb=$("paperBuyBtn");if(bb)bb.disabled=true;
+  document.querySelectorAll(".chain-selected").forEach(r=>r.classList.remove("chain-selected"));
+  if($("chartView").value==="option"){$("chartView").value="index";try{window.OIPrefs&&window.OIPrefs.set("terminal.chartView","index")}catch{}}
+  chartSource="index";
+  toast(`${old} belongs to the other index - cleared. Showing ${getSymbol()==="NIFTY"?"NIFTY 50":"BANK NIFTY"}.`);
+  return true;
+}
 async function refresh(){
+  if(dropForeignContract()){try{await refreshChartSource()}catch{}}
   sendLiveSub();lastFullRefresh=Date.now();
   if($("chartView").value==="option"){await refreshChartSource();try{await refreshSignalContext()}catch(e){$("analysisNote").textContent=e.message}loadOptionVolume();$("lastUpdated").textContent=`Updated ${new Date().toLocaleTimeString()} · option premium view${paperSelected?"":" · select an option contract"}`;return}
   const manual=!refreshBusy;if(manual){$("refreshBtn").disabled=true;$("refreshBtn").textContent="Loading…"}
@@ -785,7 +801,7 @@ async function refreshChainQuiet(){
   }catch{}
 }
 $("refreshBtn").addEventListener("click",refresh);
-$("symbol").addEventListener("change",()=>{lastAutoSide=null;lastAutoOptionKey=null;
+$("symbol").addEventListener("change",()=>{lastAutoSide=null;lastAutoOptionKey=null;dropForeignContract();
   optionChainRows=[];chainLotSize=null;chartFitKey=null;lastDerivatives=null;
   $("chainRows").innerHTML='<tr><td colspan="8" class="empty">Loading expiries for this underlying…</td></tr>';
   renderLiveTicks([]);connectLiveSocket();refresh();
@@ -1798,3 +1814,12 @@ function renderDecisionFlow(a){
   ["symbol","interval"].forEach(id=>$(id)&&$(id).addEventListener("change",send));
   const pop=$("ccPop");if(pop)pop.addEventListener("click",()=>{const b=$("chartWindowBtn");if(b)b.click()});
 })();
+
+// v1.20.54: one index everywhere - the chart window / Chart tab and the Terminal follow each other's index and timeframe
+window.addEventListener("storage",e=>{
+  if(e.key!=="oi-chart-v1"||!e.newValue)return;
+  try{const o=JSON.parse(e.newValue),sym=String(o.sym||""),tf=String(o.tf||"");
+    if(["NIFTY","BANKNIFTY"].includes(sym)&&$("symbol").value!==sym&&document.activeElement!==$("symbol")){$("symbol").value=sym;$("symbol").dispatchEvent(new Event("change",{bubbles:true}))}
+    if(tf&&[...$("interval").options].some(x=>x.value===tf)&&$("interval").value!==tf&&document.activeElement!==$("interval")){$("interval").value=tf;$("interval").dispatchEvent(new Event("change",{bubbles:true}))}
+  }catch{}
+});

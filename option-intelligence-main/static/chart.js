@@ -64,15 +64,15 @@
   }
   let S = (() => { try { return merge(DEF, JSON.parse(localStorage.getItem(LS_KEY) || "{}")); } catch { return clone(DEF); } })();
   const q = new URLSearchParams(location.search);
+  { const t = (() => { try { const o = JSON.parse(localStorage.getItem("oi-settings-v1") || "{}"); const g = k => Array.isArray(o["terminal." + k]) ? o["terminal." + k][0] : null; return { sym: g("symbol"), tf: Number(g("interval")) }; } catch { return {}; } })();
+    if (["NIFTY", "BANKNIFTY"].includes(t.sym)) S.sym = t.sym;
+    if ([1, 3, 5, 15, 30].includes(t.tf)) S.tf = t.tf; }
   if (["NIFTY", "BANKNIFTY"].includes((q.get("symbol") || "").toUpperCase())) S.sym = q.get("symbol").toUpperCase();
   if ([1, 3, 5, 15, 30].includes(Number(q.get("interval")))) S.tf = Number(q.get("interval"));
-  const save = () => {
-    try {
-      let o = S;
-      if (EMBED) { const cur = JSON.parse(localStorage.getItem(LS_KEY) || "{}"); o = { ...S, sym: cur.sym ?? DEF.sym, tf: cur.tf ?? DEF.tf, days: cur.days ?? DEF.days }; }   // the Terminal's chart follows the Terminal, never the chart window's own choice
-      localStorage.setItem(LS_KEY, JSON.stringify(o));
-    } catch { }
-  };
+  const save = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch { } };
+  // v1.20.54: one index everywhere - the chart starts on the Terminal's index / timeframe and follows it (and the Terminal follows
+  // a change made here). The address (?symbol=&interval=) still wins when the Terminal opens the chart window.
+  const termPick = () => { try { const o = JSON.parse(localStorage.getItem("oi-settings-v1") || "{}"); const g = k => Array.isArray(o["terminal." + k]) ? o["terminal." + k][0] : null; return { sym: g("symbol"), tf: Number(g("interval")) }; } catch { return {}; } };
   const dev = () => EMBED ? "embed" : isLandscape() ? "landscape" : isPhone() ? "mobile" : "desktop";
 
   function toast(msg) { const el = $("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(() => el.classList.remove("show"), 4000); }
@@ -631,8 +631,15 @@
   // ------------------------------------------------------------------ toolbar
   $("sym").value = S.sym; $("tf").value = String(S.tf); $("days").value = String(S.days); $("view").value = S.view;
   const reload = () => { S.sym = $("sym").value; S.tf = Number($("tf").value); S.days = Number($("days").value); save(); A = null; OPT = null; lastSide = null; showOpt(); load(); };
+  window.addEventListener("storage", e => {                  // the Terminal changed its index / timeframe (any tab, same browser)
+    if (e.key !== "oi-settings-v1") return;
+    const t = termPick(); let ch = false;
+    if (["NIFTY", "BANKNIFTY"].includes(t.sym) && t.sym !== S.sym) { $("sym").value = t.sym; ch = true; }
+    if ([1, 3, 5, 15, 30].includes(t.tf) && t.tf !== S.tf) { $("tf").value = String(t.tf); ch = true; }
+    if (ch) reload();
+  });
   window.addEventListener("message", e => {
-    const m = e.origin === location.origin && e.data && e.data.oiChartSync; if (!m || !EMBED) return;
+    const m = e.origin === location.origin && e.data && e.data.oiChartSync; if (!m) return;
     const sym = String(m.symbol || "").toUpperCase(), tf = Number(m.interval);
     if ((sym === S.sym || !["NIFTY", "BANKNIFTY"].includes(sym)) && (tf === S.tf || ![1, 3, 5, 15, 30].includes(tf))) return;
     if (["NIFTY", "BANKNIFTY"].includes(sym)) $("sym").value = sym;
