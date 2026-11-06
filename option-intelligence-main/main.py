@@ -447,6 +447,25 @@ def _rows_to_candles(rows):
     return out
 
 
+RECENT_DAYS = 4
+
+
+async def _hist_rows(key, interval, days, end):
+    """Completed sessions from `end - days` to `end` (cached for HIST_CACHE_TTL)."""
+    hk = (key, interval, days, end.isoformat())
+    hh = HIST_CACHE.get(hk)
+    if hh and time.time() - hh[0] < HIST_CACHE_TTL:
+        return list(hh[1])
+    start = end - timedelta(days=days)
+    hist = await upstox_get(f"{API_V3}/historical-candle/{key}/minutes/{interval}/{end.isoformat()}/{start.isoformat()}")
+    rows = _rows_to_candles((hist.get("data") or {}).get("candles"))
+    HIST_CACHE[hk] = (time.time(), rows)
+    if len(HIST_CACHE) > 40:
+        for old in sorted(HIST_CACHE, key=lambda k: HIST_CACHE[k][0])[:15]:
+            HIST_CACHE.pop(old, None)
+    return list(rows)
+
+
 async def fetch_candles(key, interval, days):
     """Historical + today's intraday candles, merged, ascending, de-duplicated.
 
@@ -457,18 +476,17 @@ async def fetch_candles(key, interval, days):
     if hit and time.time() - hit[0] < CANDLE_CACHE_TTL:
         return hit[1]
     end = ist_now().date()
-    start = end - timedelta(days=days)
-    hk = (key, interval, days, end.isoformat())
-    hh = HIST_CACHE.get(hk)
-    if hh and time.time() - hh[0] < HIST_CACHE_TTL:
-        hist_rows = hh[1]
-    else:
-        hist = await upstox_get(f"{API_V3}/historical-candle/{key}/minutes/{interval}/{end.isoformat()}/{start.isoformat()}")
-        hist_rows = _rows_to_candles((hist.get("data") or {}).get("candles"))
-        HIST_CACHE[hk] = (time.time(), hist_rows)
-        if len(HIST_CACHE) > 40:
-            for old in sorted(HIST_CACHE, key=lambda k: HIST_CACHE[k][0])[:15]:
-                HIST_CACHE.pop(old, None)
+    hist_rows = await _hist_rows(key, interval, days, end)
+    # v1.20.55: Upstox's historical endpoint can leave out the most recent session for some date ranges (seen after
+    # midnight IST: the 10-day request ended a day early while 5/7/9-day ones did not), and the analysis then silently
+    # ran on yesterday's picture. A short recent range is fetched as well and listed first, so its bars win.
+    if days > RECENT_DAYS:
+        try:
+            hist_rows = await _hist_rows(key, interval, RECENT_DAYS, end) + hist_rows
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+            logger.info("Recent candles unavailable for %s: %s", key, str(exc.detail)[:160])
     rows = list(hist_rows)
     intra_ok = False
     for attempt in range(2):                 # v1.20.52: one retry - a missed intraday call left today's futures volume at 0
