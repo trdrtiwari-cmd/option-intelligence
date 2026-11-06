@@ -241,4 +241,18 @@ $("refreshEvery").addEventListener("change", startTimer);
 function resumeNow() { if (document.visibilityState === "visible") { summaryBusy = false; loadSummary(); startTimer(); } }
 document.addEventListener("visibilitychange", resumeNow); window.addEventListener("pageshow", resumeNow); window.addEventListener("online", resumeNow);
 try { const saved = localStorage.getItem("oi-dc-refresh"); if (saved && [...$("refreshEvery").options].some(o => o.value === saved)) $("refreshEvery").value = saved; } catch {}
+// v1.20.55: one index everywhere - the Data page shows the Terminal's index, follows it, and a change here moves the Terminal too
+const termSym = () => { try { const e = JSON.parse(localStorage.getItem("oi-settings-v1") || "{}")["terminal.symbol"]; return Array.isArray(e) ? e[0] : null; } catch { return null; } };
+function followTerminal() {
+  const t = termSym();
+  if (["NIFTY", "BANKNIFTY"].includes(t) && $("symbol").value !== t && document.activeElement !== $("symbol")) {
+    $("symbol").value = t; $("universe").value = t === "BANKNIFTY" ? "niftybank" : "nifty50"; lastGraph = null; fitKey = null;
+    try { window.OIPrefs && window.OIPrefs.set("dashboard.symbol", t); window.OIPrefs && window.OIPrefs.set("dashboard.universe", $("universe").value); } catch {}
+    return true;
+  }
+  return false;
+}
+followTerminal();
+$("symbol").addEventListener("change", () => { try { window.OIPrefs && window.OIPrefs.set("terminal.symbol", $("symbol").value); } catch {} });
+window.addEventListener("storage", e => { if (e.key === "oi-settings-v1" && followTerminal()) loadSummary(); });
 initGraph(); startTimer(); loadSummary();

@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.54";
+const FRONTEND_VERSION="1.20.55";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -1823,3 +1823,15 @@ window.addEventListener("storage",e=>{
     if(tf&&[...$("interval").options].some(x=>x.value===tf)&&$("interval").value!==tf&&document.activeElement!==$("interval")){$("interval").value=tf;$("interval").dispatchEvent(new Event("change",{bubbles:true}))}
   }catch{}
 });
+window.addEventListener("storage",e=>{
+  if(e.key!=="oi-settings-v1"||!e.newValue)return;
+  try{const v=(JSON.parse(e.newValue)["terminal.symbol"]||[])[0];
+    if(["NIFTY","BANKNIFTY"].includes(v)&&$("symbol").value!==v&&document.activeElement!==$("symbol")){$("symbol").value=v;$("symbol").dispatchEvent(new Event("change",{bubbles:true}))}}catch{}
+});
+// v1.20.55: self-check every 30 s - anything showing another index than the Terminal is reported (Download for Claude / review link)
+setInterval(()=>{try{
+  const rep=window.__oiIssues&&window.__oiIssues.report;if(!rep)return;const s=getSymbol();
+  if(paperSelected&&paperSelected.symbol!==s)rep("warning",`MIXED INDEX: Terminal on ${s} but the selected option is ${paperSelected.symbol} ${paperSelected.strike} ${paperSelected.type}`,"",true);
+  const fr=document.querySelector("#confirmChartSlot iframe");const cs=fr&&fr.contentDocument&&fr.contentDocument.getElementById("sym");
+  if(cs&&cs.value&&cs.value!==s)rep("warning",`MIXED INDEX: Terminal on ${s} but its chart shows ${cs.value}`,"",true);
+}catch{}},30000);
