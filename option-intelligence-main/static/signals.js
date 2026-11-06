@@ -294,15 +294,16 @@ $('monExport').onclick = async () => {
   const day = $('endDate').value || new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
   btn.disabled = true; msg('Preparing the review file… (up to a minute if the replay has to run)');
   try {
-    const r = await fetch('/api/monitor/export?day=' + encodeURIComponent(day), {credentials: 'same-origin'});
+    const per = $('monPeriod') ? $('monPeriod').value : 'day', word = per === 'day' ? 'day' : per;
+    const r = await fetch('/api/monitor/export?day=' + encodeURIComponent(day) + '&period=' + per, {credentials: 'same-origin'});
     if (!r.ok) throw Error((await r.text()).slice(0, 200) || r.status);
-    const text = await r.text(), name = `strategy-review-${day}.json`;
+    const text = await r.text(), name = per === 'day' ? `strategy-review-${day}.json` : `strategy-review-${per}-to-${day}.json`;
     const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
     const hasFs = !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem);
-    if (window.oiSave && (!native || hasFs)) { msg((await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this day'); return; }
+    if (window.oiSave && (!native || hasFs)) { msg((await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this ' + word); return; }
     let copied = false;
-    try { await navigator.clipboard.writeText(text + '\n\nreview this day'); copied = true; } catch {}
-    if (!copied) { const ta = document.createElement('textarea'); ta.value = text + '\n\nreview this day'; document.body.appendChild(ta); ta.select();
+    try { await navigator.clipboard.writeText(text + '\n\nreview this ' + word); copied = true; } catch {}
+    if (!copied) { const ta = document.createElement('textarea'); ta.value = text + '\n\nreview this ' + word; document.body.appendChild(ta); ta.select();
       try { copied = document.execCommand('copy'); } catch {} ta.remove(); }
     msg(copied ? `Copied the ${day} review data (${Math.round(text.length / 1024)} KB). Open a Claude chat, long-press → Paste, send.`
                : 'Could not copy here - open this page in Chrome and press Download for Claude there.');
@@ -333,7 +334,7 @@ function noteHint(e, st) {            // v1.20.10: say why there is no AI note i
 }
 
 
-// v1.20.36: save the AI (Gemini / Claude) review shown above, plus the findings of the same day, as a text file
+// v1.20.37: save the AI (Gemini / Claude) review shown above, plus the findings of the same day, as a text file
 $('monReport').onclick = async () => {
   const i = +($('monReviewPick').value || 0), r = monReviews[i];
   if (!r) { $('monSaved').textContent = 'No AI review yet - press "Run review now" first.'; return; }

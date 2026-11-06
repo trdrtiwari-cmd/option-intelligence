@@ -1,4 +1,4 @@
-// v1.20.36: open / close for large tables. Every table with more than 5 rows gets a small "Hide table · N rows" / "Show table · N rows"
+// v1.20.37: open / close for large tables. Every table with more than 5 rows gets a small "Hide table · N rows" / "Show table · N rows"
 // button above it; the choice is remembered per table on this device. Tables filled later (by refreshes or Diagnostics runs) are
 // picked up automatically. Nothing else on the page moves.
 (function () {

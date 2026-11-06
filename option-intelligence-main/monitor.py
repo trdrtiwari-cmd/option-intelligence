@@ -818,10 +818,79 @@ def stored_context(db_path, day, lock=None):
     return run()
 
 
-def chat_bundle(ctx):
-    """File to upload into a Claude chat: the instructions plus the day's data, so the subscription does the review at no API cost."""
+def chat_bundle(ctx, period="day"):
+    """File to upload into a Claude chat: the instructions plus the data, so the subscription does the review at no API cost."""
+    if period in ("week", "month"):
+        return {"how_to_use": f"Upload this file in a Claude chat and write: review this {period}. Claude follows 'instructions' using only 'data'.",
+                "instructions": SYSTEM_PERIOD_REVIEW, "data": ctx}
     return {"how_to_use": "Upload this file in a Claude chat and write: review this day. Claude follows 'instructions' using only 'data'.",
             "instructions": SYSTEM_REVIEW, "data": ctx}
+
+
+# v1.20.37: weekly / monthly review file
+SYSTEM_PERIOD_REVIEW = ("You are reviewing a WEEK or MONTH of an intraday options signal strategy (NIFTY / BANKNIFTY, ITM options 2 strikes in "
+                        "the money, stop at least 1.5 ATR, entry windows 09:45-12:00 and 14:30-15:00, square-off 15:20; each index has its own "
+                        "strategy: Pullback, Opening Range Breakout 30 min or Off). The data holds: 'summary' (all closed trades: points, ₹, win "
+                        "rate, drawdown), 'by_day', 'by_symbol', 'by_side', 'by_time', 'by_setup' (timeframe / mode), the trades, the monitor's "
+                        "findings and AI reviews of each day, the rules that blocked setups on the signal board over the period, the latest "
+                        "Diagnostics run if one was made, and the app's current settings. Write for the owner, in plain English, under 600 words:\n"
+                        "0. Problems the app found ('checks'): one line each, skip if empty.\n"
+                        "1. Results: trades, win rate, net points and ₹, best and worst day, biggest drawdown, how many days made the owner's "
+                        "₹2,000 goal. Is the profit spread over many days or carried by one or two?\n"
+                        "2. Where the losses came from (symbol, side, time of day, exit type, strategy) - patterns that repeat on several days.\n"
+                        "3. Missed opportunities: which rules blocked setups that would have paid, and whether that held on several days.\n"
+                        "4. Suggested changes, ranked, max 5: exact setting, evidence (with numbers from the data), risk. Prefer 'keep' when the "
+                        "evidence is one or two days or under 30 trades.\n"
+                        "5. What to watch next week / month.\n"
+                        "Keep the stop at least 1.5 ATR. Do not promise profits." + STRICT_RULES)
+
+
+def _slot(t):
+    t = str(t or "")[11:16]
+    return ("09:15-09:45" if t < "09:45" else "09:45-10:30" if t < "10:30" else "10:30-12:00" if t < "12:00"
+            else "12:00-14:30" if t < "14:30" else "14:30-15:30") if t else "?"
+
+
+def period_context(period, start, end, rows, summarize, events_, reviews_, gate_stats, board_missed, diag=None):
+    """Compact JSON for a weekly / monthly review. `summarize` is signal_exits.summarize (results per day / group + total)."""
+    def group_by(key):
+        g = {}
+        for r in rows:
+            g.setdefault(key(r), []).append(r)
+        return {k: summarize(v, "day")["total"] for k, v in sorted(g.items(), key=lambda x: str(x[0]))}
+    per_day = summarize(rows, "day")["periods"] if rows else []
+    day_rs = [p.get("net_rs") for p in per_day if p.get("net_rs") is not None]
+    kinds = {}
+    for e in events_:
+        kinds[e.get("kind")] = kinds.get(e.get("kind"), 0) + 1
+    missed = sorted([e for e in events_ if e.get("kind") == "MISSED"], key=lambda e: -float(((e.get("detail") or {}).get("points") or 0)))
+    eod = {}
+    for rv in sorted(reviews_, key=lambda r: str(r.get("created_at") or "")):
+        if rv.get("text") and (rv.get("kind") == "eod" or rv.get("day") not in eod):
+            eod[rv.get("day")] = {"kind": rv.get("kind"), "model": rv.get("model"), "text": str(rv.get("text"))[:1500]}
+    tr = lambda r: {k: r.get(k) for k in ("session_date", "generated_at", "symbol", "interval", "mode", "side", "option_name", "score",
+                                          "trade_status", "net_pnl_points", "net_pnl_rs", "peak_points", "worst_points", "exit_reason")}
+    return {
+        "period": period, "start": start, "end": end,
+        "summary": summarize(rows, "day")["total"] if rows else {"signals": 0},
+        "rupees": {"days_with_trades": len(day_rs), "total": round(sum(day_rs), 0) if day_rs else None,
+                   "best_day": round(max(day_rs), 0) if day_rs else None, "worst_day": round(min(day_rs), 0) if day_rs else None,
+                   "days_at_2000": sum(1 for x in day_rs if x >= 2000), "losing_days": sum(1 for x in day_rs if x < 0)},
+        "by_day": per_day[:31],
+        "by_symbol": group_by(lambda r: r.get("symbol")),
+        "by_side": group_by(lambda r: r.get("side")),
+        "by_time": group_by(lambda r: _slot(r.get("generated_at"))),
+        "by_setup": group_by(lambda r: f"{r.get('symbol')} {r.get('interval')}m {r.get('mode')}"),
+        "by_weekday": group_by(lambda r: __import__("datetime").date.fromisoformat(str(r.get("session_date"))).strftime("%a") if r.get("session_date") else "?"),
+        "trades": [tr(r) for r in rows][:250],
+        "findings_count": kinds,
+        "biggest_missed_moves": [{"day": e.get("day"), "title": e.get("title"), "blocked_by": (e.get("detail") or {}).get("blocked_by")} for e in missed[:25]],
+        "losses_and_causes": [{"day": e.get("day"), "title": e.get("title")} for e in events_ if e.get("kind") == "LOSS"][:40],
+        "blocking_rules": (gate_stats or [])[:15],
+        "not_bought_but_paid": [{"title": m["title"], "blocked_by": (m.get("detail") or {}).get("blocked_by")} for m in board_missed][:25],
+        "daily_reviews": eod,
+        "latest_diagnostics": diag,
+    }
 
 
 def note_prompt(ev):

@@ -380,3 +380,26 @@ def test_consistency_checks_live_state():
               "PAGE ERRORS: 1", "FAILED REQUESTS: 1"):
         assert k in c, k
     assert "PAGE (info)" not in c
+
+
+def test_period_context_week():
+    import monitor as mon
+    import signal_exits as sx
+    rows = [
+        {"session_date": "2026-11-02", "generated_at": "2026-11-02T10:05:00+05:30", "symbol": "NIFTY", "interval": 5, "mode": "standard", "side": "CE",
+         "trade_status": "TARGET", "net_pnl_points": 26.0, "gross_pnl_points": 30.0, "net_pnl_rs": 2100.0, "exit_time": "2026-11-02T10:40:00+05:30"},
+        {"session_date": "2026-11-03", "generated_at": "2026-11-03T14:35:00+05:30", "symbol": "BANKNIFTY", "interval": 5, "mode": "standard", "side": "PE",
+         "trade_status": "STOP", "net_pnl_points": -24.0, "gross_pnl_points": -20.0, "net_pnl_rs": -1300.0, "exit_time": "2026-11-03T14:50:00+05:30"},
+        {"session_date": "2026-11-04", "generated_at": "2026-11-04T11:00:00+05:30", "symbol": "NIFTY", "interval": 5, "mode": "standard", "side": "PE",
+         "trade_status": "TRAIL", "net_pnl_points": 10.0, "gross_pnl_points": 14.0, "net_pnl_rs": 600.0, "exit_time": "2026-11-04T11:30:00+05:30"}]
+    evs = [{"day": "2026-11-03", "kind": "MISSED", "title": "Missed CE +90", "detail": {"points": 90, "blocked_by": ["Entry time window"]}},
+           {"day": "2026-11-03", "kind": "LOSS", "title": "Stop on BANKNIFTY PE"}]
+    rvs = [{"day": "2026-11-03", "kind": "intraday", "text": "early"}, {"day": "2026-11-03", "kind": "eod", "text": "end of day review"}]
+    c = mon.period_context("week", "2026-10-31", "2026-11-06", rows, sx.summarize, evs, rvs, [], [], None)
+    assert c["summary"]["closed"] == 3 and c["summary"]["net_points"] == 12.0
+    assert c["rupees"] == {"days_with_trades": 3, "total": 1400.0, "best_day": 2100.0, "worst_day": -1300.0, "days_at_2000": 1, "losing_days": 1}
+    assert c["by_symbol"]["BANKNIFTY"]["net_points"] == -24.0 and c["by_side"]["CE"]["wins"] == 1
+    assert c["by_time"]["14:30-15:30"]["closed"] == 1 and c["by_weekday"]["Mon"]["closed"] == 1
+    assert c["daily_reviews"]["2026-11-03"]["text"] == "end of day review" and c["biggest_missed_moves"][0]["title"] == "Missed CE +90"
+    b = mon.chat_bundle({"x": 1}, "month")
+    assert "review this month" in b["how_to_use"] and b["instructions"] == mon.SYSTEM_PERIOD_REVIEW

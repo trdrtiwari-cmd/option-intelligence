@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.36"
+APP_VERSION = "1.20.37"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2417,21 +2417,63 @@ async def _terminal_snapshot(day):
 
 
 @app.post("/api/monitor/export")
-async def monitor_export_post(request: Request, day: str = "", fresh: int = 0):
+async def monitor_export_post(request: Request, day: str = "", fresh: int = 0, period: str = "day"):
     """Same file, plus what the page itself shows (chart trendlines, S/R map, selected option, chart view) sent by the terminal."""
     try:
         client = await request.json()
     except Exception:
         client = None
-    return await _monitor_export_impl(request, day, fresh, client if isinstance(client, dict) else None)
+    return await _monitor_export_impl(request, day, fresh, client if isinstance(client, dict) else None, period)
 
 
 @app.get("/api/monitor/export")
-async def monitor_export(request: Request, day: str = "", fresh: int = 0):
-    return await _monitor_export_impl(request, day, fresh, None)
+async def monitor_export(request: Request, day: str = "", fresh: int = 0, period: str = "day"):
+    return await _monitor_export_impl(request, day, fresh, None, period)
 
 
-async def _monitor_export_impl(request, day="", fresh=0, client=None):
+def _latest_diagnostics_summary():
+    """The newest finished Diagnostics run (kept in memory until the server restarts), compacted for a period review."""
+    done = [j for j in DIAG_JOBS.values() if j.get("status") == "done" and j.get("report")]
+    if not done:
+        return None
+    out = []
+    for j in sorted(done, key=lambda j: j.get("created", 0), reverse=True)[:2]:
+        r = j["report"]
+        p = r.get("params") or {}
+        out.append({"symbol": p.get("symbol"), "mode": p.get("mode"), "interval": p.get("interval"),
+                    "days": f"{(p.get('days') or [''])[0]} - {(p.get('days') or [''])[-1]}", "indicator_changes": p.get("indicator_changes"),
+                    "live_trail": r.get("live_trail"), "rupees": (r.get("rupees") or {}).get("rows"),
+                    "verdict": [v.get("text") for v in (r.get("verdict") or [])][:14]})
+    return out
+
+
+async def _period_export(request, day, period, client):
+    """v1.20.37: weekly (last 7 days) / monthly (last 30 days) review file ending on `day`."""
+    end_d = datetime.strptime(day, "%Y-%m-%d").date()
+    start = (end_d - timedelta(days=6 if period == "week" else 29)).isoformat()
+    rows = (await get_signal_log(start, day, "", 20000))["rows"]
+    board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, start, day, "", "", 20000, SIGNAL_LOG_LOCK)
+    evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, start, day, "", 2000, SIGNAL_LOG_LOCK)
+    rvs = await asyncio.to_thread(mon.reviews, SIGNAL_LOG_DB, start, day, 200, SIGNAL_LOG_LOCK)
+    ctx = mon.period_context(period, start, day, rows, sx.summarize, [e for e in evs if e["kind"] != "SUGGESTION"], rvs,
+                             mon.board_gate_stats(board), mon.missed_from_board(board), _latest_diagnostics_summary())
+    try:
+        ctx["terminal"] = await _terminal_snapshot(ist_now().date().isoformat())
+    except Exception as exc:
+        ctx["terminal"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    if client:
+        ctx["page"] = json.loads(json.dumps(client, default=str)[:20000]) if len(json.dumps(client, default=str)) <= 20000 else {"note": "page snapshot too large"}
+    try:
+        checks = mon.consistency_checks(ctx)
+    except Exception as exc:
+        checks = [f"checks failed: {exc}"[:120]]
+    ctx = {"checks": checks, **ctx}
+    blob = json.dumps(mon.chat_bundle(ctx, period), default=str, ensure_ascii=False, separators=(",", ":"))
+    return Response(blob, media_type="application/json",
+                    headers={"Content-Disposition": f"attachment; filename=strategy-review-{period}-{start}_to_{day}.json", "Cache-Control": "no-store"})
+
+
+async def _monitor_export_impl(request, day="", fresh=0, client=None, period="day"):
     """v1.20.1 free review: one JSON file (instructions + the day's trades, losses and causes, missed moves, replay, suggestions)
     to upload in a Claude chat. Uses the data saved with that day's latest review; builds it now for today (or with fresh=1)."""
     _need_user(request)
@@ -2440,6 +2482,10 @@ async def _monitor_export_impl(request, day="", fresh=0, client=None):
         datetime.strptime(day, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(400, "day must be YYYY-MM-DD")
+    if period in ("week", "month"):
+        return await _period_export(request, day, period, client)
+    if period != "day":
+        raise HTTPException(400, "period must be day, week or month")
     ctx = None if (fresh or day == ist_now().date().isoformat()) else await asyncio.to_thread(mon.stored_context, SIGNAL_LOG_DB, day, SIGNAL_LOG_LOCK)
     if ctx is None:
         sym = _monitor_combo()[0]

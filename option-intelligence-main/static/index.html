@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.36">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.36">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.37">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.37">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 </head>
@@ -31,7 +31,7 @@
     <label title="How far back a chart pattern may start before it can confirm a signal (owner setting)">Pattern window<select id="patternMin"><option value="60">1 hour</option><option value="75">1 h 15 min</option><option value="90" selected>1 h 30 min</option><option value="105">1 h 45 min</option><option value="120">2 hours</option></select></label><label>Reconfirm hold<select id="reconfirmSec" title="A new CE/PE setup stays PENDING until it has held this long with price not moving against it"><option value="0">Off</option><option value="30">30 s</option><option value="60" selected>60 s</option><option value="90">90 s</option><option value="120">2 min</option><option value="180">3 min</option><option value="300">5 min</option></select></label>
     <label>Alert sound<select id="alertSound"><option value="1" selected>On</option><option value="0">Off</option></select></label>
     <button id="enablePush" class="secondary" type="button">Enable push alerts</button><label>Notify me for<select id="pushType"><option value="all">All signal changes</option><option value="confirmed">Confirmed buy signals only</option></select></label><a class="button secondary" href="/notifications">Notification history</a>
-    <button id="claudeExport" class="secondary" title="Download the terminal state, today's signals, findings and the 10-day replay for a Claude review">Download for Claude</button><button id="testAlert" class="secondary" title="Plays the beep, asks for browser notifications and sends a test message to Telegram / ntfy / email if configured">Test alert</button>
+    <button id="claudeExport" class="secondary" title="Download the terminal state, today's signals, findings and the 10-day replay for a Claude review">Download for Claude</button><select id="claudePeriod" title="Period of the review file" style="margin-left:6px"><option value="day">Day</option><option value="week">Week (7 days)</option><option value="month">Month (30 days)</option></select><button id="testAlert" class="secondary" title="Plays the beep, asks for browser notifications and sends a test message to Telegram / ntfy / email if configured">Test alert</button>
     <button id="refreshBtn">Refresh data</button>
     <span id="lastUpdated" class="sub">Waiting for data</span>
     <span id="alertChannels" class="sub"></span><div id="pushStatus" class="sub" style="flex-basis:100%;margin-top:4px"></div>
@@ -259,6 +259,6 @@
   <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/trendlines.js?v=1.20.36"></script><script src="/static/savefile.js?v=1.20.36"></script><script src="/static/boot.js?v=1.20.36"></script><script src="/static/sync.js?v=1.20.36" data-next="/static/app.js?v=1.20.36"></script>
-<script src="/static/mobile.js?v=1.20.36" defer></script><script src="/static/tables.js?v=1.20.36" defer></script>
+<script src="/static/trendlines.js?v=1.20.37"></script><script src="/static/savefile.js?v=1.20.37"></script><script src="/static/boot.js?v=1.20.37"></script><script src="/static/sync.js?v=1.20.37" data-next="/static/app.js?v=1.20.37"></script>
+<script src="/static/mobile.js?v=1.20.37" defer></script><script src="/static/tables.js?v=1.20.37" defer></script>
 </body></html>
