@@ -1147,7 +1147,7 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
     days = sorted({cs[r["i"]]["_dt"].astimezone(IST).strftime("%Y-%m-%d") for r in replayed})
     random_stats = random_entry_baseline(cs, interval, horizon, cost, target, stop)
     import chart_patterns as _cpm
-    params = {"symbol": symbol, "interval": interval, "mode": mode, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
+    params = {"symbol": symbol, "interval": interval, "mode": mode, "score_min": score_min, "horizon_bars": horizon, "cost": cost, "target": target, "stop": stop,
               "pattern_minutes": _cpm._clean(pattern_minutes or _cpm.PATTERN_MINUTES),
               "indicator_values": __import__("indicators").tune_values(tune), "indicator_changes": __import__("indicators").tune_changes(tune),
               "days": days, "bars_evaluated": len(replayed)}

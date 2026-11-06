@@ -148,7 +148,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.39"
+APP_VERSION = "1.20.40"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -960,6 +960,14 @@ async def diagnostics_page():
     return FileResponse(BASE_DIR / "static" / "diagnostics.html", headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/api/diagnostics/live-settings")
+async def diagnostics_live_settings(request: Request):
+    """v1.20.40: the settings the live (background) signals use, so the Diagnostics page can warn before a run that differs."""
+    _need_user(request)
+    _s, iv, mode, score_min, _d = _poller_cfg()
+    return {"interval": iv, "mode": mode, "score_min": score_min}
+
+
 @app.post("/api/diagnostics/start")
 async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: int = 5, days: int = 30, mode: str = "standard",
                             cost: float = 4.0, target: int = 30, stop: int = 20, horizon: int = 12, score_min: int = 60, pattern_minutes: int = 0,
@@ -1036,11 +1044,13 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
                           live_plan=OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
                           progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
             rep["params"]["volume_source"] = result.get("volume_source")
+            mismatch = _diag_live_mismatch(rep, interval, mode, score_min)
             job.update(status="done", report=rep, progress=1.0, stage="Done")
-            try:
-                asyncio.run_coroutine_threadsafe(_store_rules_advice(sym, rep), loop_)
-            except Exception as exc:
-                logger.info("Rules advice not stored: %s", str(exc)[:120])
+            if not mismatch:
+                try:
+                    asyncio.run_coroutine_threadsafe(_store_rules_advice(sym, rep), loop_)
+                except Exception as exc:
+                    logger.info("Rules advice not stored: %s", str(exc)[:120])
         except Exception as exc:
             logger.warning("Diagnostics failed: %s", exc)
             job.update(status="error", error=f"{type(exc).__name__}: {str(exc)[:150]}")
@@ -1690,6 +1700,25 @@ def rules_mode(sym):
         return adv["mode"], (f"{adv['mode'].title()} - auto-advised by Diagnostics {adv.get('days', '')}: Strict {st.get('total', 0):+.0f} pts "
                              f"({st.get('n', 0)} trades), Balanced {bt.get('total', 0):+.0f} pts ({bt.get('n', 0)} trades)")
     return "balanced", "Balanced - auto (no Diagnostics run yet for this index; run one to get advice)"
+
+
+def _diag_live_mismatch(rep, interval, mode, score_min):
+    """v1.20.40: a Diagnostics run only describes the live signals when it uses the live timeframe, signal mode and minimum score
+    (the background alerts that log signals: ALERT_INTERVAL / ALERT_MODE / ALERT_SCORE_MIN). Records the live settings in the
+    report and, on a mismatch, puts a PROBLEM line first; Auto decision rules are then not updated from this run."""
+    _s, l_iv, l_mode, l_score, _d = _poller_cfg()
+    live = {"interval": l_iv, "mode": l_mode, "score_min": l_score}
+    rep.setdefault("params", {})["live_settings"] = live
+    run_ = {"interval": interval, "mode": mode, "score_min": score_min}
+    names = {"interval": "timeframe", "mode": "signal mode", "score_min": "minimum score"}
+    unit = lambda k, v: f"{v} min" if k == "interval" else str(v)
+    diff = [f"{names[k]} {unit(k, run_[k])} (live: {unit(k, live[k])})" for k in ("score_min", "mode", "interval") if run_[k] != live[k]]
+    rep["params"]["matches_live"] = not diff
+    if diff:
+        rep.setdefault("verdict", []).insert(0, {"level": "bad", "text":
+            "Settings differ from your live signals: this run used " + ", ".join(diff) + ". These results do not describe what your "
+            "live signals do, and Auto decision rules were NOT updated from this run. Run again with the live values to compare like with like."})
+    return bool(diff)
 
 
 async def _store_rules_advice(sym, rep):
@@ -2481,7 +2510,8 @@ def _latest_diagnostics_summary():
     for j in sorted(done, key=lambda j: j.get("created", 0), reverse=True)[:2]:
         r = j["report"]
         p = r.get("params") or {}
-        out.append({"symbol": p.get("symbol"), "mode": p.get("mode"), "interval": p.get("interval"),
+        out.append({"symbol": p.get("symbol"), "mode": p.get("mode"), "interval": p.get("interval"), "score_min": p.get("score_min"),
+                    "matches_live": p.get("matches_live"), "live_settings": p.get("live_settings"),
                     "days": f"{(p.get('days') or [''])[0]} - {(p.get('days') or [''])[-1]}", "indicator_changes": p.get("indicator_changes"),
                     "live_trail": r.get("live_trail"), "rupees": (r.get("rupees") or {}).get("rows"),
                     "verdict": [v.get("text") for v in (r.get("verdict") or [])][:14]})

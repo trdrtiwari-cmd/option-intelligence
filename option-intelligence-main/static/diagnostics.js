@@ -43,6 +43,23 @@
   if ($("tuneReset")) $("tuneReset").addEventListener("click", () => tuneSave({ reset: true }, "(reset)"));
   function fail(msg) { const b = $("errorBox"); b.textContent = msg; b.hidden = !msg; }
 
+  // v1.20.40: warn when the run's settings differ from the live signals (background alerts) or the Terminal's saved choice
+  let LIVE = null;
+  function liveWarn() {
+    const w = $("liveWarn"); if (!w) return;
+    const run = { score_min: String($("scoreMin") ? $("scoreMin").value : 60), mode: $("mode").value, interval: String($("interval").value) };
+    const names = { score_min: "minimum score", mode: "signal mode", interval: "timeframe" };
+    const msgs = [];
+    if (LIVE) for (const k of ["score_min", "mode", "interval"]) if (String(LIVE[k]) !== run[k])
+      msgs.push(`${names[k]} ${run[k]}${k === "interval" ? " min" : ""} (live signals: ${LIVE[k]}${k === "interval" ? " min" : ""})`);
+    let term = null; try { term = localStorage.getItem("oi-score-min-v2"); } catch {}
+    if (term && term !== run.score_min && !(LIVE && String(LIVE.score_min) !== run.score_min)) msgs.push(`minimum score ${run.score_min} (your Terminal: ${term})`);
+    w.textContent = msgs.length ? "⚠ This run will not match your live signals: " + msgs.join(", ") + ". Results won't describe your live trades and Auto decision rules won't be updated from it." : "";
+    w.hidden = !msgs.length;
+  }
+  ["scoreMin", "mode", "interval"].forEach(id => { if ($(id)) $(id).addEventListener("change", liveWarn); });
+  api("/api/diagnostics/live-settings").then(v => { LIVE = v; liveWarn(); }).catch(() => liveWarn());
+
   $("runBtn").addEventListener("click", async () => {
     fail(""); $("results").hidden = true;
     const p = new URLSearchParams({ symbol: $("symbol").value, interval: $("interval").value, days: $("days").value, mode: $("mode").value,
