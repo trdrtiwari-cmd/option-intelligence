@@ -1,0 +1,281 @@
+"""Diagnostics tests. Run: python tests/test_diagnostics.py"""
+import os, random, sys
+from datetime import datetime, timedelta
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+import diagnostics as dg, indicators as ind
+import test_scalp as S
+
+IST = ind.IST
+
+
+def c(o, h, l, cl, t=0):
+    return {"open": o, "high": h, "low": l, "close": cl}
+
+
+def test_first_touch_rules():
+    entry = 100.0
+    # PE (d=-1): price falls to 70 -> target 30 hit
+    assert dg.first_touch([c(100, 101, 69, 70)], entry, -1, 30, 20) == (30.0, "target")
+    # CE: both stop and target inside one candle -> stop counts first (conservative)
+    assert dg.first_touch([c(100, 135, 79, 100)], entry, 1, 30, 20) == (-20.0, "stop")
+    # neither hit -> time exit at the last close, signed by direction
+    assert dg.first_touch([c(100, 110, 95, 108), c(108, 112, 104, 110)], entry, 1, 30, 20) == (10.0, "time")
+    assert dg.first_touch([c(100, 110, 95, 108)], entry, -1, 30, 20) == (-8.0, "time")
+    # stop hit on the second candle after a partial move
+    assert dg.first_touch([c(100, 110, 95, 108), c(108, 109, 79, 85)], entry, 1, 30, 20) == (-20.0, "stop")
+    mfe, mae = dg.excursions([c(100, 112, 96, 110), c(110, 125, 90, 95)], entry, 1)
+    assert (mfe, mae) == (25.0, 10.0)
+
+
+def test_managed_exits():
+    c2 = lambda o, h, l, cl: {"open": o, "high": h, "low": l, "close": cl}
+    # trailing: best +30, then price gives back 20 -> stop at +10 locks the profit
+    assert dg.managed_exit([c2(100, 125, 99, 124), c2(124, 130, 118, 119), c2(119, 121, 100, 105)], 100, 1, 20, activate=20, trail=20) == (10.0, "trail")
+    assert dg.managed_exit([c2(100, 101, 75, 80)], 100, 1, 20, activate=20, trail=20) == (-20.0, "stop")
+    # PE direction mirrors CE
+    assert dg.managed_exit([c2(100, 101, 68, 70), c2(70, 90, 69, 85)], 100, -1, 20, activate=20, trail=20) == (12.0, "trail")
+    # scale out: half banked at +30, rest stopped at the trailing level
+    assert dg.managed_exit([c2(100, 132, 99, 130), c2(130, 135, 105, 110)], 100, 1, 20, trail=20, half_at=30) == (21.0, "trail")
+    assert dg.managed_exit([c2(100, 132, 99, 130), c2(130, 131, 128, 129)], 100, 1, 20, trail=20, half_at=30) == (29.5, "time")
+    # a stop on the very candle that would reach the first target counts as a loss (adverse first)
+    assert dg.managed_exit([c2(100, 135, 70, 100)], 100, 1, 20, trail=20, half_at=30) == (-20.0, "stop")
+
+
+def test_stats():
+    s = dg.stats([30, -20, 30, -20, 30])
+    assert s["n"] == 5 and s["win_rate"] == 60.0 and s["avg"] == 10.0 and s["pf"] == 2.25 and s["total"] == 50.0
+    assert dg.stats([]) == {"n": 0}
+
+
+def test_run_starts():
+    mk = lambda i, sig, failed=(): {"i": i, "signal": sig, "failed": list(failed), "side": "PE"}
+    rp = [mk(1, "WAIT"), mk(2, "WATCH_PE", ["A"]), mk(3, "WATCH_PE", ["A"]), mk(4, "CONFIRMED_PE"), mk(5, "CONFIRMED_PE"),
+          mk(6, "WATCH_PE", ["B"]), mk(7, "WATCH_PE", ["B", "C"]), mk(9, "CONFIRMED_PE")]
+    conf, near = dg.events_from(rp)
+    assert [r["i"] for r in conf] == [4, 9]                                   # run of 4-5 counts once; gap makes 9 a new run
+    assert [(r["i"], r["gate"]) for r in near] == [(2, "A"), (6, "B")]       # only one-failed-gate setups; 7 has two
+
+
+def staircase_days(n_days, seed):
+    rows = []
+    for d in range(n_days):
+        day = S.selloff([-20])
+        base = datetime(2026, 10, 5, 9, 15, tzinfo=IST) + timedelta(days=d)
+        for k, r in enumerate(day[:75]):
+            r = dict(r); r["time"] = (base + timedelta(minutes=5 * k)).isoformat(); r["volume"] = 0; rows.append(r)
+    return rows
+
+
+def test_end_to_end_on_trending_data_finds_signals():
+    rows = staircase_days(4, 1)
+    import indicators as ind
+    old = ind.FRESH_BREAK_BLOCK
+    ind.FRESH_BREAK_BLOCK = "0"      # the synthetic staircase signals are all fresh-breakdown bars; this test checks the report mechanics
+    try:
+        rep = dg.run(rows, mode="scalp", cost=2.0, live_window=False)
+        std = dg.run(rows, mode="standard", cost=2.0, live_window=False)
+    finally:
+        ind.FRESH_BREAK_BLOCK = old
+    assert rep["confirmed"]["count"] >= 4, rep["confirmed"]
+    assert rep["confirmed"]["stats"]["avg"] > 0, rep["confirmed"]["stats"]     # a staircase fall pays after a PE signal
+    assert rep["random_entries"]["n"] > 50
+    assert len(rep["strategies"]) == len(dg.STRATEGIES) + len(dg.ATR_STRATEGIES) and next(x for x in rep["cost_table"] if x["cost"] == 2)["avg"] == rep["confirmed"]["stats"]["avg"]
+    assert rep["trades"] and {"day", "time", "side", "pnl", "zone"} <= set(rep["trades"][0])
+    assert "Price zone vs signal side (dashboard's zone check)" in rep["groups"]
+    assert rep["grid"] and rep["verdict"] and all("level" in v and "text" in v for v in rep["verdict"])
+    assert std["confirmed"]["count"] < rep["confirmed"]["count"]               # standard mode takes far fewer entries on this data
+
+
+def _walk(seed, days=10):
+    rnd, price, rows = random.Random(seed), 22800.0, []
+    for d in range(days):
+        t = datetime(2026, 10, 5, 9, 15, tzinfo=IST) + timedelta(days=d)
+        for k in range(75):
+            o = price; price += rnd.gauss(0, 9)
+            rows.append({"time": (t + timedelta(minutes=5 * k)).isoformat(), "open": o, "high": max(o, price) + rnd.uniform(0, 5),
+                         "low": min(o, price) - rnd.uniform(0, 5), "close": price, "volume": 0})
+    return rows
+
+
+def test_random_walk_has_no_edge():
+    """A statistical test cannot be exact for one seed (about 1 in 40 noise runs looks 'significant'), so look at several seeds:
+    the average edge over random entries must be ~0 and 'statistically real' may be claimed at most rarely."""
+    flagged, edges = 0, []
+    for seed in range(1, 13):        # v1.19.1: the stricter filters give ~10-18 signals per walk, so more walks are averaged
+        rep = dg.run(_walk(seed), mode="scalp", cost=4.0)
+        b, r = rep["confirmed"]["stats"], rep["random_entries"]
+        if b.get("n", 0) >= 8:
+            edges.append(b["avg"] - r["avg"])
+        flagged += any(v["level"] == "good" and "statistically real" in v["text"] for v in rep["verdict"])
+        if b.get("n", 0) >= 8:
+            assert any("random entries" in v["text"] for v in rep["verdict"])
+    mean_edge = sum(edges) / len(edges)
+    print("random walks: mean edge over random entries %+.2f pts, flagged %d of 6" % (mean_edge, flagged))
+    assert abs(mean_edge) < 4.0 and flagged <= 2
+
+
+def test_no_look_ahead():
+    rows = staircase_days(3, 2)
+    full_cs, full = dg.replay(rows, mode="scalp")
+    cut = len(rows) - 40
+    part_cs, part = dg.replay(rows[:cut], mode="scalp")
+    f = {r["i"]: (r["signal"], tuple(r["failed"]), r["score"]) for r in full}
+    p = {r["i"]: (r["signal"], tuple(r["failed"]), r["score"]) for r in part}
+    assert p and all(f[i] == v for i, v in p.items()), "signals on past bars must not depend on later candles"
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn(); print("ok", name)
+    print("all diagnostics tests passed")
+
+
+def test_atr_trailing_keeps_minimum_stop():
+    # v1.19.6: ATR trailing never stops out tighter than 1.5 ATR before activation
+    path = [{"open": 100, "high": 101, "low": 100 - 1.4 * 10, "close": 99}, {"open": 99, "high": 99, "low": 80, "close": 80}]
+    for name, fn in dg.ATR_STRATEGIES:
+        assert fn(path, 100.0, 1, 10.0) == -15.0, name
+
+
+def _rising_day(n=60, step=4.0):
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 11, 5, 9, 15, tzinfo=dg.IST)
+    cs, p = [], 24000.0
+    for k in range(n):
+        o = p; c = p + step
+        cs.append({"_dt": t0 + timedelta(minutes=5 * k), "open": o, "high": c + 1, "low": o - 1, "close": c})
+        p = c
+    return cs
+
+
+def test_trend_day_whatif_is_causal():
+    cs = _rising_day()
+    trig = "Pullback-and-resume trigger (retest holds)"
+    rep = [{"i": i, "signal": "WATCH_CE", "side": "CE", "atr": 10.0, "score": 80, "failed": [trig]} for i in range(5, 55)]
+    ev = dg.trend_day_events(cs, rep, "base", interval=5)
+    assert ev, "a steady trend with proven setups must produce trend-day entries"
+    first = ev[0]["i"]
+    # proofs need 1.5 ATR = 15 pts -> 4 bars each; the 2nd proof starts at bar 8 and is decided by bar ~12, so no entry before that
+    assert first >= 12 and ev[0]["trend_proofs"] >= 2
+    assert len(ev) <= 3 and all(b["i"] > a["i"] for a, b in zip(ev, ev[1:]))
+    # a gate that is NOT relaxable blocks everything
+    rep2 = [dict(r, failed=[trig, "Higher timeframe agrees"]) for r in rep]
+    assert dg.trend_day_events(cs, rep2, "base", interval=5) == []
+    # outside 12:00-14:30 the entry window stays a hard block
+    rep3 = [dict(r, failed=[trig, "Entry time window (live app)"]) for r in rep]
+    ev3 = dg.trend_day_events(cs, rep3, "base", interval=5)
+    for e in ev3:
+        m = cs[e["i"]]["_dt"].astimezone(dg.IST); mm = m.hour * 60 + m.minute + 5
+        assert 720 <= mm < 870
+
+
+def test_window_slots_split():
+    cs = _rising_day(75)                      # 09:15 ... 15:25 rising
+    g = "Entry time window (live app)"
+    near = [{"i": i, "signal": "WATCH_CE", "side": "CE", "atr": 10.0, "score": 80, "failed": [g], "gate": g} for i in (1, 3, 40, 45, 70)]
+    ws = dg.window_slots(cs, near, 5, 12, 2.0, 30, 20)
+    by = {w["slot"].split(" ")[0]: w for w in ws}
+    assert by["09:15-09:45"]["trail"]["n"] == 2 and by["12:00-14:30"]["trail"]["n"] == 2
+    assert by["15:00-15:20"]["trail"]["n"] <= 1          # bar 70 = 15:05-15:10 close; entry path ends at the 15:20 square-off
+    assert all("verdict" in w for w in ws)
+
+
+def test_sr_reversal_and_features_run():
+    rows = staircase_days(5, 1)
+    rep = dg.run(rows, mode="scalp", cost=2.0, live_window=False)
+    assert "sr_reversal" in rep and not rep["sr_reversal"].get("error"), rep.get("sr_reversal")
+    assert "Signal of the day (same side)" in rep["groups"]
+    assert "Distance from support (CE) / resistance (PE) at entry" in rep["groups"]
+    for t in rep["trades"]:
+        assert "nth_today" in t and "sr_dist_atr" in t
+
+
+def test_sr_reversal_event_rule():
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 11, 5, 10, 0, tzinfo=dg.IST)
+    cs = [{"_dt": t0 + timedelta(minutes=5 * k), "open": 100, "high": 101, "low": 99, "close": 100} for k in range(10)]
+    cs[5] = {"_dt": cs[5]["_dt"], "open": 99.5, "high": 103, "low": 95.2, "close": 102.8}     # dips to support 95, closes strong
+    import diagnostics as d2
+    old = d2._sr_at
+    d2._sr_at = lambda *a, **k: {"supports": [{"price": 95.0, "strength": "Strong"}], "resistances": [{"price": 110.0, "strength": "Medium"}]}
+    try:
+        rep = [{"i": i, "signal": "WATCH_CE", "side": "CE", "atr": 4.0, "score": 60, "failed": []} for i in range(10)]
+        ev = d2.sr_reversal_events(cs, rep, 5, "NIFTY", "with_trend")
+        assert [e["i"] for e in ev] == [5] and ev[0]["side"] == "CE" and ev[0]["level"] == 95.0
+        rep_pe = [dict(r, side="PE") for r in rep]
+        assert d2.sr_reversal_events(cs, rep_pe, 5, "NIFTY", "with_trend") == []     # engine leans PE: no CE trade
+    finally:
+        d2._sr_at = old
+
+
+def test_orb_events_first_break_only():
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 11, 5, 9, 15, tzinfo=dg.IST)
+    cs = []
+    for k in range(40):
+        p = 100.0 if k < 6 else 100 + (k - 5) * 2.0          # flat 09:15-09:45, then rising
+        cs.append({"_dt": t0 + timedelta(minutes=5 * k), "open": p - 0.5, "high": p + 1, "low": p - 1, "close": p})
+    rep = [{"i": i, "signal": "WATCH_CE", "side": "CE", "atr": 2.0, "score": 70, "failed": []} for i in range(40)]
+    ev = dg.orb_events(cs, rep, 5, 15, "plain")
+    assert len(ev) == 1 and ev[0]["side"] == "CE"
+    m = ev[0]["i"]
+    assert cs[m]["_dt"].astimezone(dg.IST).hour * 60 + cs[m]["_dt"].astimezone(dg.IST).minute >= 9 * 60 + 30
+    assert dg.orb_events(cs, [dict(r, side="PE") for r in rep], 5, 15, "with_trend") == []
+
+
+def test_strong_trend_rsi_whatif():
+    import diagnostics as dg
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 11, 6, 9, 15, tzinfo=dg.IST)
+    cs = [{"_dt": t0 + timedelta(minutes=5 * i), "open": 100 + 3 * i, "high": 102 + 3 * i, "low": 99 + 3 * i, "close": 101 + 3 * i}
+          for i in range(60)]
+    rsi_lbl = "Momentum not overextended (RSI < 68 for CE)"
+    fresh = "Not a fresh breakout / breakdown bar (wait for the retest)"
+    rep = [{"i": 30, "side": "CE", "atr": 3.0, "rsi": 72.0, "vwap": 150.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},
+           {"i": 40, "side": "CE", "atr": 3.0, "rsi": 78.0, "vwap": 150.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},   # 75 < RSI <= 80
+           {"i": 45, "side": "CE", "atr": 3.0, "rsi": 72.0, "vwap": 150.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl, "Score ≥ 70"]},
+           {"i": 50, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 500.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl]},   # below VWAP
+           {"i": 55, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 150.0, "stretch_atr": 1.0, "signal": "WATCH_CE", "failed": [rsi_lbl, fresh]},
+           {"i": 57, "side": "CE", "atr": 3.0, "rsi": 70.0, "vwap": 150.0, "stretch_atr": 2.5, "signal": "WATCH_CE", "failed": [rsi_lbl, fresh]}]  # too stretched
+    assert [r["i"] for r in dg.strong_trend_events(cs, rep, "rsi")] == [30]
+    cont = dg.strong_trend_events(cs, rep, "continuation")
+    assert [r["i"] for r in cont] == [30, 40, 55] and cont[0]["trend_eff"] == 1.0
+    choppy = [dict(c, close=100 + (5 if k % 2 else 0)) for k, c in enumerate(cs)]
+    assert dg.strong_trend_events(choppy, rep, "rsi") == []
+
+
+def test_rupee_estimate():
+    import diagnostics as dg
+    rows = [{"day": "2026-11-02", "strat": {dg.TRAIL_NAME: 26.0}, "atr_grid": {"1.5/1.5": 20.0}},
+            {"day": "2026-11-02", "strat": {dg.TRAIL_NAME: -24.0}, "atr_grid": {"1.5/1.5": -24.0}},
+            {"day": "2026-11-04", "strat": {dg.TRAIL_NAME: 36.0}, "atr_grid": {"1.5/1.5": 26.0}}]
+    ru = dg.rupee_estimate(rows, ["2026-11-02", "2026-11-03", "2026-11-04"], "trail", 4.0, 65, 0.65, 60.0, goal=1500)
+    one, two = ru["rows"][0], ru["rows"][1]
+    # day 1: (30 x .65 x 65 - 60) + (-20 x .65 x 65 - 60) = 1207.5 - 905 = 302.5 ; day 3: 40 x .65 x 65 - 60 = 1630
+    assert one["total"] == round(302.5 + 1630) and one["days"] == 3 and one["avg_day"] == round((302.5 + 1630) / 3)
+    assert one["worst_day"] == 0 and one["best_day"] == 1630 and one["goal_days"] == 1 and one["trade_days"] == 2
+    assert two["total"] == round(2 * (302.5 + 1630)) and two["qty"] == 130
+    fixed = dg.rupee_estimate(rows, ["2026-11-02"], "t1.5", 4.0, 65, 0.65, 60.0)
+    assert fixed["rows"][0]["total"] == round((24 * .65 * 65 - 60) + (-20 * .65 * 65 - 60) + (30 * .65 * 65 - 60))
+
+
+def test_decision_flow_whatif():
+    import diagnostics as dg
+    T = dg.TRAIL_NAME
+    rows = [  # day, i, side, room, pattern -> kept / removed
+        {"day": "d1", "hhmm": "10:00", "i": 10, "side": "CE", "sr_room": 0.8, "pattern": "None", "pattern_side": None, "pattern_stage": "none", "strat": {T: 20}},
+        {"day": "d1", "hhmm": "10:30", "i": 16, "side": "CE", "sr_room": 0.9, "pattern": "Bull flag (forming)", "pattern_side": "CE", "pattern_stage": "forming", "strat": {T: -30}},
+        {"day": "d1", "hhmm": "11:00", "i": 22, "side": "CE", "sr_room": 0.9, "pattern": "Bull flag breakout (retest holding)", "pattern_side": "CE",
+         "pattern_stage": "breakout", "pattern_bars_ago": 2, "strat": {T: 25}},
+        {"day": "d2", "hhmm": "10:00", "i": 90, "side": "PE", "sr_room": 0.1, "pattern": "None", "pattern_side": None, "pattern_stage": "none", "strat": {T: -40}},
+        {"day": "d2", "hhmm": "10:10", "i": 92, "side": "PE", "sr_room": 0.4, "pattern": "None", "pattern_side": None, "pattern_stage": "none", "strat": {T: 10}},
+    ]
+    out = dg.decision_flow_whatif(rows)
+    assert out["kept"]["n"] == 2 and out["removed"]["n"] == 3 and out["removed"]["total"] == -60
+    whys = {r["time"]: r["why"] for r in out["removed_trades"]}
+    assert "re-entry" in whys["10:30"] and "room 0.1" in whys["10:00"] and "room 0.4" in whys["10:10"]
+    assert out["verdict"].startswith("the new rules help")
+    bal = dg.decision_flow_whatif(rows, "balanced")              # only room < 0.25 blocks
+    assert bal["kept"]["n"] == 4 and [r["time"] for r in bal["removed_trades"]] == ["10:00"]

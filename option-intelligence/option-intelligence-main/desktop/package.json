@@ -1,0 +1,35 @@
+{
+  "name": "option-intelligence-desktop",
+  "productName": "Option Intelligence",
+  "version": "1.20.43",
+  "description": "Option Intelligence for Windows - opens the live terminal",
+  "main": "main.js",
+  "author": "Option Intelligence",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis portable --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.optionintelligence.desktop",
+    "productName": "Option Intelligence",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["main.js", "preload.js", "offline.html", "app-url.json", "package.json"],
+    "win": { "icon": "build/icon.png", "artifactName": "OptionIntelligence-${version}-${arch}.${ext}" },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Option Intelligence",
+      "artifactName": "OptionIntelligence-Setup.${ext}"
+    },
+    "portable": { "artifactName": "OptionIntelligence-Portable.${ext}" }
+  }
+}

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Option Intelligence - connecting</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b1220;color:#dbe6f3;font:15px system-ui,Segoe UI,sans-serif}
+  .box{max-width:560px;padding:28px;border:1px solid #2b3d55;border-radius:14px;background:#142238;text-align:center}
+  h1{font-size:19px;margin:0 0 10px}p{color:#9aacc2;margin:8px 0}
+  button{margin:14px 4px 0;padding:9px 18px;border:0;border-radius:8px;background:#2f7cf6;color:#fff;font-weight:600;cursor:pointer}
+  button.sec{background:#233650}
+  input{width:100%;box-sizing:border-box;margin-top:10px;padding:9px 10px;border-radius:8px;border:1px solid #3a5271;background:#0b1220;color:#eaf1fb;font-size:14px}
+  small{color:#6f8299}.err{color:#ff8a8a}code{color:#cfe0f5}
+</style></head>
+<body><div class="box">
+  <h1 id="title">Connecting to Option Intelligence…</h1>
+  <p id="msg">The server could not be reached. It may be waking up (this can take up to a minute), or this PC may be offline.</p>
+  <p id="next">Trying again in <b id="sec">15</b> s</p>
+  <div id="addr" hidden>
+    <p>Site address (the one that opens your terminal in the browser):</p>
+    <input id="url" spellcheck="false" placeholder="https://your-app.onrender.com">
+    <p class="err" id="err"></p>
+    <button id="save">Open this address</button><button id="reset" class="sec">Use the built-in address</button>
+  </div>
+  <div><button id="retry">Try again now</button><button id="change" class="sec">Change site address</button></div>
+  <p><small id="why"></small></p>
+  <p><small>Opening: <code id="cur"></code></small></p>
+</div>
+<script>
+  const q = new URLSearchParams(location.search), url = q.get("url") || "", kind = q.get("kind") || "offline";
+  const $ = id => document.getElementById(id);
+  $("why").textContent = q.get("reason") ? q.get("reason") : "";
+  $("cur").textContent = url;
+  $("url").value = url;
+  const go = () => { if (url) location.href = url; };
+  const showAddr = () => { $("addr").hidden = false; $("next").hidden = true; clearInterval(timer); $("url").focus(); };
+  $("retry").onclick = go;
+  $("change").onclick = showAddr;
+  $("save").onclick = async () => {
+    $("err").textContent = "";
+    try { await window.oiDesktop.setUrl($("url").value); } catch (e) { $("err").textContent = String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ""); }
+  };
+  $("reset").onclick = () => window.oiDesktop.resetUrl();
+  let s = 15, timer = null;
+  if (kind === "address") {
+    $("title").textContent = "This address does not open your terminal";
+    $("msg").textContent = "The server answered, but not with Option Intelligence (for example \"Not Found\"). Check the address - it must be the same one you use in the browser.";
+    showAddr();
+  } else {
+    timer = setInterval(() => { s -= 1; $("sec").textContent = Math.max(0, s); if (s <= 0) { s = 15; if (navigator.onLine) go(); } }, 1000);
+  }
+</script>
+</body></html>

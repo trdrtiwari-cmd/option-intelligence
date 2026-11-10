@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: option-intelligence-new
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: UPSTOX_API_KEY
+        sync: false
+      - key: UPSTOX_API_SECRET
+        sync: false
+      - key: UPSTOX_REDIRECT_URI
+        sync: false
+      - key: UPSTOX_ACCESS_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SIGNUP_CODE
+        sync: false
+      - key: TRADINGVIEW_WEBHOOK_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: NTFY_TOPIC
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ALERT_EMAIL_TO
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        value: mailto:admin@example.com
+      - key: PUSH_OWNER_USER_ID
+        sync: false

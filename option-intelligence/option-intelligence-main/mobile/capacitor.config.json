@@ -1,0 +1,23 @@
+{
+  "appId": "app.optionintelligence.terminal",
+  "appName": "Option Intelligence",
+  "webDir": "www",
+  "backgroundColor": "#0b1220",
+  "server": {
+    "url": "https://option-intelligence-vqit.onrender.com",
+    "cleartext": false,
+    "allowNavigation": [
+      "*.upstox.com",
+      "api.upstox.com",
+      "account.upstox.com"
+    ]
+  },
+  "android": {
+    "backgroundColor": "#0b1220",
+    "allowMixedContent": false
+  },
+  "ios": {
+    "backgroundColor": "#0b1220",
+    "contentInset": "always"
+  }
+}
