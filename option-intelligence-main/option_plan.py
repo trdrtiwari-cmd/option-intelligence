@@ -295,7 +295,7 @@ def profit_plan(side, entry, atr, sr=None, pick=None, premium_trend=None, sl_atr
                                  + (f", gamma {gamma:.4f}" if gamma else "") + (f", theta {theta:.1f}/day → −{decay:.2f} over {c['hold_minutes']:g} min" if theta else "") + ")"})
         if premium_trend:
             pt = premium_trend
-            falling = pt.get("status") == "ok" and (pt.get("bear_score") or 0) > (pt.get("bull_score") or 0) and str(pt.get("regime_label")) in ("DOWNTREND", "BEARISH")
+            falling = pt.get("status") == "ok" and (pt.get("bear_score") or 0) > (pt.get("bull_score") or 0) and (str(pt.get("regime")) == "BEARISH" or str(pt.get("regime_label")) in ("DOWNTREND", "BEARISH", "LEANING BEARISH"))
             checks.append({"label": "Option premium not trending down", "pass": not falling,
                            "detail": (f"premium chart {pt.get('regime_label')} (bull {pt.get('bull_score')} / bear {pt.get('bear_score')})" if pt.get("status") == "ok"
                                       else "premium chart too short to read — not used")})

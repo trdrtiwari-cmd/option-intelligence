@@ -73,6 +73,14 @@ FALLBACK_NIFTY50 = [
     "TITAN", "TMPV", "TRENT", "ULTRACEMCO",
 ]
 
+# v1.20.66: built-in Nifty Bank list (12 stocks) so the BANKNIFTY breadth works with Upstox data only. It can be out of date after an
+# index rebalance - drop the current CSV into universes/ (see universes/README.txt) and it is used instead.
+FALLBACK_NIFTYBANK = [
+    "AUBANK", "AXISBANK", "BANKBARODA", "CANBK", "FEDERALBNK", "HDFCBANK", "ICICIBANK", "IDFCFIRSTB", "INDUSINDBK",
+    "KOTAKBANK", "PNB", "SBIN",
+]
+FALLBACK_LISTS = {"nifty50": FALLBACK_NIFTY50, "niftybank": FALLBACK_NIFTYBANK}
+
 UNIVERSES = {
     "nifty50": {"label": "Nifty 50", "file": "ind_nifty50list.csv"},
     "nifty100": {"label": "Nifty 100", "file": "ind_nifty100list.csv"},

@@ -143,11 +143,15 @@ async function loadConfig() {
     if ($('optOnePer')) $('optOnePer').value = cfg.one_per_side || 'off';
     if ($('optDayTarget')) $('optDayTarget').value = String(cfg.daily_target_rs ?? 0);
     if ($('optTrendEntry')) $('optTrendEntry').value = cfg.trend_entry || 'off';
+    if ($('optScoreModel')) $('optScoreModel').value = cfg.score_model || 'classic';
     if ($('optRules')) $('optRules').value = cfg.decision_rules || 'auto';
     if ($('optRulesNow') && cfg.decision_rules_now) $('optRulesNow').textContent = Object.entries(cfg.decision_rules_now).map(([k, v]) => `${k}: ${v.note}`).join(' · ');
     if ($('optStratNifty')) $('optStratNifty').value = cfg.strategy_nifty || 'pullback';
     if ($('optStratBank')) $('optStratBank').value = cfg.strategy_banknifty || 'off';
     if ($('optPaperMacd')) $('optPaperMacd').value = cfg.paper_macd || 'on';
+    if ($('optDeriv')) $('optDeriv').value = cfg.deriv_mode || 'record';
+    if ($('optMaxBuys')) $('optMaxBuys').value = String(cfg.max_buys_day ?? 0);
+    if ($('optEvents')) $('optEvents').value = cfg.event_days || '';
     $('optLine').textContent = `On WATCH / BUY the signal uses the option ${o.steps ?? 2} strike(s) ${o.moneyness === 'OTM' ? 'out of the money' : 'in the money'} from ATM on the signal side · ${o.lots ?? 1} lot(s) · charges ₹${o.charges_rs ?? 60} per trade · stop at least ${cfg.min_sl_atr ?? 1.5} ATR (${cfg.min_sl_points ?? 20} pts) · entries ${cfg.entry_windows || ''} IST${cfg.one_per_side === 'on' ? ' · only the first BUY per side each day' : ''}${cfg.daily_target_rs ? ` · stop for the day at ₹${Number(cfg.daily_target_rs).toLocaleString('en-IN')} profit` : ''}${cfg.trend_entry && cfg.trend_entry !== 'off' ? ' · strong-trend entries: ' + cfg.trend_entry : ''}.`;
   }
 }
@@ -189,10 +193,14 @@ async function saveAtr(reset) {
                           ...($('optOnePer') ? {opt_one_per_side: $('optOnePer').value} : {}),
                           ...($('optDayTarget') ? {opt_daily_target_rs: Number($('optDayTarget').value)} : {}),
                           ...($('optTrendEntry') ? {opt_trend_entry: $('optTrendEntry').value} : {}),
+                          ...($('optScoreModel') ? {opt_score_model: $('optScoreModel').value} : {}),
                           ...($('optRules') ? {opt_decision_rules: $('optRules').value} : {}),
                           ...($('optStratNifty') ? {opt_strategy_nifty: $('optStratNifty').value} : {}),
                           ...($('optStratBank') ? {opt_strategy_banknifty: $('optStratBank').value} : {}),
-                          ...($('optPaperMacd') ? {opt_paper_macd: $('optPaperMacd').value} : {})});
+                          ...($('optPaperMacd') ? {opt_paper_macd: $('optPaperMacd').value} : {}),
+                          ...($('optDeriv') ? {opt_deriv_mode: $('optDeriv').value} : {}),
+                          ...($('optMaxBuys') ? {opt_max_buys_day: Number($('optMaxBuys').value)} : {}),
+                          ...($('optEvents') ? {opt_event_days: $('optEvents').value} : {})});
   const keepAtr = cfg.custom ? {sl_atr: cfg.sl_atr, target_atr: cfg.target_atr} : {};
   const keepCost = $('costPts').value === '' ? {} : {cost_points: Number($('costPts').value)};
   const body = reset === 'opt' ? {...optBody(), ...keepAtr, ...keepCost} : reset ? optBody() : {...optBody(), sl_atr: $('slAtr').value === '' ? null : Number($('slAtr').value), target_atr: $('tgtAtr').value === '' ? null : Number($('tgtAtr').value),
@@ -232,7 +240,12 @@ $('exportXlsx').onclick = () => exportFile('xlsx');
 $('exportCsv').onclick = () => exportFile('csv');
 ['startDate', 'endDate', 'symbol'].forEach(id => $(id).addEventListener('change', load));
 loadConfig().then(load);
-setInterval(() => { if (document.visibilityState === 'visible') load(); }, 10000);
+let lastAutoLoad = Date.now();
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  if (window.__oiMarketOpen && !window.__oiMarketOpen() && Date.now() - lastAutoLoad < (window.__oiClosedWait || 900000)) return;   // v1.20.68: closed / holiday
+  lastAutoLoad = Date.now(); load();
+}, 10000);
 
 
 // ---- v1.20.0 Claude strategy monitor
@@ -294,26 +307,34 @@ $('monReview').onclick = async () => {
 
 // v1.20.5: the Android app's WebView ignores file downloads, so: share sheet (send straight to the Claude app) -> normal
 // download in a browser -> copy to clipboard (paste into a Claude chat). Every path tells you what happened.
+// v1.20.88: the message line ('monSaved') sits below the settings - off the screen on a phone - so a tap on Download looked dead.
+// Every step now also shows in the toast at the bottom of the screen.
+function monToast(t, ms) { if (window.oiToast) window.oiToast(t, ms || 9000); }
 $('monExport').onclick = async () => {
-  const btn = $('monExport'), msg = t => { $('monSaved').textContent = t; };
+  const btn = $('monExport'), msg = t => { $('monSaved').textContent = t; monToast(t, /^Preparing/.test(t) ? 90000 : 9000); };
   const day = $('endDate').value || new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
-  btn.disabled = true; msg('Preparing the review file… (up to a minute if the replay has to run)');
+  btn.disabled = true; $('monSaved').textContent = 'Preparing the review file…';
+  // v1.20.88: the first file of the day replays the last 10 days on the server - 1-2 minutes on a small server. The message stays
+  // and counts the seconds until the file is ready (it used to vanish after 90 s, which looked like nothing happened).
+  const t0 = Date.now(), tick = () => monToast(`Preparing the review file… ${Math.round((Date.now() - t0) / 1000)} s - the first file of the day replays the last 10 days and can take 1-2 minutes. Keep this page open.`, 15000);
+  tick(); const timer = setInterval(tick, 5000);
   try {
     const per = $('monPeriod') ? $('monPeriod').value : 'day', word = per === 'day' ? 'day' : per;
     const r = await fetch('/api/monitor/export?day=' + encodeURIComponent(day) + '&period=' + per, {credentials: 'same-origin'});
     if (!r.ok) throw Error((await r.text()).slice(0, 200) || r.status);
-    const text = await r.text(), name = per === 'day' ? `strategy-review-${day}.json` : `strategy-review-${per}-to-${day}.json`;
+    const text = await r.text(); clearInterval(timer);
+    const name = per === 'day' ? `strategy-review-${day}.json` : `strategy-review-${per}-to-${day}.json`;
     const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
     const hasFs = !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem);
-    if (window.oiSave && (!native || hasFs)) { msg((await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this ' + word); return; }
+    if (window.oiSave) { $('monSaved').textContent = (await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this ' + word; return; }
     let copied = false;
     try { await navigator.clipboard.writeText(text + '\n\nreview this ' + word); copied = true; } catch {}
     if (!copied) { const ta = document.createElement('textarea'); ta.value = text + '\n\nreview this ' + word; document.body.appendChild(ta); ta.select();
       try { copied = document.execCommand('copy'); } catch {} ta.remove(); }
     msg(copied ? `Copied the ${day} review data (${Math.round(text.length / 1024)} KB). Open a Claude chat, long-press → Paste, send.`
                : 'Could not copy here - open this page in Chrome and press Download for Claude there.');
-  } catch (e) { msg('Download failed: ' + e.message); }
-  finally { btn.disabled = false; }
+  } catch (e) { clearInterval(timer); msg('Download failed: ' + e.message); }
+  finally { clearInterval(timer); btn.disabled = false; }
 };
 
 function aiWhy(st, cfg) {
@@ -325,10 +346,11 @@ function aiWhy(st, cfg) {
   return '';
 }
 $('monTest').onclick = async () => {
-  $('monSaved').textContent = 'Testing…';
+  $('monSaved').textContent = 'Testing…'; monToast('Testing the AI…', 30000);
   try { const r = await fetch('/api/monitor/test-ai', {method: 'POST', credentials: 'same-origin'}); const d = await r.json();
     $('monSaved').textContent = (d.ok ? '✓ ' : '✗ ') + (d.message || r.status);
   } catch (e) { $('monSaved').textContent = '✗ ' + e.message; }
+  monToast($('monSaved').textContent);
   loadMonitor();
 };
 
@@ -342,7 +364,8 @@ function noteHint(e, st) {            // v1.20.10: say why there is no AI note i
 // v1.20.39: save the AI (Gemini / Claude) review shown above, plus the findings of the same day, as a text file
 $('monReport').onclick = async () => {
   const i = +($('monReviewPick').value || 0), r = monReviews[i];
-  if (!r) { $('monSaved').textContent = 'No AI review yet - press "Run review now" first.'; return; }
+  if (!r) { $('monSaved').textContent = 'No AI review yet - press "Run review now" first.'; monToast($('monSaved').textContent); return; }
+  monToast('Preparing the AI report…', 30000);
   const day = String(r.created_at || '').slice(0, 10);
   let evs = [];
   try { const q = await fetch(`/api/monitor?start=${day}&end=${day}&limit=300`, {credentials: 'same-origin'}); if (q.ok) evs = (await q.json()).events || []; } catch {}
@@ -358,20 +381,23 @@ $('monReport').onclick = async () => {
   lines.push('', 'Code findings are facts from the app; the AI text is a second opinion - check it before changing any rule.');
   const name = `ai-report-${day}-${timeOnly(r.created_at).slice(11, 16).replace(':', '')}.txt`;
   try { $('monSaved').textContent = window.oiSave ? await window.oiSave(name, lines.join('\n'), 'text/plain') : 'Saving is not available on this page.'; }
-  catch (e) { $('monSaved').textContent = 'Could not save the report: ' + e.message; }
+  catch (e) { $('monSaved').textContent = 'Could not save the report: ' + e.message; monToast($('monSaved').textContent); }
 };
 
-// ---- v1.20.41 paper test (MACD turn, loose) - logged and scored only, never a BUY
+// ---- v1.20.41 paper tests (v1.20.75: MACD turn, Stochastic, Early trend) - logged and scored only, never a BUY
 async function loadPaper() {
   if (!$('paperRows')) return;
   try {
     const r = await fetch('/api/paper-tests?symbol=NIFTY&days=30', {credentials: 'same-origin'});
     if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch {} throw Error(d || r.status); }
-    const d = await r.json(), a = d.all || {}, h = x => x && x.n ? `${x.n} trades, ${x.win_rate}% won, ${signed(x.avg, 1)} pts each` : '—';
-    $('paperVerdict').innerHTML = `${d.on ? '' : '<b>Switched off</b> (Signals settings) · '}Last 30 days: <b>${a.n ? `${a.n} closed trades, ${a.win_rate}% won, ${signed(a.avg, 1)} pts each (${signed(a.total, 1)} total)` : 'no closed trades yet'}</b>` +
-      (d.first ? ` · first half ${h(d.first)} · second half ${h(d.second)}` : '') + ` · Verdict: <b>${esc(d.verdict || '')}</b>`;
-    $('paperRows').innerHTML = (d.trades || []).length ? d.trades.map(t =>
-      `<tr><td>${esc(t.day)}</td><td>${esc(t.bar_time)} <span class="sig-sub">score ${t.score ?? '—'}</span></td><td><b>${esc(t.side)}</b></td><td>${t.entry != null ? fmt(t.entry) : '—'}</td>` +
+    const d = await r.json(), h = x => x && x.n ? `${x.n} trades, ${x.win_rate}% won, ${signed(x.avg, 1)} pts each` : '—';
+    // v1.20.75: one line per paper test (MACD turn, Stochastic, Early trend); the table lists the entries of all of them
+    const tests = (d.tests && d.tests.length) ? d.tests : [d], many = tests.length > 1;
+    $('paperVerdict').innerHTML = tests.map(x => { const a = x.all || {}; return `${many ? `<b>${esc(x.short || x.label || '')}</b>: ` : ''}${x.on ? '' : '<b>Switched off</b> (Signals settings) · '}Last 30 days: <b>${a.n ? `${a.n} closed trades, ${a.win_rate}% won, ${signed(a.avg, 1)} pts each (${signed(a.total, 1)} total)` : 'no closed trades yet'}</b>` +
+      (x.first ? ` · first half ${h(x.first)} · second half ${h(x.second)}` : '') + ` · Verdict: <b>${esc(x.verdict || '')}</b>`; }).join('<br>');
+    const trades = tests.flatMap(x => x.trades || []).sort((p, q) => (q.day + q.bar_time).localeCompare(p.day + p.bar_time));
+    $('paperRows').innerHTML = trades.length ? trades.map(t =>
+      `<tr><td>${esc(t.day)}</td><td>${esc(t.bar_time)} <span class="sig-sub">${many && t.test ? esc(t.test) + ' · ' : ''}score ${t.score ?? '—'}</span></td><td><b>${esc(t.side)}</b></td><td>${t.entry != null ? fmt(t.entry) : '—'}</td>` +
       `<td style="${tone(t.pts)}"><b>${t.pts == null ? '—' : signed(t.pts, 1)}</b></td><td>${t.mfe != null ? '+' + fmt(t.mfe, 1) + ' / −' + fmt(t.mae, 1) : '—'}</td><td>${esc(t.status)}</td></tr>`).join('')
       : '<tr><td colspan="7" class="empty">No paper entries yet - they are logged during market hours (09:45 onwards, inside the entry windows).</td></tr>';
   } catch (e) { $('paperVerdict').textContent = 'Could not load the paper test: ' + e.message; $('paperRows').innerHTML = ''; }

@@ -231,7 +231,12 @@ function startTimer() {
   clearInterval(timer);
   const sec = Number($("refreshEvery").value) || 10;
   try { localStorage.setItem("oi-dc-refresh", String(sec)); } catch {}
-  timer = setInterval(() => { if (document.visibilityState === "visible") loadSummary(); }, sec * 1000);
+  let lastAuto = Date.now();
+  timer = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    if (window.__oiMarketOpen && !window.__oiMarketOpen() && Date.now() - lastAuto < (window.__oiClosedWait || 900000)) return;   // v1.20.68: closed / holiday
+    lastAuto = Date.now(); loadSummary();
+  }, sec * 1000);
 }
 $("symbol").addEventListener("change", () => { $("universe").value = sym() === "BANKNIFTY" ? "niftybank" : "nifty50"; lastGraph = null; fitKey = null; loadSummary(); });
 ["universe", "expiry", "offset", "interval"].forEach(id => $(id).addEventListener("change", () => { if (id !== "universe") { lastGraph = null; fitKey = null; } loadSummary(); }));

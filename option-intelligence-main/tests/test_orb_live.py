@@ -33,11 +33,30 @@ def test_apply_signal_and_one_trade_a_day():
     cs = normalize_candles(day_rows(CLOSES[:10]))                                # last closed bar is the break
     a, rep = orb_live.apply({"side": "PE", "signal": "WATCH_PE", "gates": []}, cs, 5, now=datetime(2026, 11, 6, 10, 6, tzinfo=IST))
     assert a["signal"] == "CONFIRMED_CE" and a["side"] == "CE" and rep["key"]["price"] == 108 and a["strategy"] == "orb30"
-    cs2 = normalize_candles(day_rows(CLOSES))                                     # later bars, incl. a close below the range
+    cs2 = normalize_candles(day_rows(CLOSES))                                     # later bars, incl. a close back inside the range
     a2, _ = orb_live.apply({}, cs2, 5, now=datetime(2026, 11, 6, 10, 21, tzinfo=IST))
-    assert a2["side"] == "CE"                                                     # the FIRST break stays the day's trade
+    assert a2["orb"]["break"]["side"] == "CE" and a2["orb"]["break"]["bar_time"] == "10:00"   # the FIRST break stays the day's trade
+    assert a2["side"] is None and a2["signal"] == "WAIT"                          # v1.20.65: ...but it FAILED (101 closed inside 96-104), so no stale side
     late, _ = orb_live.apply({}, cs2, 5, now=datetime(2026, 11, 6, 12, 5, tzinfo=IST))
     assert late["signal"] == "WAIT"                                               # no entries after 12:00
+
+
+def test_holding_break_keeps_side_until_noon_then_none():
+    holding = CLOSES[:9] + [108, 112, 110, 109]                                    # break at bar 9, never closes back inside
+    cs = normalize_candles(day_rows(holding))
+    a, _ = orb_live.apply({}, cs, 5, now=datetime(2026, 11, 6, 10, 21, tzinfo=IST))
+    assert a["side"] == "CE" and a["signal"] == "CONFIRMED_CE" and not a["orb"]["break"]["failed"]
+    late, _ = orb_live.apply({}, cs, 5, now=datetime(2026, 11, 6, 15, 29, tzinfo=IST))
+    assert late["side"] is None and late["signal"] == "WAIT"                       # no stale side in the afternoon
+
+
+def test_failed_break_rearm_takes_the_next_break():
+    seq = CLOSES[:9] + [108, 101, 100, 90, 85]                                     # CE break, fails at bar 10, PE break at bar 12
+    cs = normalize_candles(day_rows(seq))
+    plain = orb_live.find_break(cs, 5, 30, rearm=False)["break"]
+    assert plain["side"] == "CE" and plain["failed"] and plain["failed_at"] == "10:05"
+    re = orb_live.find_break(cs, 5, 30, rearm=True)["break"]
+    assert re["side"] == "PE" and not re["failed"] and re["bar_time"] == "10:15"
 
 
 def test_incomplete_range_and_no_break():

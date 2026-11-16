@@ -18,7 +18,7 @@ self.addEventListener("fetch", e => {
   const req = e.request, url = new URL(req.url);
   if (req.method !== "GET" || url.origin !== location.origin) return;
   const p = url.pathname;
-  if (p.startsWith("/api/") || p.startsWith("/ws/") || p.startsWith("/auth/") || p === "/sw.js") return;   // always live
+  if (p.startsWith("/api/") || p.startsWith("/ws/") || p.startsWith("/auth/") || p.startsWith("/dl/") || p === "/sw.js") return;   // always live (v1.20.82: + download links)
   if (req.mode === "navigate") {
     // v1.18.8: the three main pages open INSTANTLY from the saved copy (even while the server is waking up) and are refreshed
     // in the background for next time. A redirect (signed out) is never saved, and removes the saved copy.

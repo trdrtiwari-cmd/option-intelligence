@@ -506,14 +506,19 @@ SYSTEM_REVIEW = ("You are reviewing an intraday options signal strategy (NIFTY/B
                  "today_blocking_rules (for each rule: setups it blocked and how many of those the 1.5 ATR test trade won / lost), "
                  "'terminal' (app settings, the live analysis of each symbol / timeframe in use: score, regime, failed gates, buy plan, S/R, option, "
                  "feed state, today's log and board summary) and, when sent from the terminal, 'page' (chart trendlines, S/R map, selected option). "
+                 "'paper_tests': rules that are only tested on paper (logged and scored, never bought, never an alert) - for each one whether it is switched on, its closed trades, win rate, points and its own verdict. "
                  "Check that the settings are consistent with the evidence and point out anything in the live state that looks wrong. Feed/rule "
                  "discrepancies, and a replay of the last days with code-generated suggestions. Write for the owner, in plain English:\n"
                  "0. Problems the app found ('checks'): one short line each with what to do; skip if empty.\n"
                  "1. What happened today (2-3 sentences, numbers).\n2. Why moves were missed (which gates, and whether relaxing them would "
                  "have paid according to the near-miss data).\n3. What caused the losses (patterns, not single trades).\n4. Suggested changes, "
                  "ranked, max 5. For each: the exact setting or rule, the evidence, and the risk (sample size, overfitting). Prefer 'keep' when "
-                 "the evidence is weak.\n5. Data / feed problems, if any.\nKeep the stop at least 1.5 ATR (owner's rule). Do not promise "
-                 "profits. Use only the data given. Under 400 words." + STRICT_RULES)
+                 "the evidence is weak.\n5. Data / feed problems, if any.\n6. Paper tests: one line each (trades, win rate, points, verdict; "
+                 "say 'switched off' or 'no closed trades yet' when that is the case). Never suggest making a paper test live under 15 closed "
+                 "trades or when it is not positive in both halves.\nIn 'replay.verdict' the lines starting 'Indicator test' say what each scoring "
+                 "indicator contributes; they come from a few days only, so report them but do not suggest changing a score weight from them.\n"
+                 "Keep the stop at least 1.5 ATR (owner's rule). Do not promise "
+                 "profits. Use only the data given. Under 450 words." + STRICT_RULES)
 
 
 def consistency_checks(ctx):
@@ -537,6 +542,14 @@ def consistency_checks(ctx):
         if le["avg"] > tr + 3:
             out.append(f"EXIT PLAN: in this replay the fixed 1.5/1.5 ATR exit made {le['avg']:+.1f} pts per trade vs {tr:+.1f} for your live trailing plan "
                        f"(n={m.group(1)}). Small sample - compare with the 30-day Diagnostics before switching.")
+    uu = t.get("upstox_usage") or {}
+    for fam, u in sorted((uu.get("by_api") or {}).items()):
+        if (u.get("rate_limited_today") or 0) > 0:
+            out.append(f"UPSTOX RATE LIMIT: {fam} answered 'too many requests' {u['rate_limited_today']} time(s) today - the app paused it each time. "
+                       "Close extra terminal tabs / devices; repeated limits can get API access suspended for a while.")
+        elif (u.get("peak_share_pct") or 0) >= 80:
+            out.append(f"UPSTOX USAGE HIGH: {fam} is at {u['peak_share_pct']:g}% of a published limit ({u.get('last_min')} calls in the last minute, "
+                       f"{u.get('last_30min')} in 30 min; limits {(uu.get('limits') or {}).get('per_min')}/min, {(uu.get('limits') or {}).get('per_30min')}/30 min).")
     if sc.get("indicator_changes"):
         out.append("INDICATOR VALUES changed from the tested defaults for live signals: "
                    + ", ".join(f"{k} {v}" for k, v in sc["indicator_changes"].items()) + " - check they were tested in Diagnostics first.")
@@ -558,6 +571,10 @@ def consistency_checks(ctx):
             out.append(f"FEED {sym_}: the live stream is not running during market hours.")
         elif mk.get("open") and (f.get("tick_age_s") or 0) > 60:
             out.append(f"FEED {sym_}: last tick {f.get('tick_age_s'):.0f} s old during market hours - prices on screen are stale.")
+        rs_ = f.get("restarts_today") or []
+        if rs_:                      # v1.20.63: the stream watchdog had to restart this feed
+            out.append(f"FEED {sym_}: live stream restarted {len(rs_)} time(s) today by the watchdog - last at {rs_[-1].get('at', '')[11:19]} "
+                       f"({rs_[-1].get('reason', '')}). Repeated restarts mean the Upstox connection keeps dropping.")
     for x in t.get("live_analyses") or []:
         an = x.get("analysis") or {}
         name = f"{x.get('symbol')} {x.get('interval')}m {x.get('mode')}"
@@ -630,6 +647,21 @@ async def claude_call(system, user_text, model, max_tokens=700, timeout=40.0):
         return None, f"{type(exc).__name__}: {str(exc)[:160]}"
 
 
+GEMINI_THINK_ROOM = int(os.getenv("GEMINI_THINK_ROOM", "3000"))     # output tokens left for the model's own thinking
+
+
+def gemini_output_limit(max_tokens):
+    return int(max_tokens) + max(0, GEMINI_THINK_ROOM)
+
+
+def gemini_reply(data):
+    """(text, finishReason) of a generateContent response; thinking parts are never part of the text."""
+    cand = (data.get("candidates") or [{}])[0]
+    parts = (cand.get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought")).strip()
+    return text, cand.get("finishReason")
+
+
 async def gemini_call(system, user_text, model, max_tokens=700, timeout=40.0):
     """One Gemini generateContent call (Google AI Studio key; the free tier is rate-limited and Google may use the content
     to improve its products). Returns (text, error)."""
@@ -640,22 +672,33 @@ async def gemini_call(system, user_text, model, max_tokens=700, timeout=40.0):
         import httpx
     except ImportError:
         return None, "httpx not installed"
-    body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": [{"text": user_text}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.3}}
+    # v1.20.72: the newer Flash models "think" first and the thinking is counted inside maxOutputTokens, so a limit sized for the
+    # answer alone cut every reply mid-sentence (12 Nov report). The limit now leaves room for the thinking (the prompt itself keeps
+    # the answer short), and a reply the model still cut off (finishReason MAX_TOKENS) is asked for once more with double the room.
+    limit = gemini_output_limit(max_tokens)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(GEMINI_URL.format(model=model), json=body, headers={"x-goog-api-key": key, "content-type": "application/json"})
-        if r.status_code != 200:
-            try:
-                msg = (r.json().get("error") or {}).get("message")
-            except Exception:
-                msg = None
-            hint = " (free-tier limit reached - try later or lower the calls/day)" if r.status_code == 429 else ""
-            return None, f"Gemini API {r.status_code}: {(msg or r.text)[:200]}{hint}"
-        data = r.json()
-        parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
-        text = "".join(p.get("text", "") for p in parts).strip()
-        return text or None, None if text else "empty reply"
+        text, reason = None, None
+        for attempt in (0, 1):
+            body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+                    "generationConfig": {"maxOutputTokens": limit, "temperature": 0.3}}
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(GEMINI_URL.format(model=model), json=body, headers={"x-goog-api-key": key, "content-type": "application/json"})
+            if r.status_code != 200:
+                if text:
+                    break                                   # keep the first (cut) reply rather than nothing
+                try:
+                    msg = (r.json().get("error") or {}).get("message")
+                except Exception:
+                    msg = None
+                hint = " (free-tier limit reached - try later or lower the calls/day)" if r.status_code == 429 else ""
+                return None, f"Gemini API {r.status_code}: {(msg or r.text)[:200]}{hint}"
+            text, reason = gemini_reply(r.json())
+            if reason != "MAX_TOKENS" or attempt:
+                break
+            limit *= 2
+        if text and reason == "MAX_TOKENS":
+            text += " [reply cut off by the model's length limit]"
+        return text or None, None if text else ("empty reply (the model used its whole output limit before answering)" if reason == "MAX_TOKENS" else "empty reply")
     except Exception as exc:
         return None, f"{type(exc).__name__}: {str(exc)[:160]}"
 
@@ -833,7 +876,12 @@ SYSTEM_PERIOD_REVIEW = ("You are reviewing a WEEK or MONTH of an intraday option
                         "strategy: Pullback, Opening Range Breakout 30 min or Off). The data holds: 'summary' (all closed trades: points, ₹, win "
                         "rate, drawdown), 'by_day', 'by_symbol', 'by_side', 'by_time', 'by_setup' (timeframe / mode), the trades, the monitor's "
                         "findings and AI reviews of each day, the rules that blocked setups on the signal board over the period, the latest "
-                        "Diagnostics run if one was made, and the app's current settings. Write for the owner, in plain English, under 600 words:\n"
+                        "Diagnostics run if one was made, and the app's current settings. "
+                        "'paper_tests': rules that are only tested on paper (logged and scored, never bought, never an alert) - for each one whether it is switched on, its closed trades, win rate, points and its own verdict. "
+                        "'latest_diagnostics.indicator_test' (also the verdict lines starting 'Indicator test'): for each scoring indicator its "
+                        "vote at the start of the big moves (with / against), what the score and the signals would be without it, indicators "
+                        "that vote alike, and 'combined' - several removed together. "
+                        "Write for the owner, in plain English, under 650 words:\n"
                         "0. Problems the app found ('checks'): one line each, skip if empty.\n"
                         "1. Results: trades, win rate, net points and ₹, best and worst day, biggest drawdown, how many days made the owner's "
                         "₹2,000 goal. Is the profit spread over many days or carried by one or two?\n"
@@ -842,6 +890,11 @@ SYSTEM_PERIOD_REVIEW = ("You are reviewing a WEEK or MONTH of an intraday option
                         "4. Suggested changes, ranked, max 5: exact setting, evidence (with numbers from the data), risk. Prefer 'keep' when the "
                         "evidence is one or two days or under 30 trades.\n"
                         "5. What to watch next week / month.\n"
+                        "6. Paper tests: one line each (trades, win rate, points, first half / second half, verdict). A paper test may be "
+                        "suggested for live use only with 15+ closed trades AND positive in both halves; otherwise say 'keep collecting'.\n"
+                        "7. Indicator test: name the indicators the run marks as late, as duplicates, or as safe to remove. Suggest changing a "
+                        "score weight only when the data shows the same result in two different 30-day runs; with one run say 'repeat first'. "
+                        "Skip 6 or 7 when the data has nothing for it.\n"
                         "Keep the stop at least 1.5 ATR. Do not promise profits." + STRICT_RULES)
 
 
@@ -915,6 +968,8 @@ def review_context(day, symbol, trades, findings, board_missed, rep, sugg, gate_
                    "live_exit": rep.get("live_exit"), "confirmed": (rep.get("confirmed") or {}).get("stats"),
                    "missed_moves": {k: (rep.get("missed_moves") or {}).get(k) for k in ("moves", "caught", "missed", "blockers")},
                    "near_miss_by_gate": (rep.get("ablation") or [])[:10],
+                   "score_model": rep.get("score_model"),     # v1.20.72: Classic vs Priority on the same days
+                   "early_priority": {k: (rep.get("early_priority") or {}).get(k) for k in ("trail", "first", "second", "verdict")},
                    "verdict": [v.get("text") for v in (rep.get("verdict") or [])][:10],
                    "trend_day_whatif": [{k: v.get(k) for k in ("label", "extra", "first", "second", "combined", "verdict")}
                                         for v in ((rep.get("trend_day") or {}).get("variants") or [])]},

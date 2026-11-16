@@ -41,7 +41,33 @@
   let meta = (() => { try { const m = JSON.parse(ls.get(META_KEY) || "null"); if (m && m.keys) return m; } catch { } return { user: null, keys: {} }; })();
   let user = null, redirecting = false;
   const timers = {}, inflight = {}, lastSig = {}, lastPushAt = {}, retries = {};
-  let statusEl = null, lastSavedAt = null, offline = false, lastOk = null, lastErr = null;
+  let statusEl = null, lastSavedAt = null, offline = false, busy = false, busyTimer = null, lastOk = null, lastErr = null;
+  // v1.20.59: "Offline" only when this device has no internet. A slow / restarting server (e.g. during a Diagnostics replay or a Render
+  // deploy) shows "Server busy - retrying" and is retried every 10 s instead of waiting for the 30 s pull.
+  // v1.20.61: busy / offline periods are logged automatically (warning in Download for Claude) with their start and length.
+  let downSince = null, downKind = null, downLongSent = false;
+  const hhmm = d => d.toLocaleTimeString("en-IN", { hour12: false });
+  const issue = (msg, detail) => { try { window.__oiIssues && window.__oiIssues.report("warning", msg, detail); } catch { } };
+  setInterval(() => {
+    const kind = offline ? "offline" : busy ? "busy" : null;
+    if (kind && !downSince) { downSince = new Date(); downKind = kind; downLongSent = false; }
+    else if (kind && downSince && !downLongSent && Date.now() - downSince > 60000) {
+      downLongSent = true;
+      issue(downKind === "offline" ? "Device offline for over 1 minute" : "Server busy for over 1 minute (account sync not answering)",
+            `since ${hhmm(downSince)} · ${lastErr || ""}`.slice(0, 280));
+    } else if (!kind && downSince) {
+      const secs = Math.round((Date.now() - downSince) / 1000);
+      if (secs >= 20) issue(downKind === "offline" ? "Device was offline" : "Server was busy (account sync timed out)",
+                            `${hhmm(downSince)} for ${secs} s · ${lastErr || ""}`.slice(0, 280));
+      downSince = null; downKind = null;
+    }
+  }, 5000);
+  function markFail(e) {
+    lastErr = String((e && e.message) || e);
+    if (navigator.onLine === false) { offline = true; return; }
+    busy = true;
+    if (!busyTimer) busyTimer = setTimeout(() => { busyTimer = null; try { pullNow(true); } catch { } }, 10000);
+  }
 
   const saveMeta = () => ls.set(META_KEY, JSON.stringify(meta));
   const fromRaw = raw => { try { return JSON.parse(raw); } catch { return raw; } };
@@ -115,6 +141,7 @@
   function refreshStatus() {
     const pending = Object.values(meta.keys).some(m => m.dirty);
     if (offline) return setStatus("err", pending ? "Offline — unsaved, will retry" : "Offline");
+    if (busy) return setStatus("busy", pending ? "Server busy — unsaved, retrying" : "Server busy — retrying");
     if (Object.keys(inflight).length) return setStatus("busy", "Saving…");
     if (pending) return setStatus("busy", "Changes pending…");
     setStatus("ok", lastSavedAt ? "Saved " + lastSavedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Saved");
@@ -169,7 +196,7 @@
         if (!toPush.includes("paper-trades")) toPush.push("paper-trades");
       }
     }
-    saveMeta(); offline = false;
+    saveMeta(); offline = false; busy = false;
     toPush.forEach(k => schedule(k, 300));
     const changed = Object.keys(MAP).filter(k => before[k] !== ls.get(k));
     if (changed.length) { try { window.dispatchEvent(new CustomEvent("oi-sync-pulled", { detail: { changed } })); } catch { } }
@@ -224,10 +251,10 @@
         m.dirty = ls.get(lsKey) !== raw;                               // changed again while saving -> save once more
         lastSig[sKey] = signature(sKey, fromRaw(raw));
       }
-      lastPushAt[sKey] = Date.now(); lastSavedAt = new Date(); offline = false; saveMeta();
+      lastPushAt[sKey] = Date.now(); lastSavedAt = new Date(); offline = false; busy = false; saveMeta();
       if (m.dirty) schedule(sKey, DEBOUNCE_MS);
     } catch (e) {
-      offline = true;
+      markFail(e);
       const n = (retries[sKey] = (retries[sKey] || 0) + 1);
       schedule(sKey, Math.min(60000, 5000 * Math.pow(2, Math.min(n, 4))));
     } finally { delete inflight[sKey]; refreshStatus(); }
@@ -250,7 +277,7 @@
     if (watched && had) markDirty(MAP[k]);
   };
 
-  window.addEventListener("online", () => { offline = false; Object.keys(REV).forEach(k => { if (kmeta(k).dirty) schedule(k, 200); }); });
+  window.addEventListener("online", () => { offline = false; busy = false; Object.keys(REV).forEach(k => { if (kmeta(k).dirty) schedule(k, 200); }); });
   // Pick up changes made on another device: every 30 s while the page is open, and immediately when the app/tab comes back
   // to the foreground (a phone app that was in the background does not run timers).
   let lastPull = 0;
@@ -263,7 +290,7 @@
     if (force !== true && Date.now() - lastPull < 2000) return;
     lastPull = Date.now();
     try { await pull(false); lastOk = Date.now(); lastErr = null; refreshStatus(); }
-    catch (e) { offline = true; lastErr = String((e && e.message) || e); refreshStatus(); }
+    catch (e) { markFail(e); refreshStatus(); }
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushAll(true); else pullNow(); });
   window.addEventListener("focus", pullNow);
@@ -315,11 +342,11 @@
         const ok = await pull(true);
         if (ok && user && user.id !== cached.id) location.reload();     // another account signed in elsewhere: restart clean
         else if (ok) { ls.set("oi-sync-user", JSON.stringify(user)); refreshStatus(); }
-      } catch (e) { offline = true; refreshStatus(); }
+      } catch (e) { markFail(e); refreshStatus(); }
       return;
     }
     let ok = true;
-    try { ok = await pull(true); } catch (e) { offline = true; }       // server unreachable: carry on with this device's data
+    try { ok = await pull(true); } catch (e) { markFail(e); }       // server unreachable: carry on with this device's data
     if (!ok) return;                                                   // redirecting to /login
     if (user) ls.set("oi-sync-user", JSON.stringify(user));
     whenReady(() => { mountChip(); loadNext(); });

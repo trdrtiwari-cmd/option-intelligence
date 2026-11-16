@@ -1,4 +1,4 @@
-const FRONTEND_VERSION="1.20.55";
+const FRONTEND_VERSION = "1.20.88";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -209,13 +209,13 @@ function renderSignalTime(a){
   if(!t||!t.generated_at_text||!a.side){box.hidden=true;return}
   box.hidden=false;
   const stateTxt={FRESH:"OPEN — fresh signal",LATE:"CLOSED — late, don't chase",EXPIRED:"CLOSED — expired, wait for a new signal",UNKNOWN:"UNKNOWN — age can't be verified",FORMING:"Not confirmed yet"}[t.state]||"—";
-  $("stGenerated").textContent=`${t.generated_at_text} (${t.side||a.side})`+(t.estimated?" · est.":"");
-  $("stAge").textContent=t.age_minutes==null?"—":`${fmt(t.age_minutes,0)} min · ${fmt(t.age_bars,1)} bars`;
+  $("stGenerated").textContent=(t.session_day?t.session_day+" · ":"")+`${t.generated_at_text} (${t.side||a.side})`+(t.estimated?" · est.":"");
+  $("stAge").textContent=t.session_day?`previous session (${t.session_day})`:t.age_minutes==null?"—":`${fmt(t.age_minutes,0)} min · ${fmt(t.age_bars,1)} bars`;
   $("stPrice").textContent=t.signal_price==null?"—":`${fmt(t.signal_price)} → ${fmt(t.price_now)}${t.moved_atr==null?"":` (${t.moved_atr>=0?"+":""}${fmt(t.moved_atr,2)} ATR)`}`;
   const st=$("stState");st.textContent=stateTxt;st.className=t.state==="FRESH"?"fresh":t.state==="LATE"?"late":t.state==="EXPIRED"||t.state==="UNKNOWN"?"expired":"";
   const r=t.rules||{};
   $("stNote").textContent=[`Rule: enter within ${r.fresh_minutes} min of the signal and before price moves ${r.max_chase_atr} ATR.`,
-    t.lean_since_text?`${a.side} lean building since ${t.lean_since_text}.`:"",
+    t.lean_since_text?`${a.side} lean building since ${t.session_day?t.session_day+" ":""}${t.lean_since_text}.`:"",
     t.estimated?"Time is an estimate (server restarted or signal older than the replay window); the older time is used on purpose.":"",
     t.basis?`Basis: ${t.basis}.`:""].filter(Boolean).join(" ");
 }
@@ -236,7 +236,7 @@ function renderDashChecks(a){
 // Index view  -> the cards describe the index (as before).
 // Option view -> the cards describe the selected contract's own premium chart; the index trend and the index signal stay
 //                visible next to it, and the decision combines both (a BUY needs the index signal AND the premium trend to agree).
-const trendColor=t=>/UP|BULL/i.test(t||"")?"var(--green)":/DOWN|BEAR/i.test(t||"")?"var(--red)":"var(--yellow)";
+const trendColor=t=>/LEAN|NO CLEAR/i.test(t||"")?"var(--yellow)":/UP|BULL/i.test(t||"")?"var(--green)":/DOWN|BEAR/i.test(t||"")?"var(--red)":"var(--yellow)";
 function applyChartViewCards(){
   const idx=lastAnalysis,idxOk=idx&&idx.status==="ok",idxTrend=idxOk?(idx.regime_label||idx.regime||"—"):"—";
   const scoreSub=$("score")&&$("score").nextElementSibling,priceSub=$("priceChange");
@@ -354,7 +354,7 @@ function renderBuyPlan(a){
   $("bpNote").textContent=ok?"Paper signal, recorded in the Daily Signal Log with these levels. Index levels decide the exit; the premium levels are delta/gamma estimates.":
     plan?("No buy: "+bad.map(c=>`${c.label} — ${c.detail}`).join(" · ")):"Strike chosen automatically (2 strikes in the money on the signal side, by default). Stop-loss and target are set when the signal is confirmed and passes the profit check.";
 }
-let lastAutoOptionKey=null,lastAutoSide=null,autoIdleSince=null,autoPicking=false;
+let lastAutoOptionKey=null,lastAutoSide=null,autoIdleSince=null,autoPicking=false,marketKnown=false;
 try{lastAutoOptionKey=sessionStorage.getItem("oiAutoPick")||null}catch{}
 // v1.20.39: once the setup is over, an auto-picked option is no longer relevant (6 Nov: the chart stayed on a 24600 PE from the
 // morning while NIFTY rallied to 25,030). If the contract on screen was picked automatically (not by you) and there has been no
@@ -369,7 +369,11 @@ function autoRevertOption(a){
   toast(opposite?`Engine now leans ${a.side}: chart back to the index (the auto-picked ${paperSelected.type} no longer fits)`:"No setup for 10 minutes: chart back to the index");
 }
 function autoSwitchOption(a){
+  // v1.20.74: the first analysis after opening the page is the copy saved on the last visit (instant start). Acting on it switched
+  // the chart to that visit's option and back seconds later (13 Nov 16:10: 25250 PE from 11:50, then "engine now leans CE").
+  if(a&&a.from_saved_copy)return;
   const pk=a&&a.option_pick,lvl=a&&a.final&&a.final.level;
+  if(marketKnown&&!marketOpen&&pk&&["WATCH","PENDING","CONFIRMED"].includes(lvl)){try{autoRevertOption(a)}catch{}return}   // closed: no new switch
   if(!pk||!pk.instrument_key||!["WATCH","PENDING","CONFIRMED"].includes(lvl)){if(!lvl||lvl==="WAIT")lastAutoSide=null;try{autoRevertOption(a)}catch{}return}
   autoIdleSince=null;
   if(($("autoOption")&&$("autoOption").value)==="off"||pk.symbol!==getSymbol())return;
@@ -596,7 +600,7 @@ async function refreshSignalContext(){
   lastAnalysis=a;lastAnalysisAt=Date.now();
   if(optPromise){const o=await optPromise;if(sel===paperSelected)lastOptionAnalysis={...o,_sel:sel}}
   $("score").textContent=a.status==="ok"?`${a.score}/100`:"—";$("regime").textContent=a.status==="ok"?(a.regime_label||a.regime||"—"):"—";
-  $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
+  $("regime").style.color=/^(LEANING|NO CLEAR)/.test(a.regime_label||"")?"var(--yellow)":a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
   $("bullScore").textContent=a.bull_score??"—";$("bearScore").textContent=a.bear_score??"—";
   renderSignal();
 }
@@ -605,7 +609,7 @@ async function refreshSignalContext(){
 function dropForeignContract(){
   if(!paperSelected||paperSelected.symbol===getSymbol())return false;
   const old=paperSelectedLabel?paperSelectedLabel():paperSelected.symbol;
-  paperSelected=null;lastAutoOptionKey=null;lastAutoSide=null;autoIdleSince=null;try{sessionStorage.removeItem("oiAutoPick")}catch{}
+  paperSelected=null;try{sendLiveSub()}catch{};lastAutoOptionKey=null;lastAutoSide=null;autoIdleSince=null;try{sessionStorage.removeItem("oiAutoPick")}catch{}
   try{window.OIPrefs&&window.OIPrefs.set("terminal.contract",null)}catch{}
   const sc=$("paperSelectedContract");if(sc)sc.textContent="Select CE or PE using the option-chain table above.";
   const bb=$("paperBuyBtn");if(bb)bb.disabled=true;
@@ -663,7 +667,7 @@ function applyAnalysis(a){
     $("breakHigh").textContent=fmt(a.breakout_high);$("breakLow").textContent=fmt(a.breakdown_low);
     $("analysisNote").textContent=[a.note||a.message||"Analysis loaded.",a.score_basis].filter(Boolean).join(" · ");
     $("signalExplanation").textContent=a.note||a.message||"Confirm breakout and retest before any trade.";
-    $("regime").style.color=a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
+    $("regime").style.color=/^(LEANING|NO CLEAR)/.test(a.regime_label||"")?"var(--yellow)":a.regime==="BULLISH"?"var(--green)":a.regime==="BEARISH"?"var(--red)":"var(--yellow)";if($("regimeSub"))$("regimeSub").textContent=a.status==="ok"?(a.regime_note||"Trend / sideways filter"):"Trend / sideways filter";
     lastAnalysis=a;lastAnalysisAt=Date.now();renderSignal();loadOptionVolume();try{aiLiveWatch(a)}catch{}
   }
 }
@@ -693,7 +697,7 @@ async function checkStatus(){
     else if(s.token_state==="EXPIRED"){el.textContent="Upstox token expired — click Connect Upstox";el.className="pill bad"}
     else if(s.token_configured){el.textContent="Upstox token set (could not verify)";el.className="pill muted"}
     else{el.textContent="Upstox setup required";el.className="pill bad"}
-    marketOpen=!!(s.market&&s.market.open);renderMarketPill(s.market);
+    marketOpen=!!(s.market&&s.market.open);marketKnown=true;renderMarketPill(s.market);try{window.__oiSetMarket&&window.__oiSetMarket(marketOpen)}catch{}
   }catch{$("apiStatus").textContent="Backend unavailable"}
 }
 let optionChainRows=[];
@@ -851,7 +855,7 @@ function startAutoRefresh(){
     sendLiveSub();
     // v1.19.6: while the live socket is pushing candles + analysis, the full REST reload only runs every 30 s as a safety net.
     if(livePushFresh()&&Date.now()-lastFullRefresh<30000)return;
-    if(!marketOpen&&Date.now()-lastFullRefresh<30000)return;     // v1.19.9: market closed - prices cannot change, reload every 30 s only
+    if(!marketOpen&&Date.now()-lastFullRefresh<(window.__oiClosedWait||900000))return;     // v1.20.68: market closed / holiday - reload every 15 min only
     refreshBusy=true;refreshBusySince=Date.now();
     try{await refresh()}catch(e){console.warn("Auto-refresh failed:",e)}finally{refreshBusy=false}
   },sec*1000);
@@ -927,6 +931,25 @@ function liveOptLtp(){
   const t=liveTickMap[paperSelected.instrument_key];
   return t&&t.fresh&&Number(t.ltp)>0&&Date.now()-(t._rx||0)<5000?Number(t.ltp):null;
 }
+// v1.20.72: the selected option's price used to follow the socket only while the chart showed the option premium. In the index
+// view (and whenever candles were still loading) it kept its old value under a "LIVE_TICK" label, so the paper panel showed a
+// frozen price and the auto-filled entry drifted away from it. The tick now updates the selection in every view.
+let paperTickAt=0,paperTickPaint=0;
+function paperApplyTick(t){
+  if(!paperSelected||!t||t.instrument_key!==paperSelected.instrument_key||!t.fresh||!(Number(t.ltp)>0)||!marketOpen)return;
+  paperSelected.ltp=Number(t.ltp);paperSelected.quoteStatus="LIVE_TICK";paperSelected.quoteTimestamp=t.received_at||new Date().toISOString();
+  paperTickAt=Date.now();
+  if(paperTickAt-paperTickPaint<1000)return;                 // text on screen: once a second is enough
+  paperTickPaint=paperTickAt;
+  try{
+    const lab=$("paperSelectedContract");
+    if(lab)lab.textContent=`Selected: ${paperSelectedLabel()} · LTP ${paperMoney(paperSelected.ltp)} · LIVE_TICK · ${paperTime(paperSelected.quoteTimestamp)}`;
+    const ent=$("paperEntry");
+    if(ent&&!ent.dataset.userEdited&&document.activeElement!==ent)ent.value=paperSelected.ltp.toFixed(2);
+  }catch{}
+}
+// No tick for the selection for 20 s in market hours (contract outside the streamed strikes, or the feed dropped): ask the server once.
+setInterval(()=>{try{if(marketOpen&&paperSelected&&document.visibilityState==="visible"&&Date.now()-paperTickAt>20000)paperFetchQuote(false)}catch{}},20000);
 function applyOptionTick(t){
   if(!t||!t.fresh||!Number.isFinite(Number(t.ltp))||!currentCandles.length||!marketOpen)return;
   if(chartSource!=="option"||$("chartView").value!=="option"||!paperSelected||t.instrument_key!==paperSelected.instrument_key)return;
@@ -956,7 +979,7 @@ function restPriceLabel(status){
 setInterval(async()=>{
   if(document.visibilityState!=="visible"||restPriceBusy)return;
   if(lastIdxTick&&Date.now()-lastIdxTick<5000)return;
-  if(!marketOpen&&lastRestPoll&&Date.now()-lastRestPoll<30000)return;   // closed: ticks cannot arrive, poll every 30 s
+  if(!marketOpen&&lastRestPoll&&Date.now()-lastRestPoll<(window.__oiClosedWait||900000))return;   // v1.20.68: closed - every 15 min
   if(marketOpen&&(!liveSocket||liveSocket.readyState>WebSocket.OPEN)&&Date.now()-idleReconnectAt>10000){idleReconnectAt=Date.now();connectLiveSocket()}
   restPriceBusy=true;lastRestPoll=Date.now();
   try{const q=await api(`/api/index-ltp?symbol=${getSymbol()}`);
@@ -976,7 +999,7 @@ function liveStamp(){
   setUpdated(`● Live ${ts} · every ${liveRate()} s${an}`);
 }
 function liveRate(){const v=Number($("refreshEvery")?.value);return Number.isFinite(v)&&v>0?Math.min(2,Math.max(0.1,v)):0.1}
-function liveSubObj(){return{type:"sub",rate:liveRate(),interval:getInterval(),mode:getMode(),score_min:getScoreMin(),reconfirm:getReconfirm(),view:$("chartView").value==="option"?"option":"index"}}
+function liveSubObj(){return{type:"sub",rate:liveRate(),interval:getInterval(),mode:getMode(),score_min:getScoreMin(),reconfirm:getReconfirm(),view:$("chartView").value==="option"?"option":"index",opt_key:(paperSelected&&paperSelected.instrument_key)||""}}   // v1.20.70: opt_key = the contract that needs every tick
 function liveSocketOpen(){try{return !!liveSocket&&liveSocket.readyState===WebSocket.OPEN}catch{return false}}   // TDZ-safe: may run before the socket code below is initialised
 function sendLiveSub(){
   if(!liveSocketOpen())return;
@@ -1031,13 +1054,13 @@ function connectLiveSocket(){
     try{
       const m=JSON.parse(ev.data);
       if(m.type==="index"){applyIndexTick(m.index);liveStamp();return}
-      if(m.type==="opt"){(m.ticks||[]).forEach(t=>{t={...t,fresh:!!t.fresh,_rx:Date.now()};if(t.instrument_key)liveTickMap[t.instrument_key]=t;if(paperSelected&&t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});liveStamp();return}
+      if(m.type==="opt"){(m.ticks||[]).forEach(t=>{t={...t,fresh:!!t.fresh,_rx:Date.now()};if(t.instrument_key)liveTickMap[t.instrument_key]=t;if(paperSelected&&t.instrument_key===paperSelected.instrument_key){paperApplyTick(t);applyOptionTick(t)}});liveStamp();return}
       if(m.type==="bars"){if(m.interval===getInterval()){wsBarsAt=Date.now();mergeLiveBars(m);liveStamp()}return}
       if(m.type==="analysis"){onLiveAnalysis(m);return}
       const ticks=(m.ticks||[]).map(t=>({...t,fresh:!!t.fresh}));
       renderLiveTicks(ticks);
       applyIndexTick(m.index);
-      if(paperSelected)ticks.forEach(t=>{if(t.instrument_key===paperSelected.instrument_key)applyOptionTick(t)});
+      if(paperSelected)ticks.forEach(t=>{if(t.instrument_key===paperSelected.instrument_key){paperApplyTick(t);applyOptionTick(t)}});
       ticks.forEach(t=>{if(t.instrument_key){t._rx=Date.now();liveTickMap[t.instrument_key]=t}});
       const nowMs=Date.now();if(nowMs-lastChainPaint>2000&&optionChainRows.length){lastChainPaint=nowMs;renderFilteredChain({scroll:false})}
       if(m.stream==="LIVE"){$("streamStatus").textContent="LIVE TICKS";$("streamStatus").className="pill live"}
@@ -1069,11 +1092,21 @@ async function refreshDerivatives(){
   }catch(e){$("livePCR").textContent="UNAVAILABLE";$("liveCallOI").textContent="UNAVAILABLE";$("livePutOI").textContent="UNAVAILABLE";$("liveIV").textContent="UNAVAILABLE";$("streamStatus").textContent="UNAVAILABLE";$("streamError").textContent=e.message;$("derivTimestamp").textContent="Snapshot timestamp: UNAVAILABLE"}
 }
 $("expiry").addEventListener("change",()=>loadChain()); // loadChain also refreshes derivatives for the same expiry
-connectLiveSocket();loadContracts(true);
-setInterval(()=>{if(document.visibilityState==="visible")refreshDerivatives()},6000);
-setInterval(()=>{if(document.visibilityState==="visible"&&marketOpen)refreshChainQuiet()},10000);
+if(document.visibilityState==="visible")connectLiveSocket();loadContracts(true);   // v1.20.67: a hidden tab connects when it is shown
+// v1.20.67 bandwidth: while the live socket is pushing ticks, the REST snapshots (PCR/OI/IV and the full option chain) only need
+// a slow refresh - the socket already moves the prices. Without the socket they keep the old 6 s / 10 s pace.
+let lastDerivAt=0,lastChainQuietAt=0;
+setInterval(()=>{if(document.visibilityState!=="visible")return;if(liveSocketOpen()&&Date.now()-lastDerivAt<30000)return;if(!marketOpen&&lastDerivAt&&Date.now()-lastDerivAt<(window.__oiClosedWait||900000))return;lastDerivAt=Date.now();refreshDerivatives()},6000);
+setInterval(()=>{if(document.visibilityState!=="visible"||!marketOpen)return;if(liveSocketOpen()&&Date.now()-lastChainQuietAt<30000)return;lastChainQuietAt=Date.now();refreshChainQuiet()},10000);
 setInterval(checkStatus,60000);
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&(!liveSocket||liveSocket.readyState>1))connectLiveSocket()});
+// v1.20.67 bandwidth: close the live socket when the page has been off screen for 20 s (phone locked, app in the background,
+// another tab open). Buy-signal alerts come from the server's push notifications, not from this socket. It reconnects on return.
+let liveHiddenTimer=null;
+document.addEventListener("visibilitychange",()=>{
+  clearTimeout(liveHiddenTimer);
+  if(document.visibilityState==="visible"){if(!liveSocket||liveSocket.readyState>1)connectLiveSocket();return}
+  liveHiddenTimer=setTimeout(()=>{if(document.visibilityState!=="visible"&&liveSocket){clearTimeout(liveReconnectTimer);liveSocketGen++;liveSocket.onopen=liveSocket.onmessage=liveSocket.onerror=liveSocket.onclose=null;try{liveSocket.close()}catch{}liveSocket=null;liveSubSent=""}},20000);
+});
 
 // ---------------- Local-browser paper trading ----------------
 // These are simulated positions only. They never place broker orders.
@@ -1097,6 +1130,7 @@ function selectPaperContract(type,strike,instrumentKey,ltp,expiry,button){
   {const lot=paperSelected.lot||1;$("paperQty").value=String(lot);$("paperQty").step=String(lot);$("paperLotHint").textContent=paperSelected.lot?` · 1 lot = ${paperSelected.lot}`:""}
   paperAtr=null;$("paperAtrValue").textContent="UNAVAILABLE";
   api(`/api/pin-option?symbol=${encodeURIComponent(paperSelected.symbol)}&instrument_key=${encodeURIComponent(instrumentKey)}`).catch(()=>{}); // put it on the live WebSocket now
+  try{sendLiveSub()}catch{}   // v1.20.70: tell the socket which contract needs every tick
   $("paperSelectedContract").textContent=`Selected: ${paperSelectedLabel()} · chain LTP ${paperMoney(paperSelected.ltp)} (snapshot)`;
   $("paperEntry").value=paperSelected.ltp||"";
   $("paperBuyBtn").disabled=false;
@@ -1137,12 +1171,14 @@ async function paperCalculateAtr(){
   }catch(e){paperAtr=null;$("paperAtrValue").textContent="UNAVAILABLE";$("paperRiskNote").textContent=e.message;paperUpdatePreview();toast("ATR unavailable: "+e.message)}
   finally{$("paperCalcAtr").disabled=false;$("paperCalcAtr").textContent="Calculate ATR"}
 }
+const PAPER_MIN_SL_MULT=1.5,GUARD_MIN_RR_FLOOR=1.5;   // v1.20.65: the owner's rule - stop at least 1.5 ATR; same minimum reward:risk as the signal engine (1.5)
 function paperRiskPlan(){
+  {const slEl=$("paperSlMult");if(slEl&&slEl.value!==""&&Number(slEl.value)<PAPER_MIN_SL_MULT)slEl.value=PAPER_MIN_SL_MULT}   // older saved value 1 -> 1.5, so the field shows what is used
   const entry=paperNum("paperEntry");
   if(!paperSelected||!entry)return null;
   if($("paperRiskMode").value==="atr"){
     if(!paperAtr)return null;
-    const sm=paperNum("paperSlMult"),m1=paperNum("paperT1Mult"),m2=paperNum("paperT2Mult"),m3=paperNum("paperT3Mult");
+    const sm=Math.max(PAPER_MIN_SL_MULT,paperNum("paperSlMult")||0),m1=paperNum("paperT1Mult"),m2=paperNum("paperT2Mult"),m3=paperNum("paperT3Mult");
     if(!sm||!m1||!m2||!m3)return null;
     // Cap the stop at a % of premium (option premiums can move 30% on an ATR); targets keep the same R multiples.
     const g=guardRead(),rawRisk=paperAtr*sm,cap=g.maxSlPct>0?entry*g.maxSlPct/100:Infinity,risk=Math.min(rawRisk,cap),k=risk/sm;
@@ -1203,7 +1239,7 @@ function paperCloseTrade(trade,price,reason){
 }
 // ---------------- Trade guard: entry rules that actually BLOCK paper entries ----------------
 const PAPER_GUARD_KEY="option-intelligence-paper-guard-v1";
-const GUARD_FIELDS={guardEnforce:["enforce","checkbox",true],guardMaxTrades:["maxTrades","num",3],guardDailyLoss:["dailyLoss","num",3000],guardMaxLosses:["maxLosses","num",2],guardCooldown:["cooldown","num",15],guardMaxSlPct:["maxSlPct","num",20],guardMaxSpread:["maxSpread","num",3],guardSlip:["slip","num",0.5],guardMinRR:["minRR","num",1.2],guardTimeStop:["timeStop","num",30],guardTrail:["trail","checkbox",true],guardStart:["start","time","09:30"],guardCutoff:["cutoff","time","15:00"],guardExpiryCutoff:["expiryCutoff","time","13:30"]};
+const GUARD_FIELDS={guardEnforce:["enforce","checkbox",true],guardMaxTrades:["maxTrades","num",3],guardDailyLoss:["dailyLoss","num",3000],guardMaxLosses:["maxLosses","num",2],guardCooldown:["cooldown","num",15],guardMaxSlPct:["maxSlPct","num",20],guardMaxSpread:["maxSpread","num",3],guardSlip:["slip","num",0.5],guardMinRR:["minRR","num",1.5],guardTimeStop:["timeStop","num",30],guardTrail:["trail","checkbox",true],guardStart:["start","time","09:30"],guardCutoff:["cutoff","time","15:00"],guardExpiryCutoff:["expiryCutoff","time","13:30"]};
 function guardTimeMin(v,d){const m=/^(\d{1,2}):(\d{2})/.exec(v||"")||/^(\d{1,2}):(\d{2})/.exec(d);return Number(m[1])*60+Number(m[2])}
 function hhmm(m){return String(Math.floor(m/60)).padStart(2,"0")+":"+String(m%60).padStart(2,"0")}
 function guardRead(){
@@ -1214,6 +1250,7 @@ function guardRead(){
     else if(type==="time")g[k]=guardTimeMin(el&&el.value,def);
     else{const v=el&&el.value!==""?Number(el.value):NaN;g[k]=Number.isFinite(v)&&v>=0?v:def}
   }
+  g.minRR=Math.max(GUARD_MIN_RR_FLOOR,g.minRR);   // v1.20.65: older saved values (1.2) are raised to the engine's minimum
   return g;
 }
 function guardSave(){const s={};for(const [id,[,type]] of Object.entries(GUARD_FIELDS)){const el=$(id);if(el)s[id]=type==="checkbox"?el.checked:el.value}try{localStorage.setItem(PAPER_GUARD_KEY,JSON.stringify(s))}catch{}}
@@ -1428,7 +1465,7 @@ $("paperClearBtn").addEventListener("click",()=>{
    paperSave(trades.filter(t=>t.status==="OPEN"));paperRender();toast("Closed paper-trade history cleared and syncing across devices.");
  });
 $("paperInitialCapital").value=String(paperGetCapital());
-guardInit();paperUpdateMode();paperRender();setInterval(()=>{if(document.visibilityState==="visible")paperRefreshQuotes()},4000);setInterval(()=>{if(document.visibilityState==="visible")renderGuardStatus()},3000);
+guardInit();paperUpdateMode();paperRender();let paperQuotesAt=0;setInterval(()=>{if(document.visibilityState!=="visible")return;if(!marketOpen&&paperQuotesAt&&Date.now()-paperQuotesAt<(window.__oiClosedWait||900000))return;paperQuotesAt=Date.now();paperRefreshQuotes()},4000);setInterval(()=>{if(document.visibilityState==="visible")renderGuardStatus()},3000);
 // Restore the selected option contract saved to the account: at startup, and whenever another device changes it, so the
 // "Selected option premium" chart view shows the same contract everywhere.
 function restoreSavedContract(){try{
@@ -1678,7 +1715,7 @@ function pageIssues(){
     if(marketOpen&&!/live|connected/i.test($("streamStatus")?.textContent||""))add("medium",`Live stream status shows "${$("streamStatus")?.textContent||"—"}" during market hours`);
     if(view==="option"&&!sel)add("medium","Chart view is 'Selected option premium' but no option is selected");
     if(sel){
-      if(a.side&&sel.type!==a.side)add("high",`Chart shows ${sel.type} ${sel.strike} but the engine leans ${a.side} (decision: ${$("bigDecision")?.textContent||"—"})`);
+      if(view==="option"&&a.side&&sel.type!==a.side)add("high",`Chart shows ${sel.type} ${sel.strike} but the engine leans ${a.side} (decision: ${$("bigDecision")?.textContent||"—"})`);
       if(/^\d{4}-\d{2}-\d{2}$/.test(String(sel.expiry))&&sel.expiry<today)add("high",`Selected option ${sel.type} ${sel.strike} expired on ${sel.expiry}`);
       if(idx&&sel.strike){const otm=sel.type==="CE"?sel.strike-idx:idx-sel.strike;
         if(otm>idx*0.01)add("medium",`Selected option ${sel.type} ${sel.strike} is ${Math.round(otm)} pts out of the money (index ${fmt(idx)}) - far from the 2-strikes-ITM rule`);}

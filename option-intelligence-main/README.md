@@ -1,5 +1,170 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.88
+- Android app: "Check for app update" button (More -> Account, shown only inside the app). Nothing is checked on its own. The APK tells its build (OIApp-APK/2 in the user agent); the APK workflow publishes apk-version.json in the apk-latest release; /api/app/apk reads it when the button is pressed. If GitHub has a newer build, an Update button opens the APK in Chrome - then tap Install. Normal server updates still need no new APK.
+- To publish a new APK build in future: raise the number in mobile/capacitor.config.json (OIApp-APK/<n>) together with the native change.
+
+## v1.20.87
+- Android app (rebuild the APK): asks for storage permission on Android 9 and older, and saves the file once allowed. Android 10+ needs no permission to save to Downloads, so nothing is asked there.
+- Android app: after each download a message says "Saved: Downloads/OptionIntelligence/<file>", or why it failed.
+
+## v1.20.86
+- Chart tab: after the close it could still open on the last signal's option, because the first analysis arrived before the market state was known. It now waits for the market state and goes back to the index as soon as it knows the market is closed.
+- Signals page, Download for Claude: the "Preparing the review file" message stays and counts seconds until the file is ready (the first file of the day replays 10 days and can take 1-2 minutes). It used to vanish after 90 s.
+
+## v1.20.85
+- Chart tab: after the market closes it no longer switches to the last signal's option (e.g. NIFTY 25200 CE) - it shows the index, same as the Terminal's last price. During market hours it works as before.
+- Claude strategy monitor: Download for Claude, Download AI report and Test AI now show their progress and result in a message at the bottom of the screen (the old line was below the settings, off-screen on a phone).
+- App download: if no "download complete" notification appears, the message keeps a "Copy download link" button for Chrome.
+
+## v1.20.84 - login page layout fixed
+- The personal-use line added in v1.20.78 sat beside the login form (the page is a centred row), squeezing the form into a narrow column. It is now inside the form's column.
+- "Repeat password" and "Invite code" showed on the Log in tab: the page's label style overrode their hidden state. They now show only on "Create account".
+
+## v1.20.83 - the Android app saves files; the database sleeps longer (no strategy rule changed)
+- **Files are saved on the phone.** A new APK lets every Save / Download go through Android's own download manager: the file lands in **Downloads/OptionIntelligence/** and a "download complete" notification appears. The page recognises this APK (it adds `OIApp-DL/1` to its user agent) and uses it first; an older APK keeps the share menu and the "Copy download link" fallback. **Needs a new APK:** push the `option-intelligence-main/mobile/` folder and `.github/workflows/android-apk.yml` to GitHub - the "Build Android APK" workflow builds it and publishes it as the apk-latest release; install it over the old one. Works on Android 10 and newer.
+- **Neon:** 80 of the 100 free compute hours were used by 16 Nov (storage only 0.03 GB). Heartbeat now every 30 min in market hours (`HEARTBEAT_SEC`), backups of non-urgent changes every 30 min (`MIRROR_GAP_SEC`; new signals and exits still at once), login re-checked every 15 min.
+
+## v1.20.82 - Upstox intraday limit, Neon database usage, downloads in the Android app (no strategy rule changed)
+- **Upstox intraday candles under the limit.** On 16 Nov the intraday-candles API reached 1,033 calls in 30 min (limit 1,000). Today's candles of one instrument / timeframe were fetched separately for every caller (terminal 5 days, Data Check 6, poller 10, board 3 ...). Now they are fetched once and shared; between bar closes they refresh every 10 s (higher timeframes 30 s) - the forming index candle follows the live ticks anyway - and every 3 s for the first 25 s after a bar closes, so closed bars are seen at once. Above 70 / 85 / 95 % of the 30-min limit the refresh slows to 20 / 60 / 120 s. `INTRADAY_REFRESH_SEC` changes the 10 s.
+- **Neon database can sleep.** Neon's free plan stops a database after 5 idle minutes and counts compute hours only while it runs. The app wrote a heartbeat every minute, day and night, so it never slept; and it rewrote whole monthly backup blobs every 2 minutes. Now: heartbeat only in market hours and every 10 min (the "monitor was offline" alert counts from today's open and needs a 15-min gap); a new logged signal or exit is backed up at once, everything else at most every 15 min in market hours and once after the close (`MIRROR_GAP_SEC`); a login is re-checked against the database every 5 min instead of 30 s.
+- **Downloads in the Android app.** Every Save / Download in the app now also shows **Copy download link**: paste it in Chrome and the file downloads there (one-time link, 15 min, up to 5 downloads, no login needed, kept only in the server's memory). Saving through the share menu still runs first.
+
+## v1.20.81 - stay inside Upstox's rate limits (no strategy rule changed)
+- Upstox's Rate Limits page: per API, per user, 25 requests a second / 250 a minute / 1000 in 30 minutes; going over "might result in temporary suspension of access". The app never counted its calls, and a 429 (Too Many Requests) was retried twice at once.
+- Now every Upstox request is counted per API; at most 80 % of the per-second limit is used (a request over it waits a fraction of a second); after a 429 that API is not called for its Retry-After, at least 20 s - the app keeps using cached data meanwhile; a 429 is never retried at once. Server errors (502/503/504) and timeouts are still retried as before.
+- The daily review shows the usage and warns ("UPSTOX USAGE HIGH" / "UPSTOX RATE LIMIT") when an API passes 80 % of a limit or was refused. `/api/upstox/usage` (after login) shows the counts. `UPSTOX_RATE_LIMITS="25,250,1000"` changes the limits if Upstox publishes others.
+- LEGAL.md: rate limits, live-stream connection limit, what is (not) sent to Gemini.
+
+## v1.20.80 - the reviews read the paper tests and the indicator test
+- **Daily AI report and the day file for Claude** now carry the paper tests (MACD turn, Stochastic, Early trend): switched on or off, closed trades, win rate, points, verdict and the latest entries. Before, only the week / month file had them.
+- **Review instructions** (daily and week / month) now say what `paper_tests` and the Diagnostics indicator test are and how to judge them: a paper test may be suggested for live use only with 15+ closed trades and a positive result in both halves; a score weight may change only when two different 30-day runs agree. The reports get a "Paper tests" point, and the week / month report an "Indicator test" point.
+- Nothing in the live signals changes.
+
+## v1.20.79 - server version in the header
+- The running server version ("server v1.20.79") now shows in the header of every page, next to the page name. It is asked from the server on every load and never cached, so after a deploy you see at once whether the new version is really running. The footer line of the terminal stays as it was.
+
+## v1.20.78 - legal hardening (no strategy rule changed) - read LEGAL.md
+- **Personal use by default.** The prices come from the owner's own Upstox login; showing them or the BUY signals to other people is sharing real-time market data and trading calls. After the owner's account no new account can be created, even with the invite code, unless you set `ALLOW_EXTRA_USERS=1` on the server on purpose. Existing accounts keep working.
+- **No downloads from NSE / niftyindices websites at all.** The `UNIVERSE_ONLINE` switch (off since v1.20.66) and its code are removed. Index lists come from a CSV you save by hand in `universes/` or from the built-in list resolved through Upstox.
+- **TradingView Lightweight Charts notice and link** on the pages that draw charts (terminal, Data Check, chart page) - the condition of that library's free licence, which was missing.
+- **One small footer line on every page:** personal research tool, not investment advice, do not share its prices or signals.
+- **LEGAL.md** (new): every data source, what it allows, and the six things not to do.
+
+## v1.20.77 - Diagnostics: the room to the next level is read on the signal bar, like the live app (nothing live changed)
+- **Why 100% winners became 90% between two runs one day apart.** The 13 signals were the same both times; what changed was which 3 the decision rules removed. The replay took the support / resistance map from a snapshot made every 6 bars, counted from the first bar of the data and up to 5 bars old. When the 30-day window moved by a day the snapshot fell on other bars and the same old trade got another "room to the next level": 29 Oct 11:40 CE was 0.16 ATR (removed, a loser) in the 13 Oct - 12 Nov run and 0.82 ATR (kept) in the 14 Oct - 13 Nov run, while 11 Nov 10:45 CE went the other way.
+- **Fix.** For every confirmed signal the replay now reads the zones on the signal bar itself, from exactly the candles the live app uses (the last 6 sessions ending on that bar). The room, the distance from the own level and the level strength are now the same in every run and the same as live. The numbers of the "Matched to your live rules", "Decision rules" and "Room to the next opposite level" lines can therefore differ from earlier runs; from now on they stay put.
+- A test of the review file that only passed with a scalp / 70 alert setting now passes everywhere.
+
+## v1.20.76 - indicator test: several indicators removed together (Diagnostics only, nothing live changed)
+- The 14 Oct - 13 Nov NIFTY run showed that RSI band, ADX and the two chart-pattern checks change no signal when each is taken out of the score alone (RSI band votes like EMA 9/21 on 95.4% of bars, ADX on 91%; RSI and ADX are also hard rules, so the score counts them twice). One at a time is not proof that all can go together.
+- New line **"Indicator test 4/4"** in Diagnostics (and in the Download-for-Claude file): the score added up without **RSI band + ADX**, without **both pattern checks**, and without **all four** - on how many big moves the score is then on the right side, the confirmed signals and points, which signals are added or lost, and a verdict for each set. The hard rules (ADX, RSI, ...) and every other rule stay as they are. The other three lines are now numbered 1/4 - 3/4.
+- Nothing is removed from the live score. Do that only if a second 30-day run says the same.
+
+## v1.20.75 - indicator test in Diagnostics + two more paper-only tests (no live rule or score changed)
+- **Indicator test (Diagnostics, three NOTE lines at the top; also in the Download-for-Claude file).** Answers "is any scoring indicator there for nothing?" on your own days, without changing anything live:
+  1. how each scoring indicator voted at the START of every big move (with it / against it) - an indicator that is against most moves at their start is late;
+  2. the score added up WITHOUT each indicator: on how many big moves the score is then on the right side, and how the confirmed signals and their points change. Only the "Score ≥ minimum" rule is recalculated; the indicator's own hard rule (ADX, Supertrend, higher timeframe, RSI) and every other rule stay as they are;
+  3. which indicators vote the same way on 85%+ of bars (one opinion counted twice), and the candidates to remove or lower in weight.
+  It uses the votes of the normal replay, so the run is not slower. Nothing is changed automatically: under 30 signals it is a direction, not proof.
+- **Two more paper-only tests on NIFTY** (never a BUY, never an alert), next to the MACD turn: **Stochastic cross (loose)** and **Early trend entry (Priority score)** - the two "more signals" candidates of the 13 Oct - 12 Nov Diagnostics (2 and 6 extra trades, not proven). Signals page → "NIFTY paper test" → **All three**. "MACD turn" and "Off" work as before; a saved "Off" stays off. Each test gets its own result line in the Paper tests panel and each entry shows which test logged it. Early trend costs one extra analysis per closed candle.
+- The review file carries every paper test (`paper_tests`) and the indicator test of the latest Diagnostics run; 18 verdict lines instead of 14.
+
+## v1.20.74 - fixes from the 7-13 Nov week review (no strategy rule changed)
+- **A silent live stream no longer blocks entries when the price is still fresh.** "Live data fresh (index tick ≤ 30 s old)" blocked 11 signal-board setups this week. When the stream has no fresh tick the analysis is already priced from an Upstox REST quote; if that quote is at most 10 s old the gate now passes and says so ("live stream silent for 45 s - priced from a fresh Upstox quote (2 s old)"). No quote, or an older one, still blocks. The watchdog keeps restarting the stream as before.
+- **After the close, ages are not reported as problems.** The 13 Nov AI report (15:40) said "BANKNIFTY analysis is 652.6 s old - check engine loop / thread": nothing is recomputed after 15:30, so that age is normal. With the market closed the review data now carries the ages as `age_s_after_close` / `tick_age_s_after_close` with a note. Market-hours checks are unchanged.
+- **Chart no longer jumps to an old option when the page opens.** The first analysis after opening is the copy saved on the last visit (instant start); the chart switched to that visit's option (25250 PE from 11:50) and went back to the index 6 s later. The automatic switch now ignores the saved copy and does not start a new switch while the market is closed.
+- **"Chart shows PE but the engine leans CE"** is reported only when the chart really shows the option (not in the index view).
+
+## v1.20.73 - Score model line compares like with like
+- The "Score model" line in Diagnostics (and in the Download-for-Claude file) compared the live model AFTER your live rules with the other model BEFORE them (10 trades against 13). Both models now get the same live rules, and the line also shows each model's signals before the rules. No signal, rule or page changed.
+- Result on 13 Oct - 12 Nov NIFTY (your two runs): Classic 10 trades, 100% winners, +22.2 pts each; Priority 10 trades, 90%, +11.6. Early trend entry: 6 extra trades, +1.3 pts each. Keep Score model = Classic and Strong-trend entries = Off (both are the defaults).
+
+## v1.20.72 - score model by priority + fast trend identifier
+- **What was wrong with the score.** Higher timeframe (18), Supertrend (15) and ADX (12) carried 45 of 100 points. They are the three slowest indicators, and price structure - the only fast proof of a trend - carried nothing. The side was simply the larger total, so after a turn the slow three kept voting for the old direction: "Engine leaned the other way / no side (score)" was the only blocker on 14 of 44 missed moves (2-12 Nov).
+- **Fast trend identifier (always on, shown in the regime note).** A new trend is recognised within 3-5 closed bars: at least 1.5 ATR nearly one-way (efficiency 0.65+), a close beyond EMA 9 and EMA 21 and beyond the swing high / low of the 6 bars before the burst, no rejection wick, never an opening gap. It stays valid for 12 bars while price holds EMA 21, so the retest entry that follows sees the right side.
+- **New setting on the Signals page: Score model.** *Classic* is the old scoring and stays the default. *Priority (price first + fast trend)*: price trend 20, breakout 10, VWAP 10; momentum EMA 12, MACD 10, RSI 8, volume 5; slow confirmers Supertrend 8, ADX 7, higher timeframe 10. When price has proved a direction the side follows it, and a slow indicator still pointing the old way is not counted against the move. Score minimum and every entry gate (not chasing, retest, sideways, CE structure, time window, profit check) are unchanged.
+- **Diagnostics compares both models on your own days** (first line of the verdict, also in the Download-for-Claude file): trades, winners, points, big moves caught, and how often the engine leaned the wrong way. Switch to Priority only if that line says it is better.
+- **Early trend entry (new choice under Strong-trend entries, off by default).** Until now every entry needed an EMA 9 retest, or (strong-trend variants) a move of 4 ATR already done - so on a fast move the signal came late or never. *Early trend*: the fast trend identifier fired 1-6 bars ago, price paused for at least one bar, and the bar now closes beyond the previous 2 bars. It relaxes only the pullback rules (retest trigger, fresh-breakout wait, not-chasing up to 1.5 ATR beyond EMA 9, RSI direction, RSI up to 80 / 20); score, sideways, CE structure, higher timeframe, time window, dashboard, 60 s hold and the profit check all still apply. Diagnostics measures it on your days twice: in the Strong-trend table (with the live score model) and in the verdict line "Early trend entry with the Priority score".
+- **AI report no longer cut off.** The newer Gemini Flash models think before answering and the thinking counts inside the output limit, so every reply stopped mid-sentence (12 Nov). The limit now leaves room for thinking (GEMINI_THINK_ROOM, 3000 tokens), a reply the model still cut is requested once more with double the room, and a cut reply is marked as cut.
+- **Analysis cannot hang any more.** A server analysis that takes over 25 s (one upstream call that never answers) is dropped and recomputed instead of blocking every page; a live-socket push stuck for 40 s is restarted. This is the likely cause of "Signal analysis not refreshing" (12 Nov 14:56) and the "Request timed out" messages.
+- **Selected option price follows the live tick in every view.** It only followed the socket while the chart showed the option premium; in the index view it kept an old price under a LIVE_TICK label (the "price not updating" and "paper entry differs from last price" warnings). If no tick arrives for 20 s the page asks the server once.
+
+## v1.20.71 - fixes from the 11 Nov review (no strategy rule changed)
+- **Blocked-by names are no longer cut short.** The signal board and the review file showed "Reconfirmed (60s hold" (and the WATCH headline could show "Entry time window 09"), because the rule name was cut at the first colon. Rule names are now cut only at the colon that separates the name from its detail.
+- **Signal time before the open names its day.** Before 09:15 the "Signal generated" box showed the previous session's signal as "15:30 IST · 2,446 min · 489 bars". It now reads "09 Nov · 15:30 IST" and "previous session (09 Nov)".
+- **Restart warning no longer says the server sleeps.** On a paid Render plan the service does not sleep; the message now says restart / new deploy and points to Events in the Render dashboard. The pinger advice is kept only for Render Free.
+
+## v1.20.70 - live socket: other strikes once a second
+- Live-socket data was 79% of Render bandwidth (4.48 GB of 5.66 GB by 11 Nov). Price changes of all ~24 near-ATM options were pushed up to 10 times a second. Now the contract that is charted / selected for paper trading still gets every tick; the other strikes, which only fill the price table, go out at most once a second with their latest price (WS_OPT_OTHERS_SEC). Signals, recording and alerts run on the server and are unchanged.
+
+## v1.20.69 - signal changes are never delayed by the bandwidth limit
+- The analysis object is still sent at most every 4 s while nothing important changes, but any change of the signal itself (level, side, action, decision or the buy/profit check) is now pushed the moment the server computes it. Signal recording, paper checks and alerts were never affected - they run on the server.
+
+## v1.20.68 - quiet after market hours and on holidays, Terminal stays live in market hours
+- **Market closed / weekend / NSE holiday:** prices cannot change, so every page reloads its data once every 15 min only (Terminal full refresh, index price, PCR/OI/IV, paper quotes, Chart, Data, Signals). The live socket sends its full snapshot and candle/analysis check every 5 min (WS_FULL_TICKS_CLOSED_SEC, WS_CLOSED_PUSH_SEC). Opening a page still loads the latest data at once. Holidays come from the server's NSE calendar (the Terminal stores it for all tabs each minute); the clock (Mon-Fri 09:00-15:35 IST) is the fallback.
+- **Market hours:** the Terminal keeps running behind the other tabs again (live feed, alerts, AI view). Chart, Data, Signals and Tests still pause while not on screen. When the phone is locked or the app is in the background, the live socket still closes after 20 s - buy alerts come by push notification.
+
+## v1.20.67 - bandwidth fix (Render suspended the service: 5 GB Hobby bandwidth used up)
+Render's Hobby workspace now includes only 5 GB of outbound bandwidth a month. The app was sending far more than it needed:
+- **Hidden tabs kept downloading.** Since v1.20.45 all five tabs (Terminal, Chart, Data, Signals, Tests) run in hidden frames, but a hidden frame still reported itself as "visible", so every tab polled the server at the same time and Terminal + Chart each held a live socket. Now only the tab on screen reports "visible" (issues.js, loaded first on every page); the others pause, and resume instantly when opened.
+- **Live socket closes when nobody is looking.** Terminal and Chart close their socket 20 s after the page goes off screen (phone locked, app in the background, other tab open) and reconnect on return. Buy alerts still come from the server's push notifications.
+- **Full tick snapshot slowed down.** The socket re-sent all ~24 contracts with metadata every second, day and night, even with the market closed. Price moves still go out at once as small messages; the full snapshot is now every 5 s (market open) / 60 s (closed). The closed-market loop checks once a second instead of 10x. The large analysis object goes out at most every 4 s (it is still recomputed on the server as before).
+- **REST snapshots slower while the socket is live.** PCR/OI/IV and the full option chain refresh every 30 s while live ticks are flowing (6 s / 10 s as before if the socket is down).
+- Env overrides: WS_FULL_TICKS_SEC, WS_FULL_TICKS_CLOSED_SEC, WS_ANALYSIS_MIN_SEC.
+
+## v1.20.66 - market data from Upstox only
+- The app no longer downloads index-constituent CSVs from NSE / niftyindices.com. Breadth universes now use: your own CSV in `universes/` (see universes/README.txt) -> built-in list (Nifty 50 and a new Nifty Bank 12-stock list, instrument keys looked up in Upstox's instrument file) -> clear error for Nifty 100 / Nifty 500 until you add their CSV. UNIVERSE_ONLINE=1 switches the old online fetch back on (with an honest User-Agent). UNIVERSE_DIR changes the folder.
+- Built-in lists can be out of date after a rebalance (March / September); the Data Check page shows which source it used.
+- Sectors, option chain, futures, VIX, heavyweights, candles and live ticks were already Upstox-only. AI notes (Gemini / Claude) and alerts (web push, ntfy, Telegram, Resend) are outputs, not market-data sources.
+
+## v1.20.65 - feed that starts by itself, same-day login restore, no stale ORB side, one stop / reward rule
+From the 9 Nov 2026 review (0 signals; NIFTY feed dead until ~12:11; BANKNIFTY still showing a 10:45 PE at 15:29 while 6.7 ATR up).
+- **Streams start without a browser.** Every 15 s (from 08:55 on a trading day) the watchdog now starts the index stream for any index that has none, then does its usual stall check. Before, a stream only started when a page was opened, and the watchdog only looked at streams that already existed.
+- **Login survives a same-day restart.** The token from Connect Upstox is also saved in the app database and restored at startup while it is inside its validity window (Upstox tokens expire ~03:30 IST next day, so you still log in once each morning - there is no refresh token). Needs the PostgreSQL DATABASE_URL to survive a Render redeploy. PERSIST_UPSTOX_TOKEN=0 turns it off.
+- **Selected-option price cross-check.** If the stream LTP of an option has not changed for 90 s (OPT_LTP_CROSSCHECK_SEC) during market hours, one REST price is fetched (cached 20 s); if it differs, the REST value is shown and labelled. The quote also reports ltp_unchanged_seconds. A thin in-the-money contract that really is untraded keeps its stream price.
+- **ORB (BANKNIFTY) no longer shows a dead side.** The first break of the day is still the day's trade (same rule as the Diagnostics test), but: a break that later closes back inside the opening range is marked FAILED (new gate "Break still holding") and gives no side; after 12:00 there is no side at all. ORB_REARM=1 (default off, untested) lets the next break after a failure be taken.
+- **One stop / reward rule.** Paper SL ATR multiplier is at least 1.5 (default 1.5; an older saved 1 is raised); paper guard minimum reward:risk defaults to 1.5 and is floored at 1.5 (an older saved 1.2 is raised) - same as the signal engine.
+- Not changed: entry rules / gates, Diagnostics replay, AI report, FEED finding spam (next).
+
+## v1.20.64 - phone alerts for serious problems + two more self-checks
+- Health alerts (market hours, every 30 s): a push to the registered phones (event HEALTH, always delivered, saved in the notification history) when live prices for an index stop for over 2 min (HEALTH_FEED_SEC), the Upstox token expires, or a stream is restarted 3+ times in a day (HEALTH_RESTARTS). At most once per problem every 30 min (HEALTH_ALERT_GAP_MIN), and an "OK again" push when it clears. HEALTH_ALERTS=0 turns them off.
+- Terminal self-checks (logged as warnings in Download for Claude): the selected option's price is a REST snapshot instead of a live tick; it has not changed for 3 min while the market is open; the auto-filled paper entry price is more than 3% away from the option's last price.
+
+## v1.20.63 - live stream watchdog
+- 9 Nov 2026: the NIFTY WebSocket went silent around 23:43 the night before and stayed silent all session (last tick 44,000+ s old) while BANKNIFTY ticked normally. The Upstox SDK stops after its reconnect attempts, but the app kept the stream entry and so never restarted it: NIFTY index and option prices came only from REST ("REST quote - waiting for live tick", option chart not live, paper buy price vs last price), and the "Live data fresh" gate blocked every NIFTY setup.
+- New watchdog (every 15 s, market hours): restarts a stream whose index has not ticked for 60 s (STREAM_STALE_SEC) or that the SDK gave up on, at most once per 90 s (STREAM_RESTART_GAP); the SDK "autoReconnectStopped" event now marks the stream dead. "stream_running" is reported honestly. Restarts are listed in Download for Claude ("FEED ...: live stream restarted N time(s) today"). STREAM_WATCHDOG=0 turns it off.
+
+## v1.20.62 - Diagnostics matched to the live rules
+- The replay now applies, in time order, the live rules that act on the day's trades: decision rules (Strict / Balanced, as live), one trade per side per day, max BUYs per day (Option A / B), daily loss limit (MAX_DAILY_LOSSES). The headline, exit tables, groups and rupee estimate use only the signals live would have bought; the first line of the report lists the rules applied, the result vs every signal and each removed signal with its reason.
+- Not replayable (listed in the report): reconfirm hold / freshness, profit check, Data Check dashboard, derivatives filters, daily profit target. A warning is shown when the live strategy for the index is ORB or Off, or BUYs are off for it.
+- The Strict / Balanced advice (Auto mode) and the "same-side signal of the day" line are still measured on every signal.
+- The Claude strategy monitor's 10-day replay uses the same live rules and live exit plan, so its drift and suggestions compare like with like.
+
+## v1.20.61 - automatic self-checks (no Report button needed)
+- Terminal (static/selfcheck.js): once a minute the page checks what it shows against the analysis and logs a "Display mismatch" warning when it does not add up - UPTREND / DOWNTREND against VWAP, a firm trend label with a weak score, the regime or score card differing from the analysis, a confirmed signal below the minimum score, BUY while the market is closed, a BUY decision without a confirmed signal, analysis not refreshing for 3 min in market hours, the Derivatives switch differing from the mode in use. A mismatch must be seen on 2 checks in a row.
+- Every page (sync.js): server-busy and offline periods are logged with start time and length (over 20 s), and once more if one lasts over 1 minute.
+- All of these appear as warnings under problems in Download for Claude (day / week / month). Nothing on the pages changes.
+
+## v1.20.60 - honest "Market regime" when there is no trend
+- With no price-structure trend and no range, the card showed "BULLISH" / "BEARISH" (green / red) and "Trending: price is making directional progress" although only the indicator score leaned that way (e.g. 35/100). It now shows "LEANING BULLISH" / "LEANING BEARISH" / "NO CLEAR TREND" in yellow, with the bull / bear scores. UPTREND / DOWNTREND / SIDEWAYS are unchanged; signals, gates and scores are unchanged.
+
+## v1.20.59 - no false "Offline" while the server is busy
+- Header status: "Offline" now only when this device has no internet. A slow or restarting server (Diagnostics replay, Render deploy / wake-up) shows "Server busy - retrying" and retries every 10 s; nothing is lost either way.
+- Diagnostics replay pauses briefly every 10 bars so the web server keeps answering during a run (account sync and live prices no longer time out).
+
+## v1.20.58 - derivatives filters on the main terminal
+- Toolbar: "Derivatives filters" switch (Record only / Option A / Option B / Off), owner only; keeps every other saved setting (POST /api/derivatives/mode).
+- Live derivatives panel: each check's live reading for the current signal (CE side / PE side / against / spike / range / no data), what Option A would do and the Option B score, plus "Which option works" - win rate, average and net points of Off, Option A, Option B and A + B for today / 7 / 30 days and the current index.
+
+## v1.20.57 - derivatives filters: Off / Record only / Option A (gates) / Option B (inside the score)
+- New checks (derivatives.py): futures price + OI buildup, option writers near ATM (±3 strikes), PCR trend (15 min), heavyweights vs VWAP (BANKNIFTY: HDFC Bank + ICICI Bank; NIFTY: HDFC Bank + Reliance), volatility calm (India VIX + ATM IV), ATM straddle decay with a flat index (premium-decay range).
+- Signals page "Derivatives filters": Record only (default - score and signals unchanged, readings saved on the signal board), Option A (score unchanged, extra pass / fail gates), Option B (the checks get score weight: futures OI 10, ATM writers 10, heavyweights 8, PCR 6, volatility 6, straddle 5), Off (v1.20.56 behaviour, nothing fetched).
+- Also on the Signals page: Max BUYs per day and Event days (RBI 4 Dec 2026, Budget 1 Feb 2027, RBI 5 Feb 2027 by default; no entries before 11:30 on those days). Both apply with Option A or B.
+- Diagnostics page: new "Derivatives filters - which option works" panel - win rate and points per trade for Off, Option A pass / block, Option B pass / below, A + B, and each check on its own, from the signal board's recorded readings and 60-minute test outcomes. The candle replay cannot test these (Upstox keeps no OI / IV history).
+- Missing data never blocks a signal: an unavailable check is left out of the score and its gate passes with "unavailable".
+- Environment overrides: DERIV_MODE, DERIV_REFRESH_SEC, DERIV_MIN_NET, DERIV_VIX_SPIKE_PCT, DERIV_IV_SPIKE_PCT, DERIV_STRADDLE_DECAY_PCT, EVENT_DAYS, EVENT_BLOCK_UNTIL, MAX_BUYS_PER_DAY, HEAVYWEIGHTS_BANKNIFTY, HEAVYWEIGHTS_NIFTY.
+
 ## v1.20.22 - Opening Range Breakout tested in Diagnostics
 
 New "Opening Range Breakout (ORB)" table: opening range = high / low of the first 15 or 30 minutes after 09:15; the first 5-minute close above it is a CE entry, below it a PE entry; one trade a day, entries until 12:00. Versions: the break alone, only when the engine leans the same way, only when the range is 0.5-2.5 ATR wide. Live trailing exit, first / second half, verdict, trade list. Not live - the app trades it only if it proves itself on NIFTY / BANKNIFTY.

@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.55">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.55">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.88">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.88">
   <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
   <script>window.LightweightCharts||document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"><\/script>')</script>
 <style>.dflow{margin-top:10px}.dflow .df-step{border:1px solid var(--line);border-radius:10px;padding:8px 10px;text-align:center;background:var(--panel2)}.dflow .df-step b{display:block;font-size:13px}.dflow .df-step small{color:var(--muted);font-size:11px}.dflow .df-step .df-st{font-size:11px;margin-top:3px}.dflow .df-ok{border-color:#24634f}.dflow .df-bad{border-color:#6c3542}.dflow .df-off{opacity:.45}.dflow .df-arrow{text-align:center;color:var(--muted);font-size:13px;line-height:16px}.dflow .df-final{border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center;background:#0d1f17}.dflow .df-final b{display:block;font-size:12px;letter-spacing:1px;color:var(--muted)}.dflow .df-final span{font-size:20px;font-weight:900}.dflow .df-fail{color:var(--muted);font-size:11px;text-align:left;margin-top:4px}</style>
@@ -26,6 +26,7 @@
     <label>Timeframe<select id="interval"><option value="5">5 minutes</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></label>
     <label>Signal mode<select id="signalMode"><option value="scalp">Scalp · 20–40 pt moves</option><option value="standard" selected>Standard · default</option></select></label>
     <label>Minimum score<select id="scoreMin"><option value="60" selected>60 · Default</option><option value="65">65 · Medium</option><option value="70">70 · Strict</option></select></label>
+    <label title="Option-chain OI, PCR trend, futures OI, heavyweight stocks, IV / VIX, ATM straddle (owner setting, same as the Signals page). Record only = studied, signals unchanged">Derivatives filters<select id="derivMode"><option value="record">Record only</option><option value="gates">Option A · gates</option><option value="score">Option B · in score</option><option value="off">Off</option></select></label>
     <label>Chart view<select id="chartView"><option value="index">Underlying index</option><option value="option">Selected option premium</option></select></label>
     <label title="On WATCH / confirmed CE or PE the chart switches to the option 2 strikes in the money on that side (strike offset is set on the Signals page)">Signal option<select id="autoOption"><option value="on" selected>Auto-switch chart</option><option value="off">Keep my selection</option></select></label>
     <label>Auto refresh<select id="refreshEvery" title="Live price / chart update rate. Below 2 s the live connection is used; the full reload runs every 2 s only if it drops."><option value="0.1" selected>0.1 s (live)</option><option value="0.25">0.25 s (live)</option><option value="0.5">0.5 s (live)</option><option value="1">1 s (live)</option><option value="2">2 s</option><option value="3">3 s</option><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></label>
@@ -159,6 +160,13 @@
     </div>
     <div class="sub small" id="derivTimestamp">Data timestamp: unavailable</div>
     <div class="table-wrap"><table><thead><tr><th>Live contract</th><th>Type</th><th>Strike</th><th>LTP</th><th>OI</th><th>IV %</th><th>Tick age</th></tr></thead><tbody id="liveTicksRows"><tr><td colspan="7" class="empty">Waiting for fresh WebSocket ticks. Values older than 15 seconds are marked stale.</td></tr></tbody></table></div>
+    <div id="derivFilters" class="deriv-filters" style="margin:12px 0">
+      <div class="section-head" style="margin-bottom:6px"><div><h3 style="margin:0">Derivatives filters <span id="dfMode" class="pill muted">—</span></h3><p class="sub" id="dfVerdict" style="margin:4px 0 0">Waiting for the next analysis</p></div></div>
+      <div class="table-wrap" style="max-height:none"><table class="cardify"><thead><tr><th>Check</th><th>Reading</th><th style="text-align:left">Detail</th></tr></thead><tbody id="dfChecks"><tr><td colspan="3" class="empty">Shown when the filters are not Off</td></tr></tbody></table></div>
+      <div class="section-head" style="margin:12px 0 6px"><div><h3 style="margin:0">Which option works - win rate of each</h3><p class="sub" id="dfStudyNote" style="margin:4px 0 0">From the signals recorded on the signal board (60-minute test trade on the index)</p></div><label class="sub">Period<select id="dfPeriod"><option value="1">Today</option><option value="7">7 days</option><option value="30" selected>30 days</option></select></label></div>
+      <div class="table-wrap"><table class="cardify"><thead><tr><th>Option</th><th>Setups</th><th>Tested</th><th>Target / stop</th><th>Win rate</th><th>Avg pts</th><th>Net pts</th></tr></thead><tbody id="dfStudy"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody></table></div>
+      <p class="sub" id="dfBest" style="font-weight:600;margin:6px 0 0"></p><p class="sub" style="margin:4px 0 0"><a href="/diagnostics#derivStudy">Each check on its own → Diagnostics</a></p>
+    </div>
     <div class="notice warning">PCR and total OI are REST option-chain snapshots refreshed periodically; only rows marked fresh are confirmed WebSocket ticks. Missing/stale fields remain UNAVAILABLE.</div>
   </section>
 
@@ -214,7 +222,7 @@
         </div>
         <div id="paperAtrSettings" class="paper-form">
           <label>ATR timeframe<select id="paperAtrInterval"><option value="1">1 minute</option><option value="3">3 minutes</option><option value="5" selected>5 minutes</option><option value="15">15 minutes</option></select></label>
-          <label>SL ATR multiplier<input id="paperSlMult" type="number" min="0.1" step="0.1" value="1"></label>
+          <label>SL ATR multiplier (min 1.5)<input id="paperSlMult" type="number" min="1.5" step="0.1" value="1.5"></label>
           <label>Target 1 ATR multiplier<input id="paperT1Mult" type="number" min="0.1" step="0.1" value="1.5"></label>
           <label>Target 2 ATR multiplier<input id="paperT2Mult" type="number" min="0.1" step="0.1" value="2.5"></label>
           <label>Target 3 ATR multiplier<input id="paperT3Mult" type="number" min="0.1" step="0.1" value="3.5"></label>
@@ -269,9 +277,9 @@
     <div class="section-head paper-table-head"><div><h3>Paper trade history</h3><p>Saved to your account automatically and available on every device you sign in on.</p></div><div class="paper-actions"><button class="secondary" id="paperExportBtn">Export CSV</button><button class="secondary" id="paperClearBtn">Clear closed history</button></div></div>
     <div class="table-wrap"><table class="cardify"><thead><tr><th>Opened / Closed</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Realized P&amp;L</th><th>Entry context</th></tr></thead><tbody id="paperHistoryRows"><tr><td colspan="8" class="empty">No closed trades yet.</td></tr></tbody></table></div>
   </section>
-  <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions</footer>
+  <footer><span id="buildInfo"></span> · Research and paper-trading starter · Not investment advice · Verify data freshness and API permissions<br>Personal research tool for the account owner · Not investment advice · Do not share its prices or signals with other people · Market data: your own Upstox account<br>Charts: TradingView Lightweight Charts™ Copyright (с) 2024 TradingView, Inc. <a href="https://www.tradingview.com/" target="_blank" rel="noopener" style="color:inherit">https://www.tradingview.com/</a></footer>
 </main>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/issues.js?v=1.20.55"></script><script src="/static/trendlines.js?v=1.20.55"></script><script src="/static/savefile.js?v=1.20.55"></script><script src="/static/boot.js?v=1.20.55"></script><script src="/static/sync.js?v=1.20.55" data-next="/static/app.js?v=1.20.55"></script>
-<script src="/static/mobile.js?v=1.20.55" defer></script><script src="/static/sections.js?v=1.20.55" defer></script><script src="/static/tables.js?v=1.20.55" defer></script>
+<script src="/static/issues.js?v=1.20.88"></script><script src="/static/trendlines.js?v=1.20.88"></script><script src="/static/savefile.js?v=1.20.88"></script><script src="/static/boot.js?v=1.20.88"></script><script src="/static/sync.js?v=1.20.88" data-next="/static/app.js?v=1.20.88"></script>
+<script src="/static/derivterm.js?v=1.20.88" defer></script><script src="/static/selfcheck.js?v=1.20.88" defer></script><script src="/static/mobile.js?v=1.20.88" defer></script><script src="/static/sections.js?v=1.20.88" defer></script><script src="/static/tables.js?v=1.20.88" defer></script>
 </body></html>

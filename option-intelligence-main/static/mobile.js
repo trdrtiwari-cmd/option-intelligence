@@ -11,6 +11,9 @@
   const isAuth = path === "/login";
   const prefs = () => window.OIPrefs || { get: (k, d) => d, set() { }, onChange() { } };
 
+  // v1.20.67: the tab-visibility switch lives in issues.js (the first script on every page) - see there.
+  const setTabActive = on => { try { window.__oiSetTabActive && window.__oiSetTabActive(on); } catch { } };
+
   // ------------------------------------------------------------- service worker
   if ("serviceWorker" in navigator && window.isSecureContext && window.self === window.top) {
     window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => { }));
@@ -80,7 +83,7 @@
     const bg = document.createElement("div"); bg.className = "m-sheet-bg";
     sheet = document.createElement("div"); sheet.className = "m-sheet"; sheet.setAttribute("role", "dialog"); sheet.setAttribute("aria-label", "More");
     sheet.innerHTML = '<h3>More</h3>' +
-      '<a class="m-row" href="/account"><span>Account &amp; saved settings<small>Password, saved data, reset preferences</small></span></a>' +
+      '<a class="m-row" href="/account"><span>Account &amp; saved settings<small>Password, saved data, reset preferences, app update</small></span></a>' +
       '<a class="m-row" id="mUpstox" href="/api/login" hidden><span>Connect Upstox<small>Owner only - refresh the daily token</small></span></a>' +
       '<label class="m-row"><span>Notifications<small id="mNotifyInfo">Which signals send a push</small></span><select class="m-select" id="mNotify"><option value="all">All signal changes</option><option value="confirmed">Confirmed buy only</option></select></label>' +
       '<label class="m-row"><span>Keep screen awake<small>Stops the phone sleeping while the app is open</small></span><input type="checkbox" class="m-switch" id="mAwake"></label>' +
@@ -177,8 +180,19 @@
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     });
   }
+  // v1.20.68: during market hours the Terminal keeps running behind other tabs (live feed, alerts, AI view). The other tabs and
+  // the Terminal outside market hours pause while not on screen.
+  let curTab = hostPath;
+  const keepLive = k => k === "/" && !!(window.__oiMarketOpen && window.__oiMarketOpen());
+  function applyActive() {
+    Object.entries(frames).forEach(([k, f]) => { try { f.contentWindow.postMessage({ oiActive: k === curTab || keepLive(k) }, location.origin); } catch { } });
+    setTabActive(curTab === hostPath || keepLive(hostPath));
+  }
+  if (!framed) setInterval(applyActive, 60000);          // market opens / closes while another tab is on screen
   function showTab(p, push) {
+    curTab = p;
     Object.entries(frames).forEach(([k, f]) => { f.style.display = k === p ? "block" : "none"; });
+    applyActive();
     if (p !== hostPath && !frames[p]) {
       const f = document.createElement("iframe");
       f.className = "oi-tab-frame"; f.title = p; f.src = p;
@@ -217,7 +231,7 @@
         f.className = "oi-tab-frame"; f.title = p; f.src = p;
         f.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0;z-index:800;background:var(--bg,#0b1420);display:none";
         document.body.appendChild(f); frames[p] = f;
-        f.addEventListener("load", () => setTimeout(next, 1500), { once: true });
+        f.addEventListener("load", () => { try { f.contentWindow.postMessage({ oiActive: f.style.display !== "none" || keepLive(p) }, location.origin); } catch { } setTimeout(next, 1500); }, { once: true });
       } else next();
     };
     setTimeout(next, 4000);
@@ -277,4 +291,56 @@
     const card = e.target.closest && e.target.closest(".stat");
     if (card && !e.target.closest("button,a,select,input")) card.classList.toggle("open");
   });
+})();
+
+/* v1.20.79: the running server version in the header of every page, next to the page name (it used to be only in the footer of
+   the terminal). Asked from /health on every load, never cached, so after a deploy it shows what is really running. */
+(function () {
+  "use strict";
+  function show() {
+    var brand = document.querySelector("header.topbar .brand");
+    if (!brand || document.getElementById("srvVer")) return;
+    var tag = document.createElement("span");
+    tag.id = "srvVer";
+    tag.title = "Server version now running";
+    tag.style.cssText = "margin-left:8px;font-size:11px;font-weight:600;letter-spacing:0;color:#91a4ba;white-space:nowrap;vertical-align:middle";
+    brand.appendChild(tag);
+    fetch("/health", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.version) tag.textContent = "server v" + d.version;
+    }).catch(function () {});
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", show); else show();
+})();
+
+/* v1.20.88: "Check for app update" (Account page, only inside the Android app). Nothing is checked on its own - only when the
+   button is pressed. The app sends its build as OIApp-APK/<n> in the user agent (older APKs send none = 0); if GitHub has a
+   newer build an Update button appears: it opens the APK link in Chrome, which downloads it - then tap the download and Install
+   (Android always asks for that tap). Your settings stay. */
+(function () {
+  "use strict";
+  function native() { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }
+  function mine() { var m = /OIApp-APK\/(\d+)/.exec(navigator.userAgent || ""); return m ? +m[1] : 0; }
+  function init() {
+    var panel = document.getElementById("apkPanel"), btn = document.getElementById("apkCheck"), msg = document.getElementById("apkMsg");
+    if (!panel || !btn || !native()) return;
+    panel.hidden = false;
+    btn.onclick = function () {
+      btn.disabled = true; msg.textContent = "Checking…";
+      var old = document.getElementById("apkGo"); if (old) old.remove();
+      fetch("/api/app/apk", { cache: "no-store", credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d || d.build == null) { msg.textContent = "Could not read the latest version from GitHub - try again later."; return; }
+        if (!(d.build > mine())) { msg.textContent = "You have the latest app (build " + mine() + ")."; return; }
+        msg.textContent = "New app version available (build " + d.build + ", you have " + mine() + "). ";
+        var go = document.createElement("button");
+        go.id = "apkGo"; go.type = "button"; go.textContent = "Update";
+        go.onclick = function () {
+          msg.textContent = "Opening the download in Chrome… when it finishes, tap it and choose Install. Your settings stay.";
+          window.location.href = d.url;        // not an app address, so the app hands it to Chrome, which downloads it
+        };
+        btn.after(go);
+      }).catch(function () { msg.textContent = "Could not check - no connection?"; })
+        .then(function () { btn.disabled = false; });
+    };
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
 })();

@@ -22,6 +22,7 @@ import signal_exits as sx
 import notifier
 import option_plan as op
 import signal_board as sb
+import derivatives as dv
 import monitor as mon
 
 # Resolve the project directory before any path-backed configuration is initialized.
@@ -148,7 +149,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.55"
+APP_VERSION = "1.20.88"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -183,6 +184,16 @@ CONTRACT_CACHE_TTL = 300
 CANDLE_CACHE_TTL = 3          # merged candles (history + today) - short, so refreshes are near-live
 HIST_CACHE_TTL = 600          # completed past sessions never change intraday: cache them
 HIST_CACHE = {}
+# v1.20.82: today's intraday candles of one instrument / timeframe are fetched ONCE and shared by every caller. They used to be
+# cached per (key, timeframe, days), so the terminal (5 days), Data Check zone (6), poller (10), board outcomes (3) ... each made
+# its own call for the same data - on 16 Nov the intraday API reached 1,033 calls in 30 min, over Upstox's 1,000 limit.
+# The forming candle of the index follows the live ticks anyway, so between bar closes a 10 s refresh is enough (higher
+# timeframes 30 s); for the first 25 s after a bar closes it is 3 s, so a closed bar is seen at once. Near the limit it slows down.
+INTRA_CACHE = {}              # (key, interval) -> (fetched_at, rows)
+INTRA_FAST_SEC = 3.0
+INTRA_SLOW_SEC = float(os.getenv("INTRADAY_REFRESH_SEC", "10") or 10)
+INTRA_HTF_SEC = 30.0
+INTRA_BAR_GRACE = 25.0
 LTP_CACHE = {}
 LTP_CACHE_TTL = 1.5
 FRESH_SECONDS = 15
@@ -284,6 +295,90 @@ _UPSTOX_CLIENT = None
 _UPSTOX_SEM = asyncio.Semaphore(int(os.getenv("UPSTOX_MAX_CONCURRENT", "8") or 8))
 _UPSTOX_INFLIGHT = {}
 
+# ---- v1.20.81: stay inside Upstox's published rate limits ------------------------------------------------------------------------
+# Upstox's Rate Limits page: per API, per user - 25 requests a second, 250 a minute, 1000 in 30 minutes; going over "might result in
+# temporary suspension of access". The app never counted its calls and retried a 429 (Too Many Requests) twice at once. Now:
+#   * every real Upstox request is counted per API (candles, intraday candles, option chain, quotes, LTP, ...);
+#   * at most UPSTOX_RL_SEC_SHARE of the per-second limit is used - a request that would go over waits a fraction of a second;
+#   * after a 429 that API is left alone for its Retry-After (at least 20 s) - the callers already fall back to cached data;
+#   * a 429 is no longer retried at once;
+#   * the counts go to the daily review, which warns when an API passes 80 % of a limit.
+# UPSTOX_RATE_LIMITS="25,250,1000" (per second, per minute, per 30 minutes) changes the limits if Upstox publishes others.
+def _rl_limits():
+    try:
+        a, b, c = (int(x) for x in os.getenv("UPSTOX_RATE_LIMITS", "25,250,1000").split(","))
+        return {1: a, 60: b, 1800: c}
+    except Exception:
+        return {1: 25, 60: 250, 1800: 1000}
+
+
+RL_LIMITS = _rl_limits()
+RL_SEC_SHARE = float(os.getenv("UPSTOX_RL_SEC_SHARE", "0.8") or 0.8)
+_RL_CALLS = {}                 # api family -> deque of call times (last 30 min)
+_RL_COOL = {}                  # api family -> time until which it is not called (after a 429)
+_RL_429 = {}                   # api family -> 429s received today (reset at midnight IST)
+
+
+def rl_family(url):
+    """The 'API' Upstox counts against: the path without the instrument key / dates."""
+    from urllib.parse import urlparse
+    p = urlparse(url).path
+    if "/historical-candle/intraday/" in p:
+        return "/v3/historical-candle/intraday"
+    if "/historical-candle/" in p:
+        return "/v3/historical-candle"
+    return p.rstrip("/") or "/"
+
+
+def _rl_prune(dq, now):
+    while dq and now - dq[0] > 1800:
+        dq.popleft()
+
+
+def rl_counts(now=None):
+    """Calls per API in the last second, minute and 30 minutes, and the share of each limit used."""
+    now = now or time.time()
+    out = {}
+    for fam, dq in list(_RL_CALLS.items()):
+        _rl_prune(dq, now)
+        c = {w: sum(1 for t in dq if now - t <= w) for w in (1, 60, 1800)}
+        out[fam] = {"last_sec": c[1], "last_min": c[60], "last_30min": c[1800],
+                    "peak_share_pct": round(100.0 * max(c[w] / RL_LIMITS[w] for w in c), 1),
+                    "cooling_s": max(0, round(_RL_COOL.get(fam, 0) - now)), "rate_limited_today": _RL_429.get(fam, 0)}
+    return out
+
+
+async def _rl_take(fam):
+    """Wait (a fraction of a second at most) for a slot under the per-second share; refuse while the API is cooling after a 429."""
+    import collections
+    dq = _RL_CALLS.setdefault(fam, collections.deque())
+    for _ in range(20):
+        now = time.time()
+        if now < _RL_COOL.get(fam, 0):
+            raise HTTPException(status_code=429, detail={"upstox_error": f"{fam}: waiting {int(_RL_COOL[fam] - now)} s after Upstox's rate limit",
+                                                         "hint": "The app pauses this Upstox API after a 429 so the account is not suspended; cached data is used."})
+        _rl_prune(dq, now)
+        recent = [t for t in dq if now - t < 1.0]
+        if len(recent) < max(1, int(RL_LIMITS[1] * RL_SEC_SHARE)):
+            dq.append(now)
+            return
+        await asyncio.sleep(max(0.02, 1.0 - (now - recent[0])))
+    dq.append(time.time())
+
+
+def _rl_hit_429(fam, response):
+    try:
+        wait = float(response.headers.get("Retry-After") or 0)
+    except Exception:
+        wait = 0.0
+    _RL_COOL[fam] = time.time() + max(20.0, min(wait, 300.0))
+    day = ist_now().strftime("%Y-%m-%d")
+    if _RL_429.get("_day") != day:
+        _RL_429.clear()
+        _RL_429["_day"] = day
+    _RL_429[fam] = _RL_429.get(fam, 0) + 1
+    logger.warning("Upstox rate limit (429) on %s - pausing it for %d s", fam, int(_RL_COOL[fam] - time.time()))
+
 
 def _upstox_client():
     """One keep-alive connection pool for every Upstox call. A new client per request meant a fresh TLS handshake (hundreds of
@@ -311,8 +406,10 @@ async def upstox_get(url, params=None):
 async def _upstox_get_once(url, params, token):
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     response = None
+    fam = rl_family(url)
     for attempt in range(3):
         try:
+            await _rl_take(fam)                     # v1.20.81: counted, and kept under Upstox's per-second limit
             async with _UPSTOX_SEM:
                 response = await _upstox_client().get(url, params=params, headers=headers)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -321,7 +418,10 @@ async def _upstox_get_once(url, params, token):
                 continue
             raise HTTPException(status_code=504, detail={"upstox_error": f"Upstox did not answer ({type(exc).__name__})",
                                                          "hint": "Network or Upstox is slow; the next refresh will retry."})
-        if response.status_code in (429, 502, 503, 504) and attempt < 2:
+        if response.status_code == 429:             # v1.20.81: never retried at once - the API is paused instead
+            _rl_hit_429(fam, response)
+            break
+        if response.status_code in (502, 503, 504) and attempt < 2:
             await asyncio.sleep(0.5 * (attempt + 1) + (hash(url) % 300) / 1000)
             continue
         break
@@ -354,8 +454,10 @@ async def check_token_state():
     try:
         headers = {"Accept": "application/json", "Authorization": f"Bearer {runtime_token}"}
         client = _upstox_client()
+        await _rl_take("/v2/user/profile")
         r = await client.get(f"{API_BASE}/v2/user/profile", headers=headers, timeout=6.0)
         if r.status_code in (401, 403):
+            await _rl_take("/v2/market-quote/ltp")
             # Read-only / analytics tokens cannot read the profile but work for market data,
             # so only call the token expired if a real market-data request is rejected too.
             r = await client.get(f"{API_BASE}/v2/market-quote/ltp", params={"instrument_key": INDEX_KEYS["NIFTY"]}, headers=headers, timeout=6.0)
@@ -413,6 +515,16 @@ def overlay_live_tick(candles, key, interval):
     return _apply_ltp(candles, float(view["ltp"]), interval)
 
 
+def _rest_quote_age(feed, now=None):
+    """v1.20.74: seconds since the REST quote that priced these candles was folded in; None unless the price came from REST."""
+    if not feed or feed.get("price_source") != "REST_QUOTE":
+        return None
+    try:
+        return max(0.0, (now or time.time()) - parse_time(feed["server_time"]).timestamp())
+    except Exception:
+        return None
+
+
 async def overlay_index_price(candles, key, sym, interval):
     """Index candles: prefer the WebSocket tick; when the stream is idle fall back to the REST quote (1.5 s cache) so the
     forming bar and the analysis never trail the market by the candle endpoint's lag. Returns (candles, source, bars_behind)."""
@@ -447,6 +559,38 @@ def _rows_to_candles(rows):
     return out
 
 
+def _intra_ttl(interval, now=None):
+    """How long today's intraday candles of this timeframe are reused (see INTRA_CACHE)."""
+    now = now or time.time()
+    t = datetime.fromtimestamp(now, IST)
+    into_bar = (t.hour * 3600 + t.minute * 60 + t.second) % max(60, int(interval) * 60)
+    ttl = INTRA_FAST_SEC if into_bar < INTRA_BAR_GRACE else (INTRA_SLOW_SEC if int(interval) <= 5 else INTRA_HTF_SEC)
+    u = (rl_counts(now).get("/v3/historical-candle/intraday") or {})
+    share = (u.get("last_30min") or 0) / max(1, RL_LIMITS[1800])
+    if share >= 0.95:
+        ttl = max(ttl, 120.0)
+    elif share >= 0.85:
+        ttl = max(ttl, 60.0)
+    elif share >= 0.7:
+        ttl = max(ttl, 20.0)
+    return ttl
+
+
+async def _intraday_rows(key, interval):
+    """Today's candles from Upstox's intraday API, shared by every caller and every `days` value. Raises like upstox_get."""
+    ik = (key, int(interval))
+    hit = INTRA_CACHE.get(ik)
+    if hit and time.time() - hit[0] < _intra_ttl(interval):
+        return hit[1]
+    intra = await upstox_get(f"{API_V3}/historical-candle/intraday/{key}/minutes/{interval}")
+    rows = _rows_to_candles((intra.get("data") or {}).get("candles"))
+    INTRA_CACHE[ik] = (time.time(), rows)
+    if len(INTRA_CACHE) > 80:
+        for old in sorted(INTRA_CACHE, key=lambda k: INTRA_CACHE[k][0])[:30]:
+            INTRA_CACHE.pop(old, None)
+    return rows
+
+
 async def fetch_candles(key, interval, days):
     """Historical + today's intraday candles, merged, ascending, de-duplicated.
 
@@ -473,8 +617,7 @@ async def fetch_candles(key, interval, days):
     intra_ok = False
     for attempt in range(2):                 # v1.20.52: one retry - a missed intraday call left today's futures volume at 0
         try:
-            intra = await upstox_get(f"{API_V3}/historical-candle/intraday/{key}/minutes/{interval}")
-            rows += _rows_to_candles((intra.get("data") or {}).get("candles"))
+            rows += await _intraday_rows(key, interval)
             intra_ok = True
             break
         except HTTPException as exc:
@@ -494,7 +637,7 @@ async def fetch_candles(key, interval, days):
 # ---------------------------------------------------------------- index-futures volume proxy
 async def load_futures_rows():
     """Stream Upstox's public NSE instrument file and keep only FUT records (low memory)."""
-    scanner = FutureScanner(eq_symbols=dd.FALLBACK_NIFTY50)
+    scanner = FutureScanner(eq_symbols=sorted(set(dd.FALLBACK_NIFTY50) | set(dd.FALLBACK_NIFTYBANK)))
     async with httpx.AsyncClient(timeout=90.0, follow_redirects=True) as client:
         async with client.stream("GET", INSTRUMENT_URL) as resp:
             if resp.status_code != 200:
@@ -644,6 +787,8 @@ def _on_stream_message(message):
                     "last_trade_time": p["ltt"] or old.get("last_trade_time"),
                     "received_at": utc_now_iso(),
                     "received_ts": now,
+                    # v1.20.65: when the LTP last CHANGED (received_ts moves on every message, even if only the book changed)
+                    "ltp_changed_ts": now if (p["ltp"] is not None and p["ltp"] != old.get("ltp")) else old.get("ltp_changed_ts", now),
                     "feed_timestamp": current_ts,
                 }
     except Exception as exc:
@@ -725,8 +870,20 @@ def _start_stream(symbol, instruments):
                 STREAM_ERRORS.pop(symbol, None)
             logger.info("Upstox V3 stream opened for %s (%d keys)", symbol, len(new_keys))
 
+        def on_gave_up(*args):          # v1.20.63: the SDK stopped retrying - mark it dead so the watchdog restarts it
+            with STREAM_LOCK:
+                st_ = STREAMS.get(symbol)
+                if st_ and st_.get("streamer") is streamer:
+                    st_["dead"] = True
+                STREAM_ERRORS[symbol] = "Live stream stopped reconnecting - restarting"
+            logger.warning("Upstox stream for %s stopped reconnecting: %s", symbol, args)
+
         streamer.on("error", on_error)
         streamer.on("open", on_open)
+        try:
+            streamer.on("autoReconnectStopped", on_gave_up)
+        except Exception:
+            pass
         try:
             streamer.auto_reconnect(True, 5, 10)
         except Exception:
@@ -743,13 +900,262 @@ def _start_stream(symbol, instruments):
 
         thread = threading.Thread(target=runner, daemon=True, name=f"upstox-{symbol.lower()}")
         with STREAM_LOCK:
-            STREAMS[symbol] = {"streamer": streamer, "keys": new_keys, "thread": thread, "started_at": utc_now_iso()}
+            STREAMS[symbol] = {"streamer": streamer, "keys": new_keys, "thread": thread, "started_at": utc_now_iso(), "started_ts": time.time()}
             STREAM_ERRORS.pop(symbol, None)
         thread.start()
     except Exception as exc:
         with STREAM_LOCK:
             STREAM_ERRORS[symbol] = f"WebSocket unavailable: {exc}. Install/update upstox-python-sdk and verify token/API access."
         logger.warning("Could not start Upstox stream for %s: %s", symbol, exc)
+
+
+# ---- v1.20.65: keep the Upstox login across a same-day restart ----------------------------------------------------------------
+# runtime_token lives only in memory and falls back to the UPSTOX_ACCESS_TOKEN env var on every restart (Render sleep / redeploy), which
+# is usually yesterday's token. The token you get from Connect Upstox is now also stored in the app database (app_meta) and restored at
+# startup while it is still inside its validity window (Upstox tokens expire at about 03:30 IST the next day). It cannot survive the next
+# morning - Upstox has no refresh token, so you still press Connect Upstox once a day. PERSIST_UPSTOX_TOKEN=0 turns this off.
+TOKEN_META_KEY = "upstox_token_v1"
+TOKEN_EXPIRY_IST = (3, 30)
+
+
+def token_window_open(saved_ts, now_ts=None):
+    """True while a token saved at saved_ts (epoch s) is still inside its daily validity window (5 min safety margin)."""
+    now_ts = time.time() if now_ts is None else now_ts
+    saved = datetime.fromtimestamp(saved_ts, IST)
+    exp = saved.replace(hour=TOKEN_EXPIRY_IST[0], minute=TOKEN_EXPIRY_IST[1], second=0, microsecond=0)
+    if saved >= exp:
+        exp += timedelta(days=1)
+    return now_ts < exp.timestamp() - 300
+
+
+def _save_token(token):
+    if os.getenv("PERSIST_UPSTOX_TOKEN", "1").strip() == "0" or not token:
+        return
+    try:
+        acc.meta_set(TOKEN_META_KEY, json.dumps({"token": token, "at": time.time()}))
+    except Exception as exc:
+        logger.warning("Could not store the Upstox token: %s", str(exc)[:140])
+
+
+def _load_saved_token():
+    """The stored token if it is still inside its validity window, else ''."""
+    if os.getenv("PERSIST_UPSTOX_TOKEN", "1").strip() == "0":
+        return ""
+    try:
+        raw = acc.meta_get(TOKEN_META_KEY)
+        d = json.loads(raw) if raw else {}
+        if d.get("token") and token_window_open(float(d.get("at") or 0)):
+            return str(d["token"])
+    except Exception as exc:
+        logger.info("No stored Upstox token: %s", str(exc)[:140])
+    return ""
+
+
+@app.on_event("startup")
+async def _restore_saved_token():
+    global runtime_token
+    tok = await asyncio.to_thread(_load_saved_token)
+    if tok and tok != runtime_token:
+        runtime_token = tok
+        TOKEN_CHECK.update({"at": 0.0, "token": None, "state": "UNKNOWN"})
+        logger.warning("Restored today's Upstox login from the database after a restart.")
+
+
+# ---- v1.20.63: stream watchdog ---------------------------------------------------------------------------------------------
+# On 9 Nov 2026 the NIFTY stream went silent at ~23:43 the night before (around a deploy) and stayed silent all day: the SDK gives
+# up after its reconnect attempts, but the STREAMS entry stayed, so the app thought it was running and never restarted it - NIFTY
+# prices came only from REST, and the "Live data fresh" gate blocked every NIFTY setup. During market hours the watchdog restarts
+# any stream whose index has not ticked for STREAM_STALE_SEC (or that the SDK gave up on).
+STREAM_STALE_SEC = float(os.getenv("STREAM_STALE_SEC", "60") or 60)
+STREAM_RESTART_GAP = float(os.getenv("STREAM_RESTART_GAP", "90") or 90)
+STREAM_RESTARTS = {}            # symbol -> [{"at": iso, "reason": str}] (today, newest last)
+_WATCHDOG_TASK = None
+
+
+def _restart_stream(symbol, reason):
+    with STREAM_LOCK:
+        old = STREAMS.pop(symbol, None)
+        STREAM_ERRORS.pop(symbol, None)
+    keys = (old or {}).get("keys") or _stream_keys(symbol)
+    if old and old.get("streamer"):
+        try:
+            old["streamer"].auto_reconnect(False)
+        except Exception:
+            pass
+        try:
+            old["streamer"].disconnect()
+        except Exception:
+            pass
+    day = ist_now().strftime("%Y-%m-%d")
+    lst = [r for r in STREAM_RESTARTS.get(symbol, []) if r["at"].startswith(day)]
+    lst.append({"at": ist_now().isoformat(timespec="seconds"), "reason": reason})
+    STREAM_RESTARTS[symbol] = lst[-20:]
+    logger.warning("Restarting Upstox stream for %s: %s", symbol, reason)
+    if runtime_token:
+        _start_stream(symbol, [INDEX_KEYS[symbol], *[k for k in keys if k != INDEX_KEYS.get(symbol)]])
+
+
+def _stream_health(symbol, now=None):
+    """(ok, reason) for one running stream during market hours."""
+    now = now or time.time()
+    with STREAM_LOCK:
+        st_ = STREAMS.get(symbol)
+        tick = LIVE_TICKS.get(INDEX_KEYS.get(symbol, ""))
+    if not st_:
+        return True, "no stream"
+    if st_.get("dead"):
+        return False, "the Upstox library stopped reconnecting"
+    started = st_.get("started_ts") or now
+    last = (tick or {}).get("received_ts")
+    if last is None or last < started:
+        age = now - started
+        return (age <= STREAM_STALE_SEC, f"no index tick {age:.0f} s after (re)start")
+    age = now - last
+    return (age <= STREAM_STALE_SEC, f"index tick {age:.0f} s old")
+
+
+def _ensure_streams():
+    """v1.20.65: start the index stream for every index that has none. Until now a stream only started when a browser page opened
+    (or an option was selected), so a server that woke up or was redeployed with nobody on the page had no live feed at all and the
+    watchdog - which only looks at streams that exist - never noticed. Returns the symbols it started."""
+    started = []
+    if not runtime_token:
+        return started
+    for sym in INDEX_KEYS:
+        with STREAM_LOCK:
+            have = STREAMS.get(sym)
+        if not have:
+            _start_stream(sym, _stream_keys(sym))
+            started.append(sym)
+    return started
+
+
+def _stream_window_open():
+    """Market hours plus the 20 min before the open (so ticks are flowing at 09:15)."""
+    ms = market_status()
+    if ms.get("open"):
+        return True
+    n = ist_now()
+    mins = n.hour * 60 + n.minute
+    return bool(ms.get("trading_day")) and 8 * 60 + 55 <= mins < 9 * 60 + 15
+
+
+async def _stream_watchdog():
+    while True:
+        try:
+            await asyncio.sleep(15)
+            if not runtime_token or not _stream_window_open():
+                continue
+            began = await asyncio.to_thread(_ensure_streams)
+            if began:
+                logger.warning("Stream watchdog: no live stream for %s - started it (nobody had the page open)", ", ".join(began))
+            if not market_status().get("open"):
+                continue
+            now = time.time()
+            for sym in list(STREAMS):
+                if sym not in INDEX_KEYS:
+                    continue
+                ok, why = _stream_health(sym, now)
+                last = (STREAM_RESTARTS.get(sym) or [{}])[-1].get("ts", 0)
+                if not ok and now - last >= STREAM_RESTART_GAP:
+                    _restart_stream(sym, why)
+                    STREAM_RESTARTS[sym][-1]["ts"] = now
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Stream watchdog: %s", str(exc)[:160])
+
+
+# ---- v1.20.64: health alerts to the phone (market hours) ------------------------------------------------------------------
+# 9 Nov 2026: the NIFTY feed was dead from the open and the app only LOGGED it - the owner found out at 12:00. Serious problems now
+# also go to the registered phones (event "HEALTH": always delivered, like a confirmed signal), at most once per problem per
+# HEALTH_ALERT_GAP_MIN, with an "OK again" message when it clears.
+HEALTH_FEED_SEC = float(os.getenv("HEALTH_FEED_SEC", "120") or 120)
+HEALTH_ALERT_GAP_MIN = float(os.getenv("HEALTH_ALERT_GAP_MIN", "30") or 30)
+HEALTH_RESTARTS = int(os.getenv("HEALTH_RESTARTS", "3") or 3)
+_HEALTH = {}                    # key -> {"since": ts, "sent_at": ts, "title": str}
+_HEALTH_TASK = None
+
+
+def health_problems(now=None):
+    """[(key, title, body)] of the serious problems right now (pure read of the live state)."""
+    now = now or time.time()
+    out = []
+    if TOKEN_CHECK.get("state") == "EXPIRED":
+        out.append(("token", "Upstox token expired - no live data or signals",
+                    "Open the app and press Connect Upstox to log in again. Until then prices and signals are not updating."))
+    day = ist_now().strftime("%Y-%m-%d")
+    for sym in INDEX_KEYS:
+        with STREAM_LOCK:
+            st_ = STREAMS.get(sym)
+            tick = LIVE_TICKS.get(INDEX_KEYS[sym])
+        if st_:
+            last = (tick or {}).get("received_ts")
+            started = st_.get("started_ts") or now
+            age = now - (last or started)
+            if age > HEALTH_FEED_SEC:
+                out.append((f"feed-{sym}", f"{sym} live prices stopped ({age / 60:.0f} min)",
+                            f"No live {sym} tick for {age / 60:.0f} min. The app is restarting the stream; until it is back, prices come from "
+                            f"slower REST quotes and the 'Live data fresh' gate blocks {sym} entries. If this does not clear in a few minutes, "
+                            f"press Connect Upstox or restart the server."))
+        rs_ = [r for r in STREAM_RESTARTS.get(sym, []) if r["at"].startswith(day)]
+        if len(rs_) >= HEALTH_RESTARTS:
+            out.append((f"restarts-{sym}", f"{sym} live stream keeps dropping ({len(rs_)} restarts today)",
+                        f"Last restart {rs_[-1]['at'][11:16]} ({rs_[-1]['reason']}). The Upstox connection is unstable - check the server and "
+                        f"your Upstox login."))
+    return out
+
+
+async def _health_send(key, title, body):
+    sym = key.split("-", 1)[1] if "-" in key else ""
+    try:
+        for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
+            await asyncio.to_thread(acc.push_add_history, uid, "HEALTH", sym, "", title, body, utc_now_iso())
+    except Exception as exc:
+        logger.info("Health alert history not saved: %s", str(exc)[:140])
+    try:
+        res = await _dispatch_confirmed_push(title, body, sym, "", "HEALTH")
+        logger.warning("Health alert sent: %s -> %s", title, res)
+    except Exception as exc:
+        logger.warning("Health alert failed: %s", str(exc)[:160])
+
+
+async def _health_loop():
+    while True:
+        try:
+            await asyncio.sleep(30)
+            if not market_status().get("open") or not PUSH_DELIVERY_ENABLED():
+                continue
+            now = time.time()
+            probs = {k: (t_, b_) for k, t_, b_ in health_problems(now)}
+            for k, (t_, b_) in probs.items():
+                h = _HEALTH.setdefault(k, {"since": now, "sent_at": 0, "title": t_})
+                if now - h["sent_at"] >= HEALTH_ALERT_GAP_MIN * 60:
+                    h["sent_at"], h["title"] = now, t_
+                    await _health_send(k, t_, b_)
+            for k in [k for k in _HEALTH if k not in probs]:
+                h = _HEALTH.pop(k)
+                if h.get("sent_at"):
+                    await _health_send(k, "OK again: " + h["title"].split(" (")[0].replace(" stopped", " are back").replace(" keeps dropping", " is stable"),
+                                       f"Cleared after {(now - h['since']) / 60:.0f} min.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Health loop: %s", str(exc)[:160])
+
+
+@app.on_event("startup")
+async def _start_health_alerts():
+    global _HEALTH_TASK
+    if os.getenv("HEALTH_ALERTS", "1").strip() != "0" and (_HEALTH_TASK is None or _HEALTH_TASK.done()):
+        _HEALTH_TASK = asyncio.create_task(_health_loop())
+
+
+@app.on_event("startup")
+async def _start_stream_watchdog():
+    global _WATCHDOG_TASK
+    if os.getenv("STREAM_WATCHDOG", "1").strip() != "0" and (_WATCHDOG_TASK is None or _WATCHDOG_TASK.done()):
+        _WATCHDOG_TASK = asyncio.create_task(_stream_watchdog())
 
 
 def _stream_keys(sym, option_keys=()):
@@ -1003,6 +1409,70 @@ async def client_issues_post(request: Request):
     return {"ok": True, "saved": n}
 
 
+@app.post("/api/page-state")
+async def page_state_post(request: Request):
+    """v1.20.56: what a page shows right now (menus, numbers, warnings) - stored when it changes, for Download for Claude / review."""
+    _need_user(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "JSON body expected")
+    saved = await asyncio.to_thread(rec.add_state, SIGNAL_LOG_DB, (body or {}).get("state"), ist_now(), SIGNAL_LOG_LOCK)
+    return {"ok": True, "saved": saved}
+
+
+@app.post("/api/client-reports")
+async def client_report_post(request: Request):
+    """v1.20.56: the "⚑ Report" button - a note, the page snapshot and a picture of the page."""
+    _need_user(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "JSON body expected")
+    body = body if isinstance(body, dict) else {}
+    rid = await asyncio.to_thread(rec.add_report, SIGNAL_LOG_DB, body.get("note"), body.get("state"), body.get("image"), ist_now(), SIGNAL_LOG_LOCK)
+    try:
+        data = await asyncio.to_thread(rec.dump_reports, SIGNAL_LOG_DB, SIGNAL_LOG_LOCK, 8)
+        await asyncio.to_thread(acc.meta_set, "client_reports", json.dumps(data, separators=(",", ":")))
+    except Exception as exc:
+        logger.info("Reports not mirrored: %s", str(exc)[:120])
+    return {"ok": True, "id": rid}
+
+
+@app.get("/api/client-reports")
+async def client_reports_get(request: Request, days: int = 7):
+    _need_user(request)
+    end = ist_now().date()
+    return {"reports": await asyncio.to_thread(rec.reports, SIGNAL_LOG_DB, (end - timedelta(days=max(0, min(30, days)))).isoformat(), end.isoformat(), SIGNAL_LOG_LOCK)}
+
+
+@app.get("/api/client-reports/{rid}/image")
+async def client_report_image(request: Request, rid: int):
+    _need_user(request)
+    img = await asyncio.to_thread(rec.report_image, SIGNAL_LOG_DB, rid, SIGNAL_LOG_LOCK)
+    if not img or "," not in img:
+        raise HTTPException(404, "No picture for this report")
+    head, b64 = img.split(",", 1)
+    import base64
+    return Response(base64.b64decode(b64), media_type=head[5:].split(";")[0] or "image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/recorder")
+async def recorder_get(request: Request, day: str = ""):
+    """v1.20.56: one address with everything recorded for a day - page problems, what each page showed (latest + what changed),
+    and the reports with their pictures. Opens with the read-only review link too."""
+    _need_user(request)
+    d = day.strip() or ist_now().date().isoformat()
+    try:
+        datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "day must be YYYY-MM-DD")
+    issues = await asyncio.to_thread(cis.query, SIGNAL_LOG_DB, d, d, SIGNAL_LOG_LOCK)
+    return {"day": d, "version": APP_VERSION, "problems": cis.summary(issues), "client_issues": issues,
+            "pages": await asyncio.to_thread(rec.states, SIGNAL_LOG_DB, d, d, SIGNAL_LOG_LOCK),
+            "reports": await asyncio.to_thread(rec.reports, SIGNAL_LOG_DB, d, d, SIGNAL_LOG_LOCK)}
+
+
 @app.get("/api/paper-tests")
 async def paper_tests_api(request: Request, symbol: str = "NIFTY", days: int = 30):
     """v1.20.41: forward (paper) results of the loose MACD-turn test - logged live, scored like Diagnostics. Never a BUY."""
@@ -1079,6 +1549,7 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
         logger.info("Diagnostics: option lot / delta unavailable: %s", str(getattr(exc, "detail", exc))[:120])
 
     loop_ = asyncio.get_running_loop()
+    live_rules = _diag_live_rules(sym)
 
     def work():
         job = DIAG_JOBS[job_id]
@@ -1088,7 +1559,7 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
                           volume_source=result.get("volume_source"), horizon=horizon, cost=cost, target=target, stop=stop, score_min=score_min,
                           pattern_minutes=pattern_minutes or None, tune=tune_d, money=money,
                           live_plan=OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
-                          progress=lambda a, b: job.update(progress=round(a / max(1, b), 3)))
+                          progress=_replay_progress(job), live_rules=live_rules)
             rep["params"]["volume_source"] = result.get("volume_source")
             mismatch = _diag_live_mismatch(rep, interval, mode, score_min)
             job.update(status="done", report=rep, progress=1.0, stage="Done")
@@ -1103,6 +1574,29 @@ async def diagnostics_start(request: Request, symbol: str = "NIFTY", interval: i
 
     threading.Thread(target=work, daemon=True).start()
     return {"job_id": job_id}
+
+
+def _diag_live_rules(sym):
+    """v1.20.62: the live rules that act on the day's trade sequence, so the Diagnostics headline matches what live would buy."""
+    dm = deriv_mode()
+    return {"decision_rules": rules_mode(sym)[0], "one_per_side": one_per_side_on(),
+            "max_buys_day": max_buys_day() if dm in ("gates", "score") else 0, "max_daily_losses": MAX_DAILY_LOSSES,
+            "strategy": strategy_for(sym), "symbol_enabled": sym in buy_symbols(), "daily_target_rs": daily_target_rs(), "deriv_mode": dm,
+            "plan": OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN}
+
+
+def _replay_progress(job, every=10, pause=0.005):
+    """v1.20.59: progress callback for the replay thread that also pauses ~5 ms every 10 bars. The replay is pure Python and kept the
+    interpreter busy, so on Render's small CPU page requests (account sync, live prices) timed out during a run and the header showed
+    "Offline". The pause hands the CPU back to the web server; a 30-day run takes about a second longer."""
+    n = [0]
+
+    def cb(a, b):
+        job.update(progress=round(a / max(1, b), 3))
+        n[0] += 1
+        if n[0] % every == 0:
+            time.sleep(pause)
+    return cb
 
 
 @app.get("/api/diagnostics/result")
@@ -1168,6 +1662,7 @@ async def auth_callback(request: Request, code: str = "", state: str = "", error
         raise HTTPException(status_code=502, detail="No access token returned by Upstox.")
     runtime_token = new_token
     TOKEN_CHECK.update({"at": 0.0, "token": None, "state": "UNKNOWN"})
+    _save_token(new_token)   # v1.20.65: survive a same-day restart / redeploy / sleep
     _reset_streams()  # running streams still hold the old token
     return RedirectResponse("/?connected=1")
 
@@ -1391,6 +1886,16 @@ async def live_derivatives(symbol: str = "NIFTY", expiry_date: str = "current_we
 _WS_ACTIVE = {}      # browser socket id -> {sym, akey (its analysis combo), since}
 WS_TICK_SEC = float(os.getenv("WS_TICK_SEC", "0.1"))       # v1.19.7: index + option prices checked 10x a second, pushed when they move
 WS_PUSH_SEC = float(os.getenv("WS_PUSH_SEC", "0.1"))       # v1.19.7: candles + analysis checked 10x a second, pushed when newer
+# v1.20.67 bandwidth (Render Hobby = 5 GB a month): the full option-tick snapshot (24 contracts + metadata) was re-sent every
+# second, all day and night, to every open page - also with the market closed. Prices that move still go out at once as small
+# "index" / "opt" messages; the full snapshot is now a slow resync. The big analysis object is pushed at most every few seconds.
+WS_FULL_TICKS_SEC = float(os.getenv("WS_FULL_TICKS_SEC", "5"))          # market open
+WS_FULL_TICKS_CLOSED_SEC = float(os.getenv("WS_FULL_TICKS_CLOSED_SEC", "300"))     # v1.20.68: closed / holiday - every 5 min
+WS_CLOSED_PUSH_SEC = float(os.getenv("WS_CLOSED_PUSH_SEC", "300"))                 # v1.20.68: candles / analysis check when closed
+WS_ANALYSIS_MIN_SEC = float(os.getenv("WS_ANALYSIS_MIN_SEC", "4"))
+WS_OPT_OTHERS_SEC = float(os.getenv("WS_OPT_OTHERS_SEC", "1"))         # v1.20.70: other strikes' premiums at most once a second
+WS_PUMP_MAX_SEC = float(os.getenv("WS_PUMP_MAX_SEC", "40"))              # v1.20.72: restart a candle / analysis push stuck longer than this
+WS_CLOSED_LOOP_SEC = 1.0                                                  # market closed: nothing moves, check once a second
 
 
 def _ws_sub(msg, cur):
@@ -1409,6 +1914,9 @@ def _ws_sub(msg, cur):
         if rc == -1 or 0 <= rc <= 600:
             out["reconfirm"] = rc
         out["view"] = "option" if msg.get("view") == "option" else "index"
+        if "opt_key" in msg:                                # v1.20.70: the contract on screen gets every tick, the rest once a second
+            ok = msg.get("opt_key")
+            out["opt_key"] = ok if isinstance(ok, str) and 0 < len(ok) <= 80 else None
         if msg.get("rate") is not None:
             r = float(msg["rate"])
             if r == r:                                      # not NaN
@@ -1440,7 +1948,7 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
     _WS_ACTIVE[conn_id] = {"sym": sym, "akey": None, "since": time.time()}     # v1.20.4: the monitor only checks what is open
     send_lock = asyncio.Lock()
     sub = {"interval": None, "mode": "standard", "score_min": 60, "reconfirm": -1, "view": "index"}
-    sent = {"an": None, "bars": None, "bars_src": None, "idx": None, "opt": {}, "ticks_at": 0.0, "push_at": 0.0}
+    sent = {"an": None, "an_at": 0.0, "bars": None, "bars_src": None, "idx": None, "opt": {}, "ticks_at": 0.0, "push_at": 0.0}
     pump_task = None
 
     async def send(obj):
@@ -1453,8 +1961,11 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
             if isinstance(msg, dict) and msg.get("type") == "sub":
                 new = _ws_sub(msg, sub)
                 if new != sub:
+                    only_opt = {k: v for k, v in new.items() if k != "opt_key"} == {k: v for k, v in sub.items() if k != "opt_key"}
                     sub.clear()
                     sub.update(new)
+                    if only_opt:
+                        continue                            # v1.20.70: only the charted contract changed - nothing to re-send
                     if sub.get("interval"):
                         _WS_ACTIVE.get(conn_id, {})["akey"] = (sym, sub["interval"], sub["mode"], sub["score_min"], sub["reconfirm"])
                     sent["an"] = sent["bars"] = None       # settings changed: push the matching result straight away
@@ -1475,7 +1986,7 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                 sent["bars_src"] = ck[0] if ck else None
                 tail = (c.get("candles") or [])[-3:]
                 sig = json.dumps(tail, sort_keys=True, default=str)
-                if tail and sig != sent["bars"] and snap == sub:
+                if tail and sig != sent["bars"] and {k: v for k, v in snap.items() if k != "opt_key"} == {k: v for k, v in sub.items() if k != "opt_key"}:
                     sent["bars"] = sig
                     await send({"type": "bars", "symbol": sym, "interval": iv, "candles": tail, "feed": c.get("feed"),
                                 "volume_source": c.get("volume_source"), "timestamp": utc_now_iso()})
@@ -1486,8 +1997,17 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
             a = await analysis(symbol=sym, interval=iv, mode=snap["mode"], score_min=snap["score_min"], reconfirm=snap["reconfirm"])
             hit = _AN_CACHE.get(akey)
             stamp = hit[0] if hit else (a.get("timing") or {}).get("generated_at")
-            if stamp != sent["an"] and snap == sub:
+            fin = a.get("final") or {}
+            sig_key = (fin.get("level"), fin.get("side"), fin.get("action"), a.get("decision"), (fin.get("buy") or {}).get("ok"))
+            # v1.20.69: a change of signal (level / side / action / buy check) is pushed AT ONCE; only unchanged-signal refreshes
+            # (score drift, text) wait for the few-second spacing - so no BUY / WATCH / EXIT reaches the screen later than before.
+            if sent["an"] is not None and sig_key == sent.get("an_sig") and time.time() - sent["an_at"] < WS_ANALYSIS_MIN_SEC:
+                return                                      # v1.20.67: kept fresh on the server, but the large object goes out at most every few s
+            same = {k: v for k, v in snap.items() if k != "opt_key"} == {k: v for k, v in sub.items() if k != "opt_key"}
+            if stamp != sent["an"] and same:
                 sent["an"] = stamp
+                sent["an_sig"] = sig_key
+                sent["an_at"] = time.time()
                 await send({"type": "analysis", "symbol": sym, "interval": iv, "mode": snap["mode"], "score_min": snap["score_min"],
                             "reconfirm": snap["reconfirm"], "data": a, "timestamp": utc_now_iso()})
         except HTTPException as exc:
@@ -1508,17 +2028,18 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                 _start_stream(sym, _stream_keys(sym))
             loops += 1
             now = time.time()
+            market = market_status()
+            market_open_now = bool(market.get("open"))
             with STREAM_LOCK:
                 stream_error = STREAM_ERRORS.get(sym)
                 state = STREAMS.get(sym)
                 keys = [k for k in (state.get("keys", []) if state else []) if k != index_key]
-                want_all = now - sent["ticks_at"] >= 1.0
+                want_all = now - sent["ticks_at"] >= (WS_FULL_TICKS_SEC if market_open_now else WS_FULL_TICKS_CLOSED_SEC)
                 recent = [v for v in (_tick_view(k, now) for k in keys) if v]
                 idx = _tick_view(index_key, now)
             index_tick = None
             if idx and idx.get("ltp") is not None:
                 index_tick = {"ltp": idx["ltp"], "close_price": idx.get("close_price"), "age_seconds": idx["age_seconds"], "fresh": idx["fresh"]}
-            market = market_status()
             if want_all:
                 sent["ticks_at"] = now
                 any_fresh = any(x["fresh"] for x in recent) or bool(index_tick and index_tick["fresh"])
@@ -1533,17 +2054,28 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                     await send({"type": "index", "symbol": sym, "index": index_tick})
                 # v1.19.7: option premiums that moved since the last push (the selected contract's candle moves 10x a second)
                 moved = [x for x in recent if x.get("fresh") and sent["opt"].get(x.get("instrument_key")) != x.get("ltp")]
+                # v1.20.70 bandwidth: the selected contract (chart / paper trade) still goes out every loop; the other ~23 strikes,
+                # which only fill the price table, at most once a second (always with their latest price - nothing is skipped).
+                pri = sub.get("opt_key")
+                others_due = now - sent.get("opt_at", 0.0) >= WS_OPT_OTHERS_SEC
+                moved = [x for x in moved if others_due or x.get("instrument_key") == pri]
+                if moved and others_due:
+                    sent["opt_at"] = now
                 if moved:
                     for x in moved:
                         sent["opt"][x.get("instrument_key")] = x.get("ltp")
                     await send({"type": "opt", "symbol": sym, "ticks": moved})
-            every = max(WS_PUSH_SEC, sub.get("rate") or 0) if market["open"] else 15.0
+            every = max(WS_PUSH_SEC, sub.get("rate") or 0) if market["open"] else WS_CLOSED_PUSH_SEC
+            if pump_task is not None and not pump_task.done() and now - sent["push_at"] > WS_PUMP_MAX_SEC:
+                pump_task.cancel()                          # v1.20.72: a push stuck on a slow upstream call must not stop all later pushes
+                pump_task = None
             if (pump_task is None or pump_task.done()) and now - sent["push_at"] >= every:
-                if pump_task is not None and pump_task.done() and not pump_task.cancelled() and pump_task.exception():
+                if pump_task is not None and pump_task.done() and not pump_task.cancelled() and pump_task.exception() \
+                        and not isinstance(pump_task.exception(), asyncio.TimeoutError):
                     break                                   # the send inside the push failed: the socket is gone
                 sent["push_at"] = now
                 pump_task = asyncio.create_task(pump())
-            await asyncio.sleep(sub.get("rate") or WS_TICK_SEC)
+            await asyncio.sleep((sub.get("rate") or WS_TICK_SEC) if market_open_now else WS_CLOSED_LOOP_SEC)
     except WebSocketDisconnect:
         return
     except Exception as exc:
@@ -1624,6 +2156,38 @@ async def tradingview_last_alert():
     return getattr(app.state, "last_tv_alert", {"status": "UNAVAILABLE", "message": "No TradingView alert received in this running instance."})
 
 
+OPT_LTP_CROSSCHECK_SEC = float(os.getenv("OPT_LTP_CROSSCHECK_SEC", "90") or 90)
+_OPT_XCHECK = {}      # instrument_key -> (checked_ts, differs)
+
+
+async def _rest_ltp(key):
+    data = await upstox_get(f"{API_BASE}/v2/market-quote/ltp", {"instrument_key": key})
+    qd = (data or {}).get("data") or {}
+    q = qd.get(key)
+    if q is None:
+        q = next((v for v in qd.values() if isinstance(v, dict) and v.get("instrument_token") == key), None)
+        if q is None and len(qd) == 1:
+            q = next(iter(qd.values()))
+    v = q.get("last_price", q.get("ltp")) if isinstance(q, dict) else None
+    return float(v) if v is not None else None
+
+
+async def _stale_ltp_differs(key, ltp):
+    """v1.20.65: the stream LTP has not changed for OPT_LTP_CROSSCHECK_SEC. A thin in-the-money contract can really go untraded, so
+    ask REST once (cached 20 s): True only if REST shows a different last price - then the stream value must not be trusted."""
+    hit = _OPT_XCHECK.get(key)
+    if hit and time.time() - hit[0] < 20:
+        return hit[1]
+    differs = False
+    try:
+        r = await _rest_ltp(key)
+        differs = r is not None and abs(r - float(ltp)) > 0.005
+    except Exception:
+        differs = False
+    _OPT_XCHECK[key] = (time.time(), differs)
+    return differs
+
+
 @app.get("/api/option-quote")
 async def option_quote(instrument_key: str):
     """Latest quote for one option: a fresh WebSocket tick if available, else a labelled REST snapshot."""
@@ -1633,13 +2197,19 @@ async def option_quote(instrument_key: str):
     now = time.time()
     with STREAM_LOCK:
         view = _tick_view(key, now)
+    stale_note = None
+    if view and view["fresh"] and view.get("ltp") is not None:
+        same_for = now - (view.get("ltp_changed_ts") or now)
+        if same_for > OPT_LTP_CROSSCHECK_SEC and market_status()["open"] and await _stale_ltp_differs(key, view["ltp"]):
+            stale_note = f"Stream LTP unchanged for {same_for:.0f} s and different from the REST price - REST value shown."
+            view = None
     if view and view["fresh"] and view.get("ltp") is not None:
         book_age = round(now - view["book_ts"], 1) if view.get("book_ts") else None
         book_ok = book_age is not None and book_age <= 15 and (view.get("bid") or 0) > 0 and (view.get("ask") or 0) > 0
         return {"status": "LIVE_TICK", "instrument_key": key, "ltp": view["ltp"], "timestamp": view.get("received_at"),
                 "age_seconds": view["age_seconds"], "source": "Upstox V3 WebSocket",
                 "bid": view.get("bid") if book_ok else None, "ask": view.get("ask") if book_ok else None,
-                "book_age_seconds": book_age}
+                "book_age_seconds": book_age, "ltp_unchanged_seconds": round(now - (view.get("ltp_changed_ts") or now), 1)}
     data = await upstox_get(f"{API_BASE}/v2/market-quote/ltp", {"instrument_key": key})
     quote_data = (data or {}).get("data") or {}
     quote = quote_data.get(key)
@@ -1654,7 +2224,7 @@ async def option_quote(instrument_key: str):
                 "source": "REST quote", "reason": "No LTP returned for selected contract."}
     return {"status": "REST_SNAPSHOT", "instrument_key": key, "ltp": float(ltp), "timestamp": utc_now_iso(),
             "age_seconds": 0, "source": "Upstox REST quote", "market_open": market_status()["open"],
-            "note": "REST snapshot; not a confirmed WebSocket tick."}
+            "note": stale_note or "REST snapshot; not a confirmed WebSocket tick."}
 
 
 SIGNAL_TRACKER = sf.SignalTracker()
@@ -1725,6 +2295,7 @@ def record_signal_row(symbol, interval, mode, a):
             names = list(cols)
             cur = db.execute(f"INSERT OR IGNORE INTO signal_log ({','.join(names)}) VALUES ({','.join('?' * len(names))})", [cols[k] for k in names])
             _SIGNAL_LOG_DIRTY.set()
+            _SL_URGENT[0] = True
             db.commit()
         _MON["last_record"] = {"at": time.time(), "symbol": symbol, "interval": int(interval), "mode": mode, "side": side, "candle": candle_time,
                                "option": opt.get("name"), "new_row": bool(cur.rowcount)}
@@ -1817,42 +2388,100 @@ async def _store_rules_advice(sym, rep):
 PAPER_MACD_DEFAULT = os.getenv("PAPER_MACD", "on").strip().lower()
 
 
+def paper_mode():
+    """off | on (MACD turn only, as before) | all (v1.20.75: + Stochastic cross and Early trend). Signals page setting, then PAPER_MACD env."""
+    v = OPTION_OVERRIDES.get("paper_macd") or PAPER_MACD_DEFAULT
+    return v if v in ptest.MODES else "off"
+
+
+def paper_strategies():
+    return ptest.MODES[paper_mode()]
+
+
 def paper_macd_on():
     """v1.20.41: the loose MACD-turn paper test (NIFTY) - on by default; Signals page setting wins, then PAPER_MACD env."""
-    return (OPTION_OVERRIDES.get("paper_macd") or PAPER_MACD_DEFAULT) == "on"
+    return "macd_loose" in paper_strategies()
 
 
-async def _paper_check(sym, interval, mode, score_min, a, raw_candles):
-    """Log a paper entry when the loose MACD rule fires on the last closed candle. Only for the live setting (ALERT_INTERVAL /
-    ALERT_MODE / ALERT_SCORE_MIN) so other terminals do not log copies; never touches the live signal, alerts or BUY."""
-    if sym not in ptest.SYMBOLS or not paper_macd_on() or not in_session():
+_PAPER_BAR = {}                 # (symbol, strategy) -> last closed bar already checked (the extra analysis runs once per candle)
+
+
+async def _paper_check(sym, interval, mode, score_min, a, raw_candles, extra=None):
+    """Log a paper entry when a paper rule fires on the last closed candle. Only for the live setting (ALERT_INTERVAL /
+    ALERT_MODE / ALERT_SCORE_MIN) so other terminals do not log copies; never touches the live signal, alerts or BUY.
+    extra (v1.20.75): the inputs of the live analysis (htf_raw, htf_interval, volume_source) for the Early trend test."""
+    todo = paper_strategies()
+    if sym not in ptest.SYMBOLS or not todo or not in_session():
         return
     _s, l_iv, l_mode, l_score, _d = _poller_cfg()
     if (interval, mode, score_min) != (l_iv, l_mode, l_score):
         return
     try:
         cs_closed, _ = drop_forming(normalize_candles(raw_candles), interval)
-        entry = ptest.check_macd_loose(a, cs_closed, interval, sf.in_entry_window)
-        if entry and await asyncio.to_thread(ptest.record, SIGNAL_LOG_DB, sym, interval, entry, SIGNAL_LOG_LOCK):
-            logger.info("Paper test %s: %s %s at %s", entry["strategy"], sym, entry["side"], entry["bar_time"])
+        if not cs_closed:
+            return
+        bar = cs_closed[-1]["_dt"].isoformat()
+        entries = []
+        for st_ in todo:
+            if st_ in ptest.LEADING_KIND:
+                entries.append(ptest.check_leading_loose(a, cs_closed, interval, sf.in_entry_window, st_))
+            elif st_ == "early_trend" and _PAPER_BAR.get((sym, st_)) != bar:
+                _PAPER_BAR[(sym, st_)] = bar                   # one extra analysis per closed candle, not per refresh
+                import indicators as _indm
+                import trend_entry as tentry
+                pa = a
+                if _indm.SCORE_MODEL != "priority" or tentry.TREND_ENTRY != "off":
+                    x = extra or {}
+                    pa = await asyncio.to_thread(lambda: analyze(raw_candles, symbol=sym, interval=interval, htf_raw=x.get("htf_raw"),
+                                                                 htf_interval=x.get("htf_interval"), volume_source=x.get("volume_source"), mode=mode,
+                                                                 score_min=score_min, trend_entry_variant="off", score_model="priority"))
+                if pa.get("status") == "ok":
+                    day = ist_now().date().isoformat()
+                    mine = await asyncio.to_thread(ptest.rows, SIGNAL_LOG_DB, st_, sym, day, day, SIGNAL_LOG_LOCK)
+                    entries.append(ptest.check_early_trend(pa, cs_closed, interval, sf.in_entry_window, mine))
+        saved = False
+        for entry in entries:
+            if entry and await asyncio.to_thread(ptest.record, SIGNAL_LOG_DB, sym, interval, entry, SIGNAL_LOG_LOCK):
+                logger.info("Paper test %s: %s %s at %s", entry["strategy"], sym, entry["side"], entry["bar_time"])
+                saved = True
+        if saved:
             data = await asyncio.to_thread(ptest.dump, SIGNAL_LOG_DB, 90, SIGNAL_LOG_LOCK)
             await asyncio.to_thread(acc.meta_set, "paper_trades", json.dumps(data))
     except Exception as exc:
         logger.warning("Paper test check failed for %s: %s", sym, str(exc)[:160])
 
 
+async def _paper_brief(days=30, trades=12):
+    """v1.20.80: every paper-only test in a few lines for the reviewer - on / off, closed trades, win rate, points, verdict and its
+    latest entries. A list (empty when nothing can be read); never raises, a review must not fail because of it."""
+    try:
+        pr_ = await _paper_results("NIFTY", days)
+        return [{k: t_.get(k) for k in ("label", "on", "all", "first", "second", "verdict")} | {"trades": (t_.get("trades") or [])[:trades]}
+                for t_ in pr_.get("tests") or []]
+    except Exception as exc:
+        return [{"error": f"{type(exc).__name__}: {str(exc)[:120]}"}]
+
+
 async def _paper_results(sym="NIFTY", days=30):
+    """The MACD-turn test at the top level (as before v1.20.75) plus every paper test under 'tests'."""
     _s, iv, _m, _sc, _d = _poller_cfg()
     end = ist_now().date()
     start = (end - timedelta(days=days)).isoformat()
-    logged = await asyncio.to_thread(ptest.rows, SIGNAL_LOG_DB, "macd_loose", sym, start, end.isoformat(), SIGNAL_LOG_LOCK)
+    on = paper_strategies()
+    logged = {st_: await asyncio.to_thread(ptest.rows, SIGNAL_LOG_DB, st_, sym, start, end.isoformat(), SIGNAL_LOG_LOCK) for st_ in ptest.STRATEGIES}
+    firsts = [rows_[0]["day"] for rows_ in logged.values() if rows_]
     raw = []
-    if logged:
-        span = (end - datetime.strptime(logged[0]["day"], "%Y-%m-%d").date()).days + 2
+    if firsts:
+        span = (end - datetime.strptime(min(firsts), "%Y-%m-%d").date()).days + 2
         raw = (await candles(symbol=sym, interval=iv, days=max(2, min(30, span))))["candles"]
-    res = await asyncio.to_thread(ptest.results, logged, raw, iv)
-    return {"strategy": "macd_loose", "label": ptest.STRATEGIES["macd_loose"], "symbol": sym, "interval": iv, "on": paper_macd_on(),
-            "from": start, "to": end.isoformat(), **res}
+    tests = []
+    for st_ in ptest.STRATEGIES:
+        res = await asyncio.to_thread(ptest.results, logged[st_], raw, iv)
+        for t in res.get("trades") or []:
+            t["strategy"] = st_
+            t["test"] = ptest.SHORT[st_]
+        tests.append({"strategy": st_, "label": ptest.STRATEGIES[st_], "short": ptest.SHORT[st_], "on": st_ in on, **res})
+    return {**tests[0], "symbol": sym, "interval": iv, "from": start, "to": end.isoformat(), "mode": paper_mode(), "tests": tests}
 
 
 STRATEGY_DEFAULTS = {"NIFTY": os.getenv("STRATEGY_NIFTY", "pullback"), "BANKNIFTY": os.getenv("STRATEGY_BANKNIFTY", "off")}
@@ -1927,6 +2556,8 @@ import paper_tests as ptest
 ptest.init(SIGNAL_LOG_DB)       # v1.20.41 paper-only strategy tests (same file)
 import client_issues as cis
 cis.init(SIGNAL_LOG_DB)         # v1.20.49 problems reported by the pages (same file)
+import recorder as rec
+rec.init(SIGNAL_LOG_DB)         # v1.20.56 what each page showed + "Report" button pictures (same file)
 _CIS_MIRROR = [0.0]
 mon.init(SIGNAL_LOG_DB)         # v1.20.0 strategy monitor findings + Claude reviews (same file)
 
@@ -1951,7 +2582,7 @@ def settle_signal_exits(sym, price, atr=None):
                 lambda x: dd.trade_levels({"side": "CE"}, {}, atr=x, price=100.0), float(atr), cfg["target"])
         closed = sx.settle_open_signals(SIGNAL_LOG_DB, sym, price, datetime.now(IST), atr_backfill=backfill, lock=SIGNAL_LOG_LOCK)
         if closed:
-            _SIGNAL_LOG_DIRTY.set()
+            _SIGNAL_LOG_DIRTY.set(); _SL_URGENT[0] = True
         for c in closed:
             logger.info("Signal log auto-exit %s #%s: %s net %s pts", sym, c["id"], c["status"],
                         None if c.get("net") is None else round(c["net"], 2))
@@ -1997,7 +2628,7 @@ async def settle_from_path(sym):
     closed = await asyncio.to_thread(sx.settle_with_candles, SIGNAL_LOG_DB, sym, normalize_candles(raw), datetime.now(IST), SIGNAL_LOG_LOCK)
     _PATH_SETTLED_AT[sym] = time.time()
     if closed:
-        _SIGNAL_LOG_DIRTY.set()
+        _SIGNAL_LOG_DIRTY.set(); _SL_URGENT[0] = True
         for c in closed:
             logger.info("Signal log path exit %s #%s: %s at %s net %s pts", sym, c["id"], c["status"], c.get("exit_time"), round(c["net"], 2))
         await _after_exits(sym, closed, live=False)
@@ -2052,7 +2683,7 @@ async def _after_exits(sym, closed, live):
             rs = None
             if price is not None:
                 rs = await asyncio.to_thread(sx.set_option_exit, SIGNAL_LOG_DB, c["id"], price, src, SIGNAL_LOG_LOCK)
-                _SIGNAL_LOG_DIRTY.set()
+                _SIGNAL_LOG_DIRTY.set(); _SL_URGENT[0] = True
             # v1.19.2: no phone alerts while the market is closed. An exit worked out later (server was asleep) goes to the
             # notification history and the Signals page only.
             _spawn(_send_exit_alert(sym, row, c, price, rs, push=in_session(grace_minutes=15)))
@@ -2087,6 +2718,12 @@ async def _send_exit_alert(sym, row, c, opt_exit, rs, push=True):
 # is mirrored, one JSON blob per month, into the accounts database (PostgreSQL when DATABASE_URL is set) and restored at start.
 _SL_MIRROR_HASH = {}
 SIGNAL_LOG_COLS = None
+# v1.20.82: a new logged signal or exit is copied at once; everything else (signal-board outcomes every 2 min, AI notes, reviews)
+# at most every MIRROR_GAP_SEC during market hours and once after the close. Each copy rewrites a whole month blob, so copying
+# every 2 min wrote ~20 MB a day to the database and never let it sleep.
+MIRROR_GAP_SEC = float(os.getenv("MIRROR_GAP_SEC", "1800") or 1800)      # v1.20.83: 30 min (was 15)
+_SL_URGENT = [False]
+_SL_LAST_MIRROR = [0.0]
 
 
 def _signal_rows_all():
@@ -2159,6 +2796,9 @@ async def _restore_signal_log_and_config():
         ra = await asyncio.to_thread(acc.meta_get, "rules_advice")
         if ra:
             RULES_ADVICE.update(json.loads(ra))
+        cr = await asyncio.to_thread(acc.meta_get, "client_reports")
+        if cr:
+            await asyncio.to_thread(rec.load_reports, SIGNAL_LOG_DB, json.loads(cr), SIGNAL_LOG_LOCK)
         ci = await asyncio.to_thread(acc.meta_get, "client_issues")
         if ci:
             await asyncio.to_thread(cis.load, SIGNAL_LOG_DB, json.loads(ci), SIGNAL_LOG_LOCK)
@@ -2253,8 +2893,10 @@ async def _signal_exit_watcher():
             open_by_symbol = await asyncio.to_thread(sx.open_trade_count, SIGNAL_LOG_DB, SIGNAL_LOG_LOCK)
             is_open = market_status()["open"]
             delay = 3.0 if is_open else 60.0
-            if _SIGNAL_LOG_DIRTY.is_set():
+            if _SIGNAL_LOG_DIRTY.is_set() and (_SL_URGENT[0] or not is_open or time.time() - _SL_LAST_MIRROR[0] >= MIRROR_GAP_SEC):
                 _SIGNAL_LOG_DIRTY.clear()
+                _SL_URGENT[0] = False
+                _SL_LAST_MIRROR[0] = time.time()
                 try: await asyncio.to_thread(mirror_signal_log)
                 except Exception as exc: logger.warning("Signal log mirror failed: %s", str(exc)[:140]); _SIGNAL_LOG_DIRTY.set()
             try: await _end_of_day_summary()
@@ -2348,8 +2990,10 @@ async def _monitor_replay(sym, interval, mode, score_min, days=10):
     result = await candles(symbol=sym, interval=interval, days=days)
     htf_interval = 15 if interval < 15 else 30 if interval < 30 else None     # v1.20.12: same HTF as the live analysis
     htf_raw = (await candles(symbol=sym, interval=htf_interval, days=days))["candles"] if htf_interval else None
+    lr = _diag_live_rules(sym)               # v1.20.62: same live rules and exit plan as the Diagnostics page
     return await asyncio.to_thread(dgn.run, result["candles"], symbol=sym, interval=interval, mode=mode, htf_raw=htf_raw,
-                                   htf_interval=htf_interval, volume_source=result.get("volume_source"), score_min=score_min)
+                                   htf_interval=htf_interval, volume_source=result.get("volume_source"), score_min=score_min,
+                                   live_plan=lr["plan"], live_rules=lr, progress=_replay_progress({}))
 
 
 async def _monitor_store(findings, day, sym, explain=True):
@@ -2419,6 +3063,7 @@ async def monitor_review(kind="intraday", force=False):
             ctx["terminal"] = await _terminal_snapshot(day)       # v1.20.14: live terminal state for the reviewer
         except Exception as exc:
             ctx["terminal"] = {"error": str(exc)[:120]}
+        ctx["paper_tests"] = await _paper_brief()                 # v1.20.80
         try:
             ctx["checks"] = mon.consistency_checks(ctx)
         except Exception as exc:
@@ -2453,7 +3098,7 @@ async def monitor_review(kind="intraday", force=False):
 
 def _monitor_feed_state(sym, now):
     with STREAM_LOCK:
-        running = bool(STREAMS.get(sym))
+        running = bool(STREAMS.get(sym)) and not STREAMS[sym].get("dead")
         idx = _tick_view(INDEX_KEYS[sym], now)
     # v1.20.4: only the analysis combos an open page is subscribed to (others are refreshed on demand, so their age means nothing)
     keys = {c["akey"] for c in list(_WS_ACTIVE.values()) if c.get("sym") == sym and c.get("akey") and now - c.get("since", now) > 20}
@@ -2565,6 +3210,7 @@ def _compact_analysis(a):
     return {
         "status": a.get("status"), "score": a.get("score"), "bull_score": a.get("bull_score"), "bear_score": a.get("bear_score"),
         "regime": a.get("regime_label") or a.get("regime"), "regime_note": str(a.get("regime_note") or "")[:240], "phase": a.get("regime_phase"),
+        "score_model": a.get("score_model"), "score_classic": a.get("score_classic"), "fast_trend": a.get("fast_trend"),
         "technical_signal": a.get("signal"), "side": a.get("side"), "last_close": a.get("last_close"), "atr": a.get("atr"), "rsi": a.get("rsi"),
         "ema9": a.get("ema9"), "ema21": a.get("ema21"), "vwap": a.get("vwap_approx"), "breakout_high": a.get("breakout_high"), "breakdown_low": a.get("breakdown_low"),
         "final": {"level": fin.get("level"), "action": fin.get("action"), "headline": str(fin.get("headline") or "")[:300],
@@ -2581,8 +3227,22 @@ def _compact_analysis(a):
                      "supports": [(l.get("price"), l.get("strength")) for l in ((bp.get("sr") or {}).get("supports") or [])][:3],
                      "resistances": [(l.get("price"), l.get("strength")) for l in ((bp.get("sr") or {}).get("resistances") or [])][:3]} if bp else None,
         "chart_pattern": a.get("chart_pattern"), "pattern_effects": a.get("pattern_effects"),
+        "derivatives": {k: (a.get("derivatives") or {}).get(k) for k in ("mode", "verdict", "agree_text", "score_b")} if a.get("derivatives") else None,
         "cache_age_s": a.get("cache_age_s"),
     }
+
+
+def _closed_ages(analyses, feeds, market_open):
+    """v1.20.74: after the close nothing is recomputed and no tick arrives, so "analysis 652 s old" / "tick 680 s old" is normal -
+    the AI review of 13 Nov (15:40) reported it as an engine problem. With the market closed the ages are moved to
+    *_after_close keys and a note says they are not a problem."""
+    if market_open:
+        return analyses, feeds
+    note = "market closed - nothing is recomputed after the close; this age is normal, not a problem"
+    an = [{**{k: v for k, v in x.items() if k != "age_s"}, "age_s_after_close": x.get("age_s"), "age_note": note} for x in analyses]
+    fd = {s: {**{k: v for k, v in f.items() if k != "tick_age_s"}, "tick_age_s_after_close": f.get("tick_age_s"), "age_note": note}
+          for s, f in feeds.items()}
+    return an, fd
 
 
 async def _terminal_snapshot(day):
@@ -2600,20 +3260,25 @@ async def _terminal_snapshot(day):
     for s_ in INDEX_KEYS:
         with STREAM_LOCK:
             idx = _tick_view(INDEX_KEYS[s_], now)
-            running = bool(STREAMS.get(s_))
-        feeds[s_] = {"stream_running": running, "index_ltp": idx.get("ltp") if idx else None, "tick_age_s": idx.get("age_seconds") if idx else None}
+            running = bool(STREAMS.get(s_)) and not STREAMS[s_].get("dead")
+        feeds[s_] = {"stream_running": running, "index_ltp": idx.get("ltp") if idx else None, "tick_age_s": idx.get("age_seconds") if idx else None,
+                     "restarts_today": [{k: v for k, v in r.items() if k != "ts"} for r in STREAM_RESTARTS.get(s_, [])
+                                        if r["at"].startswith(ist_now().strftime("%Y-%m-%d"))]}
     try:
         cfg = await signal_log_config()
     except Exception:
         cfg = {}
     log = (await get_signal_log(day, day, "", 10000))["rows"]
     board = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, day, day, "", "", 5000, SIGNAL_LOG_LOCK)
-    return {"app_version": APP_VERSION, "market": market_status(), "token_state": TOKEN_CHECK.get("state"),
+    mkt = market_status()
+    analyses, feeds = _closed_ages(analyses, feeds, mkt.get("open"))
+    return {"app_version": APP_VERSION, "market": mkt, "token_state": TOKEN_CHECK.get("state"),
             "settings": {"background_alerts": {"symbols": syms, "interval": iv, "mode": mode, "score_min": smin},
                          "signals_config": cfg, "monitor": {k: mon.SETTINGS.get(k) for k in ("enabled", "provider", "max_calls")}},
             "combos_in_use": [list(c) for c in combos], "live_analyses": analyses, "feeds": feeds,
             "signal_log_today": sx.summarize(log, "day").get("total") if log else {"signals": 0},
-            "signal_board_today": sb.summary(board), "monitor_status": {"error": _SMON.get("error"), "last_review_at": _SMON.get("last_review_at")}}
+            "signal_board_today": sb.summary(board), "monitor_status": {"error": _SMON.get("error"), "last_review_at": _SMON.get("last_review_at")},
+            "upstox_usage": {"limits": {"per_sec": RL_LIMITS[1], "per_min": RL_LIMITS[60], "per_30min": RL_LIMITS[1800]}, "by_api": rl_counts()}}
 
 
 @app.post("/api/monitor/export")
@@ -2644,7 +3309,8 @@ def _latest_diagnostics_summary():
                     "matches_live": p.get("matches_live"), "live_settings": p.get("live_settings"),
                     "days": f"{(p.get('days') or [''])[0]} - {(p.get('days') or [''])[-1]}", "indicator_changes": p.get("indicator_changes"),
                     "live_trail": r.get("live_trail"), "rupees": (r.get("rupees") or {}).get("rows"),
-                    "verdict": [v.get("text") for v in (r.get("verdict") or [])][:14]})
+                    "indicator_test": r.get("indicator_test"),      # v1.20.75
+                    "verdict": [v.get("text") for v in (r.get("verdict") or [])][:18]})
     return out
 
 
@@ -2661,6 +3327,8 @@ async def _period_export(request, day, period, client):
     try:
         pr_ = await _paper_results("NIFTY", 7 if period == "week" else 30)
         ctx["paper_test"] = {k: pr_.get(k) for k in ("label", "on", "all", "first", "second", "verdict")} | {"trades": (pr_.get("trades") or [])[:40]}
+        ctx["paper_tests"] = [{k: t_.get(k) for k in ("label", "on", "all", "first", "second", "verdict")} | {"trades": (t_.get("trades") or [])[:40]}
+                              for t_ in pr_.get("tests") or []]         # v1.20.75: all paper tests (paper_test above stays the MACD one)
     except Exception as exc:
         ctx["paper_test"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:
@@ -2671,6 +3339,11 @@ async def _period_export(request, day, period, client):
         ctx["page"] = json.loads(json.dumps(client, default=str)[:20000]) if len(json.dumps(client, default=str)) <= 20000 else {"note": "page snapshot too large"}
     ci_rows = await asyncio.to_thread(cis.query, SIGNAL_LOG_DB, start, day, SIGNAL_LOG_LOCK)
     ctx["client_issues"] = ci_rows
+    try:
+        ctx["reports"] = await asyncio.to_thread(rec.reports, SIGNAL_LOG_DB, start, day, SIGNAL_LOG_LOCK)
+        ctx["page_changes"] = (await asyncio.to_thread(rec.states, SIGNAL_LOG_DB, start, day, SIGNAL_LOG_LOCK, 200))["timeline"]
+    except Exception as exc:
+        ctx["reports"] = {"error": str(exc)[:120]}
     try:
         checks = mon.consistency_checks(ctx)
     except Exception as exc:
@@ -2714,6 +3387,7 @@ async def _monitor_export_impl(request, day="", fresh=0, client=None, period="da
                                  mon.suggestions(rep) if rep else [], mon.board_gate_stats(board))
     ctx = dict(ctx)
     if day == ist_now().date().isoformat():
+        ctx["paper_tests"] = await _paper_brief()                 # v1.20.80: as they stand now (not for an older day)
         try:
             ctx["terminal"] = await _terminal_snapshot(day)
         except Exception as exc:
@@ -2722,6 +3396,11 @@ async def _monitor_export_impl(request, day="", fresh=0, client=None, period="da
         ctx["page"] = json.loads(json.dumps(client, default=str)[:20000]) if len(json.dumps(client, default=str)) <= 20000 else {"note": "page snapshot too large"}
     ci_rows = await asyncio.to_thread(cis.query, SIGNAL_LOG_DB, day, day, SIGNAL_LOG_LOCK)
     ctx["client_issues"] = ci_rows
+    try:
+        ctx["page_states"] = await asyncio.to_thread(rec.states, SIGNAL_LOG_DB, day, day, SIGNAL_LOG_LOCK)
+        ctx["reports"] = await asyncio.to_thread(rec.reports, SIGNAL_LOG_DB, day, day, SIGNAL_LOG_LOCK)
+    except Exception as exc:
+        ctx["page_states"] = {"error": str(exc)[:120]}
     try:
         checks = mon.consistency_checks(ctx)
     except Exception as exc:
@@ -3087,7 +3766,7 @@ async def push_status(request: Request):
     elif TOKEN_CHECK.get("state") == "EXPIRED": problems.append("The Upstox token has expired - reconnect Upstox (More > Connect Upstox). Until then nothing is watched.")
     if mkt and _MON["last_tick"] and now - _MON["last_tick"] > 60: problems.append("The monitor loop has not run for over a minute.")
     if mkt and _MON["last_error"]: problems.append("Last monitor error: " + _MON["last_error"])
-    if now - _MON["started_at"] < 900: problems.append(f"The server started only {round((now - _MON['started_at']) / 60)} min ago (it had been asleep or was redeployed). It sleeps whenever nobody opens the app - add a free pinger on /health every 5 minutes.")
+    if now - _MON["started_at"] < 900: problems.append(f"The server started only {round((now - _MON['started_at']) / 60)} min ago (restart or new deploy). If you did not deploy, check Events in the Render dashboard - only a Render Free service sleeps and needs a pinger on /health.")
     return {"time": utc_now_iso(), "market_open": mkt, "server_uptime_s": round(now - _MON["started_at"]), "monitor": {
                 "running": bool(_MON["last_tick"]) and now - _MON["last_tick"] < 90, "last_check_ago_s": round(now - _MON["last_tick"]) if _MON["last_tick"] else None,
                 "last_ok_ago_s": round(now - _MON["last_ok"]) if _MON["last_ok"] else None, "last_error": _MON["last_error"], "symbols": _MON["symbols"],
@@ -3194,8 +3873,24 @@ def _mon_refresh(syms, interval, mode, score_min):
             _MON["symbols"][sym] = _mon_note(best[1], best[0])
 
 
+# v1.20.83: 30 min (was 10) - Neon showed 80 of the 100 free compute hours used by 16 Nov; every database touch keeps it awake
+# 5 more minutes. The "monitor was offline" alert therefore needs a 45-min gap; Render's paid plan does not sleep anyway.
+HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "1800") or 1800)
+MONITOR_GAP_MIN_SEC = HEARTBEAT_SEC * 1.5
+
+
 def _market_open_at(dt):
     return in_session(dt)
+
+
+def _gap_start(prev_dt, now):
+    """When the monitor stopped watching: the last heartbeat, or today's open when the heartbeat is from an earlier day /
+    from before the open (heartbeats are only written in market hours)."""
+    info = _session_for(now)
+    if not info["open_day"]:
+        return None
+    open_dt = datetime.combine(now.date(), info["start"], tzinfo=IST)
+    return max(prev_dt, open_dt)
 
 
 async def _alert_poller():
@@ -3206,7 +3901,10 @@ async def _alert_poller():
     while True:
         try:
             _MON["last_tick"] = time.time(); _MON["ticks"] += 1
-            if time.time() - last_beat > 60:             # heartbeat in the database: lets the next start tell how long the monitor was asleep
+            # heartbeat in the database: lets the next start tell how long the monitor was asleep. v1.20.82: only in market hours
+            # and every 10 min - written every minute, day and night, it kept the Neon database awake 24 h a day (Neon sleeps
+            # after 5 idle minutes, and a sleeping database uses no compute hours).
+            if time.time() - last_beat > HEARTBEAT_SEC and in_session(grace_minutes=5):
                 last_beat = time.time()
                 try: await asyncio.to_thread(acc.meta_set, "monitor_heartbeat", str(last_beat))
                 except Exception as exc: logger.debug("Heartbeat not saved: %s", str(exc)[:100])
@@ -3244,8 +3942,12 @@ async def _report_monitor_gap():
         if not prev:
             return
         prev_dt, now = datetime.fromtimestamp(float(prev), IST), datetime.now(IST)
+        start = _gap_start(prev_dt, now)
+        if start is None or not _market_open_at(now):
+            return
+        prev_dt = start
         gap = (now - prev_dt).total_seconds()
-        if gap < 420 or not (_market_open_at(prev_dt) or _market_open_at(now)):
+        if gap < MONITOR_GAP_MIN_SEC:
             return
         _MON["gap"] = {"from": prev_dt.strftime("%d %b %H:%M"), "to": now.strftime("%H:%M"), "minutes": round(gap / 60)}
         await refresh_trading_day()
@@ -3253,7 +3955,7 @@ async def _report_monitor_gap():
             return
         title = "Option Intelligence - monitor was offline"
         body = (f"The server was asleep or restarted from {prev_dt.strftime('%H:%M')} to {now.strftime('%H:%M')} IST ({round(gap / 60)} min). "
-                "Signals in that window were not watched. Add a free pinger on /health every 5 min so it stays awake (see README).")
+                "Signals in that window were not watched. On a paid Render plan check Events in the Render dashboard for the cause; a Render Free service needs a pinger on /health every 5 min (see README).")
         await notifier.send_alert(title, body, "default", force=True)
         for uid in await asyncio.to_thread(acc.push_recipient_ids, _push_owner_id()):
             await asyncio.to_thread(acc.push_add_history, uid, "SYSTEM", "ALL", "-", title, body, utc_now_iso())
@@ -3389,7 +4091,7 @@ async def settle_signals_now(symbol: str = ""):
     return {"closed": len(closed), "details": closed, "target": sx.config()["target"], "cost_points": sx.config()["cost"]}
 
 
-OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols", "strategy_nifty", "strategy_banknifty", "decision_rules", "paper_macd")
+OPTION_KEYS = ("steps", "moneyness", "lots", "charges_rs", "min_rr", "exit_plan", "pattern_minutes", "one_per_side", "daily_target_rs", "trend_entry", "tune", "buy_symbols", "strategy_nifty", "strategy_banknifty", "decision_rules", "paper_macd", "deriv_mode", "max_buys_day", "event_days", "score_model")
 
 
 def _set_option_overrides(d):
@@ -3412,13 +4114,108 @@ def _set_option_overrides(d):
         _indm.LIVE_TUNE.clear()
         _indm.LIVE_TUNE.update(new_t)
         _AN_CACHE.clear()                                   # recompute live signals with the new indicator values at once
+    _sm_before = _indm.SCORE_MODEL                           # v1.20.72: classic | priority (indicators.SCORE_MODELS)
+    if _indm.set_score_model(OPTION_OVERRIDES.get("score_model") or os.getenv("SCORE_MODEL", "classic")) != _sm_before:
+        _AN_CACHE.clear()                                   # recompute live signals with the new score model at once
     import trend_entry as _tem
     if _tem.set_variant(OPTION_OVERRIDES.get("trend_entry") or os.getenv("TREND_ENTRY", "off")) != _PAT_MIN[1]:
         _PAT_MIN[1] = _tem.TREND_ENTRY
         _AN_CACHE.clear()                                   # recompute with / without strong-trend entries at once
+    dsig = (deriv_mode(), max_buys_day(), tuple(event_days()))
+    if dsig != _DERIV_SIG[0]:
+        _DERIV_SIG[0] = dsig
+        _AN_CACHE.clear()                                   # v1.20.57: recompute with the new derivatives-filter mode at once
 
 
 _PAT_MIN = [None, None]
+_DERIV_SIG = [None]
+
+
+# ---- v1.20.57: derivatives filters (derivatives.py) - Off / Record only / Option A (gates) / Option B (inside the score) ----
+def deriv_mode():
+    """Signals-page setting (owner) wins; else DERIV_MODE (default: record)."""
+    return dv.clean_mode(OPTION_OVERRIDES.get("deriv_mode") or dv.DEFAULT_MODE)
+
+
+def max_buys_day():
+    v = OPTION_OVERRIDES.get("max_buys_day")
+    try:
+        return int(v) if v not in (None, "") else dv.MAX_BUYS_DEFAULT
+    except (TypeError, ValueError):
+        return dv.MAX_BUYS_DEFAULT
+
+
+def event_days():
+    v = OPTION_OVERRIDES.get("event_days")
+    return dv.parse_event_days(dv.EVENT_DAYS_DEFAULT if v in (None, "") else v)
+
+
+def buys_today(symbol, interval, mode):
+    got = side_buys_today(symbol, interval, mode)
+    return None if got is None else sum(int((v or {}).get("count") or 0) for v in got.values())
+
+
+DERIV_HIST = dv.History()
+_DERIV_CACHE = {}           # (symbol, interval) -> (time, {"fut", "heavy", "vix"})
+VIX_KEY = os.getenv("VIX_KEY", "NSE_INDEX|India VIX")
+
+
+async def _deriv_inputs(sym, interval):
+    """Option chain (into DERIV_HIST), futures price + OI, India VIX and heavyweight stocks vs VWAP. Cached DERIV_REFRESH_SEC;
+    any part that fails is left out (its check shows 'unavailable') - never raises."""
+    ck = (sym, interval)
+    hit = _DERIV_CACHE.get(ck)
+    if hit and time.time() - hit[0] < dv.REFRESH_SEC:
+        return hit[1]
+
+    async def chain_part():
+        expiry = await resolve_expiry(sym, "current_week")
+        entry = await get_chain(sym, expiry)
+        rd = dv.chain_reading(entry.get("rows") or [], _live_index_price(sym))
+        if rd:
+            DERIV_HIST.add(sym, entry.get("cached_at") or time.time(), **{k: v for k, v in rd.items() if k != "atm_strike"})
+        return rd
+
+    async def fut_part():
+        fut = await get_front_future(sym)
+        if not fut or not fut.get("instrument_key"):
+            return None
+        cs = await fetch_candles(fut["instrument_key"], interval, 2)
+        closed, _ = drop_forming(normalize_candles(cs), interval)
+        return dv.futures_buildup(closed)
+
+    async def vix_part():
+        cs = normalize_candles(await fetch_candles(VIX_KEY, interval, 4))
+        if not cs:
+            return None
+        day = cs[-1]["_dt"].astimezone(IST).date()
+        prev = [c for c in cs if c["_dt"].astimezone(IST).date() < day]
+        return {"last": cs[-1]["close"], "prev_close": prev[-1]["close"] if prev else None}
+
+    async def stock_part(name):
+        await ensure_instruments()
+        row = next((r for r in FUTURES.get("eq") or [] if r.get("trading_symbol") == name), None)
+        if not row or not row.get("instrument_key"):
+            return None
+        cs = normalize_candles(await fetch_candles(row["instrument_key"], interval, 2))
+        if not cs:
+            return None
+        from indicators import session_vwap
+        w, _src = session_vwap(cs)
+        return (cs[-1]["close"], w)
+
+    names = dv.HEAVYWEIGHTS.get(sym) or []
+    parts = await asyncio.gather(*(asyncio.wait_for(c, timeout=8) for c in [chain_part(), fut_part(), vix_part()] + [stock_part(n) for n in names]),
+                                 return_exceptions=True)
+    for p_ in parts:
+        if isinstance(p_, HTTPException) and p_.status_code == 401:
+            raise p_
+        if isinstance(p_, BaseException):
+            logger.info("Derivatives input unavailable for %s: %s", sym, str(getattr(p_, "detail", p_))[:140])
+    ok = lambda v: None if isinstance(v, BaseException) else v
+    out = {"chain": ok(parts[0]), "fut": ok(parts[1]), "vix": ok(parts[2]), "heavy": {n: ok(v) for n, v in zip(names, parts[3:])}}
+    _DERIV_CACHE[ck] = (time.time(), out)
+    return out
 
 
 @app.get("/api/indicator-tuning")
@@ -3481,6 +4278,30 @@ async def pattern_window_set(payload: PatternWindow, request: Request):
     return {"pattern_minutes": _cpm.PATTERN_MINUTES}
 
 
+class DerivModeBody(BaseModel):
+    mode: str
+
+
+@app.post("/api/derivatives/mode")
+async def derivatives_mode_set(payload: DerivModeBody, request: Request):
+    """v1.20.58: the terminal's "Derivatives filters" selector (owner). Keeps every other saved signal / option setting."""
+    _require_admin(request)
+    m = str(payload.mode or "").strip().lower()
+    if m not in dv.MODES:
+        raise HTTPException(400, "Derivatives filters must be off, record, gates or score")
+    try:
+        saved = json.loads(await asyncio.to_thread(acc.meta_get, "signal_log_config") or "{}")
+    except Exception:
+        saved = {}
+    saved["opt_deriv_mode"] = m
+    _set_option_overrides(saved)
+    try:
+        await asyncio.to_thread(acc.meta_set, "signal_log_config", json.dumps(saved))
+    except Exception as exc:
+        logger.warning("Derivatives mode not saved: %s", str(exc)[:140])
+    return {"deriv_mode": deriv_mode(), "label": dv.MODE_LABELS[deriv_mode()]}
+
+
 @app.get("/api/signals/config")
 async def signal_log_config():
     c = sx.config()
@@ -3499,9 +4320,12 @@ async def signal_log_config():
             "buy_symbols": ",".join(buy_symbols()),
             "strategy_nifty": strategy_for("NIFTY"), "strategy_banknifty": strategy_for("BANKNIFTY"),
             "decision_rules": OPTION_OVERRIDES.get("decision_rules") or DECISION_RULES_DEFAULT,
-            "paper_macd": paper_macd_on() and "on" or "off",
+            "paper_macd": paper_mode(),
+            "deriv_mode": deriv_mode(), "deriv_modes": dv.MODE_LABELS, "max_buys_day": max_buys_day(), "event_days": ",".join(event_days()),
+            "event_block_until": dv.EVENT_BLOCK_UNTIL,
             "decision_rules_now": {s_: dict(zip(("mode", "note"), rules_mode(s_))) for s_ in INDEX_KEYS},
             "trend_entry": __import__("trend_entry").TREND_ENTRY,
+            "score_model": __import__("indicators").SCORE_MODEL, "score_models": __import__("indicators").SCORE_MODEL_LABELS,
             "indicator_changes": __import__("indicators").tune_changes(),
             "pattern_minutes": __import__("chart_patterns").PATTERN_MINUTES, "pattern_minutes_allowed": list(__import__("chart_patterns").ALLOWED_MINUTES),
             "option": {"steps": oc["steps"], "moneyness": oc["moneyness"], "lots": oc["lots"], "charges_rs": oc["charges_rs"], "min_rr": oc["min_rr"],
@@ -3522,11 +4346,15 @@ class SignalLogConfig(BaseModel):
     opt_one_per_side: Optional[str] = None      # v1.20.23: "on" | "off" - only the first BUY per side per day
     opt_daily_target_rs: Optional[float] = None  # v1.20.28: stop for the day after this booked profit (₹, 0 = off)
     opt_trend_entry: Optional[str] = None       # v1.20.28: off | rsi | continuation (trend_entry.py)
+    opt_score_model: Optional[str] = None       # v1.20.72: classic | priority (indicators.SCORE_MODELS)
     opt_buy_symbols: Optional[str] = None       # v1.20.35: "NIFTY" | "NIFTY,BANKNIFTY" | "BANKNIFTY"
     opt_strategy_nifty: Optional[str] = None    # v1.20.36: pullback | orb30 | off
     opt_strategy_banknifty: Optional[str] = None
     opt_decision_rules: Optional[str] = None    # v1.20.39: auto | strict | balanced
     opt_paper_macd: Optional[str] = None        # v1.20.41: on | off - paper test of the loose MACD turn (NIFTY)
+    opt_deriv_mode: Optional[str] = None        # v1.20.57: off | record | gates (Option A) | score (Option B)
+    opt_max_buys_day: Optional[int] = None      # v1.20.57: 0 = no cap (applies in Option A / B)
+    opt_event_days: Optional[str] = None        # v1.20.57: YYYY-MM-DD, comma separated (RBI / Budget days)
 
 
 @app.post("/api/signals/config")
@@ -3585,19 +4413,42 @@ async def signal_log_config_set(payload: SignalLogConfig, request: Request):
             raise HTTPException(400, "Decision rules must be auto, strict or balanced")
         new["opt_decision_rules"] = payload.opt_decision_rules
     if payload.opt_paper_macd:
-        if payload.opt_paper_macd not in ("on", "off"):
-            raise HTTPException(400, "Paper test must be on or off")
+        if payload.opt_paper_macd not in ptest.MODES:
+            raise HTTPException(400, "Paper test must be off, on or all")
         new["opt_paper_macd"] = payload.opt_paper_macd
+    if payload.opt_deriv_mode:
+        if payload.opt_deriv_mode not in dv.MODES:
+            raise HTTPException(400, "Derivatives filters must be off, record, gates or score")
+        new["opt_deriv_mode"] = payload.opt_deriv_mode
+    elif OPTION_OVERRIDES.get("deriv_mode"):
+        new["opt_deriv_mode"] = OPTION_OVERRIDES["deriv_mode"]               # an older page does not send it: keep it
+    if payload.opt_max_buys_day is not None:
+        if not 0 <= int(payload.opt_max_buys_day) <= 20:
+            raise HTTPException(400, "Max BUYs per day must be 0-20 (0 = no cap)")
+        new["opt_max_buys_day"] = int(payload.opt_max_buys_day)
+    elif OPTION_OVERRIDES.get("max_buys_day") not in (None, ""):
+        new["opt_max_buys_day"] = OPTION_OVERRIDES["max_buys_day"]
+    if payload.opt_event_days is not None:
+        days_ = dv.parse_event_days(payload.opt_event_days)
+        if payload.opt_event_days.strip() and not days_:
+            raise HTTPException(400, "Event days must be dates like 2026-12-04, comma separated")
+        new["opt_event_days"] = ",".join(days_) or "none"
+    elif OPTION_OVERRIDES.get("event_days"):
+        new["opt_event_days"] = OPTION_OVERRIDES["event_days"]
     import orb_live as _orbm
     for k_, v_ in (("opt_strategy_nifty", payload.opt_strategy_nifty), ("opt_strategy_banknifty", payload.opt_strategy_banknifty)):
         if v_:
             if v_ not in _orbm.STRATEGIES:
                 raise HTTPException(400, "Strategy must be pullback, orb30 or off")
             new[k_] = v_
+    if payload.opt_score_model:
+        if payload.opt_score_model.lower() not in __import__("indicators").SCORE_MODELS:
+            raise HTTPException(400, "Score model must be classic or priority")
+        new["opt_score_model"] = payload.opt_score_model.lower()
     if payload.opt_trend_entry:
         import trend_entry as _tem
         if payload.opt_trend_entry.lower() not in _tem.VARIANTS:
-            raise HTTPException(400, "Strong-trend entries must be off, rsi or continuation")
+            raise HTTPException(400, "Strong-trend entries must be off, rsi, continuation or early")
         new["opt_trend_entry"] = payload.opt_trend_entry.lower()
     import chart_patterns as _cpm
     if payload.opt_pattern_minutes is not None:
@@ -3627,6 +4478,22 @@ async def signal_summary(group: str = "day", start: str = "", end: str = "", sym
     out["cost_points_per_trade"] = sx.config()["cost"]
     out["note"] = "Index points, after the per-trade cost allowance. Open trades are excluded until they exit; EXPIRED trades (server asleep) carry no P/L."
     return out
+
+@app.get("/api/diagnostics/derivatives")
+async def diagnostics_derivatives(start: str = "", end: str = "", symbol: str = "", score_min: int = 60):
+    """v1.20.57: effectiveness of each derivatives-filter option (Off / Option A / Option B / each check) from the signal board's
+    recorded readings and 60-minute test outcomes. Option-chain OI / IV has no history at Upstox, so this - not the replay - is how
+    the options are judged."""
+    if not 50 <= int(score_min) <= 80:
+        raise HTTPException(400, "score_min must be 50-80")
+    rows = await asyncio.to_thread(sb.query, SIGNAL_LOG_DB, start, end, symbol if symbol.upper() in INDEX_KEYS else "", "", 20000, SIGNAL_LOG_LOCK)
+    out = sb.deriv_study(rows, int(score_min))
+    out.update(mode_now=deriv_mode(), mode_label=dv.MODE_LABELS[deriv_mode()],
+               note="One row per setup (board rows of the same index and side within 15 minutes are one setup). Result = the board's 60-minute "
+                    "test trade on the index (row stop / target, else 1.5 ATR / 1.5 ATR). Under Option A or B the blocked signals that never form a "
+                    "WATCH are not recorded - keep Record only while studying for the fairest comparison.")
+    return out
+
 
 @app.get("/api/signal-board")
 async def signal_board(start: str = "", end: str = "", symbol: str = "", stage: str = "", limit: int = 5000):
@@ -3720,6 +4587,7 @@ _AN_TASKS = {}          # args -> running task
 _AN_RECENT = {}         # args -> last time a person asked for it (drives the warmer)
 _AN_FN = {}             # args -> coroutine factory that recomputes it
 _AN_FAIL = {}           # args -> time before which the warmer will not retry (back-off after an error)
+AN_COMPUTE_TIMEOUT = 25.0     # v1.20.72: a compute slower than this (seconds) is abandoned
 AN_FRESH, AN_STALE, AN_STALE_CLOSED = 2.0, 30.0, 900.0     # market closed: nothing changes, so a 15-minute-old result is instant and fine
 
 
@@ -3739,7 +4607,12 @@ def _an_copy(res, age, strip_event=False):
 async def _an_compute(key, fn):
     try:
         try:
-            res = await fn()
+            # v1.20.72: one upstream call that never answers used to keep this task - and every page waiting on it - stuck
+            # ("Signal analysis not refreshing", 12 Nov 14:56). Give up after AN_COMPUTE_TIMEOUT; the next request starts afresh.
+            res = await asyncio.wait_for(fn(), timeout=AN_COMPUTE_TIMEOUT)
+        except asyncio.TimeoutError:
+            _AN_FAIL[key] = time.time() + 5           # dropped; the next request (a few seconds later) computes afresh
+            raise
         except Exception:
             _AN_FAIL[key] = time.time() + 30          # e.g. Upstox rate limit / token expired: do not hammer it
             raise
@@ -3823,6 +4696,8 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
     if not 0 <= reconfirm <= 600:
         raise HTTPException(status_code=400, detail="reconfirm must be 0 (off) to 600 seconds")
     dash_task = asyncio.create_task(_dashboard_final_for(sym, interval)) if sym in INDEX_KEYS else None
+    dmode = deriv_mode() if sym in INDEX_KEYS else "off"
+    deriv_task = asyncio.create_task(_deriv_inputs(sym, interval)) if dmode != "off" else None
     try:
         result = await candles(symbol=symbol, interval=interval, days=10)
         htf_interval = 15 if interval < 15 else 30 if interval < 30 else None
@@ -3834,16 +4709,31 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                 if exc.status_code == 401:
                     raise
                 logger.info("Higher-timeframe candles unavailable: %s", str(exc.detail)[:160])
+        deriv_checks = None
+        if deriv_task:                       # v1.20.57: derivatives checks - never allowed to take the analysis down
+            try:
+                din = await deriv_task
+                deriv_checks = dv.build_checks(sym, time.time(), DERIV_HIST, fut=din.get("fut"), heavy=din.get("heavy"), vix=din.get("vix"))
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    raise
+                logger.info("Derivatives checks unavailable for %s: %s", sym, str(exc.detail)[:140])
+            except Exception as exc:
+                logger.warning("Derivatives checks failed for %s: %s", sym, str(exc)[:160])
         a = analyze(result["candles"], symbol=symbol, interval=interval, htf_raw=htf_raw, htf_interval=htf_interval,
-                    volume_source=result.get("volume_source"), mode=mode, score_min=score_min)  # forming candle ignored inside analyze()
+                    volume_source=result.get("volume_source"), mode=mode, score_min=score_min,
+                    extra_checks=deriv_checks if dmode == "score" else None)  # forming candle ignored inside analyze()
         dash = await dash_task if dash_task else None
     except BaseException:
         if dash_task:
             dash_task.cancel()
+        if deriv_task:
+            deriv_task.cancel()
         raise
     if a.get("status") != "ok":
         return a
-    await _paper_check(sym, interval, mode, score_min, a, result.get("candles") or [])
+    await _paper_check(sym, interval, mode, score_min, a, result.get("candles") or [],
+                       {"htf_raw": htf_raw, "htf_interval": htf_interval, "volume_source": result.get("volume_source")})
     orb_replay = None
     if sym in INDEX_KEYS and strategy_for(sym) == "orb30":
         try:                       # v1.20.36: this index trades the Opening Range Breakout instead of the pullback engine
@@ -3880,11 +4770,31 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                     tv = _tick_view(INDEX_KEYS[sym], time.time())
                 rmode, rnote = rules_mode(sym)
                 flow_extra = [dfl.reentry_gate(side_, sbi, a.get("chart_pattern"), a.get("last_closed_bar"), interval, mode=rmode),
-                              dfl.room_gate(rm["room_atr"], q, rmode), dfl.freshness_gate(tv["age_seconds"] if tv else None, market["open"])]
+                              dfl.room_gate(rm["room_atr"], q, rmode), dfl.freshness_gate(tv["age_seconds"] if tv else None, market["open"], _rest_quote_age(result.get("feed")))]
                 flow_ctx = {"mode": rmode, "mode_note": rnote, "quality": q, "feasibility": dict(feas, room_atr=rm["room_atr"], own_level_atr=rm["own_atr"],
                                                               stretch_atr=round(stretch, 2) if stretch is not None else None)}
             except Exception as exc:
                 logger.warning("Decision flow checks failed for %s: %s", sym, str(exc)[:160])
+        deriv_extra = []
+        if deriv_checks is not None and a.get("status") == "ok":
+            try:                   # v1.20.57: Option A gates / risk gates / record-only note
+                side_d = a.get("side")
+                tech_checks = [c for c in a.get("checks") or [] if not c.get("derivatives")]
+                tb, tbe = dv.score_with(tech_checks, [])
+                g_a = dv.gate_rows(side_d, deriv_checks)
+                g_r = dv.risk_gates(side_d, datetime.now(IST), event_days(), max_buys_day(),
+                                    buys_today(sym, interval, mode) if max_buys_day() else None)
+                a["derivatives"] = dv.summary(dmode, side_d, tech_checks, deriv_checks, g_a, g_r, tb, tbe)
+                if dmode == "gates":
+                    deriv_extra = g_a + g_r
+                elif dmode == "score":
+                    deriv_extra = g_r
+                elif side_d:
+                    deriv_extra = [{"label": "Derivatives filters (record only - not blocking)", "pass": True, "derivatives": True,
+                                    "detail": a["derivatives"]["verdict"]}]
+            except Exception as exc:
+                logger.warning("Derivatives gates failed for %s: %s", sym, str(exc)[:160])
+        flow_extra = list(flow_extra) + deriv_extra
         replay = orb_replay if orb_replay is not None else sf.replay_signal_start(result["candles"], interval, a, htf_raw=htf_raw, htf_interval=htf_interval,
                                                                                   volume_source=result.get("volume_source"), mode=mode)
         track = SIGNAL_TRACKER.update(sym, sf.dash_key(dash), a.get("last_close"), time.time())
@@ -4076,8 +4986,6 @@ QUOTE_CACHE = {}
 QUOTE_TTL = 2          # breadth / sector quotes: REST, kept short so the dashboard follows the market
 UNIVERSE_CACHE = {}
 UNIVERSE_TTL = 12 * 3600
-CSV_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-               "Accept": "text/csv,*/*;q=0.8", "Referer": "https://www.niftyindices.com/"}
 
 
 @app.get("/dashboard")
@@ -4085,41 +4993,56 @@ async def dashboard_page():
     return FileResponse(BASE_DIR / "static" / "dashboard.html", headers={"Cache-Control": "no-cache"})
 
 
+UNIVERSE_DIR = Path(os.getenv("UNIVERSE_DIR", "").strip() or (BASE_DIR / "universes"))
+# v1.20.78: the app never downloads anything from NSE / niftyindices by itself - the UNIVERSE_ONLINE switch and its code are gone.
+# Exchange websites commonly forbid automated access, so the app does not do it; a CSV you save by hand in a normal browser is yours to use.
+
+
+def _local_constituents(universe):
+    """Rows from a CSV the owner saved by hand into universes/ (downloaded in a normal browser from niftyindices.com), or None."""
+    cfg = dd.UNIVERSES[universe]
+    path = Path(UNIVERSE_DIR) / cfg["file"]
+    try:
+        if not path.is_file():
+            return None
+        rows = dd.parse_constituents_csv(path.read_text(encoding="utf-8-sig", errors="replace"))
+        if len(rows) < 5:
+            return None
+        saved = datetime.fromtimestamp(path.stat().st_mtime, IST).strftime("%Y-%m-%d")
+        return {"at": time.time(), "rows": rows, "source": f"Your CSV universes/{cfg['file']} (saved {saved})"}
+    except Exception as exc:
+        logger.warning("Could not read %s: %s", path, str(exc)[:120])
+        return None
+
+
 async def _fetch_constituents(universe):
-    """Constituent list from NSE's own CSV (always current after a rebalance). Nifty 50 falls back to a built-in list."""
+    """Index constituents. Order: your own CSV in universes/ -> built-in list (Nifty 50, Nifty Bank; keys from Upstox's instrument file).
+    Nothing is ever downloaded from NSE / niftyindices by the app (v1.20.78)."""
     hit = UNIVERSE_CACHE.get(universe)
     if hit and time.time() - hit["at"] < UNIVERSE_TTL:
         return hit
     cfg = dd.UNIVERSES[universe]
+    local = await asyncio.to_thread(_local_constituents, universe)
+    if local:
+        UNIVERSE_CACHE[universe] = local
+        return local
     errors = []
-    for base in ("https://nsearchives.nseindia.com/content/indices/", "https://www.niftyindices.com/IndexConstituent/"):
-        try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=CSV_HEADERS) as client:
-                r = await client.get(base + cfg["file"])
-            if r.status_code == 200:
-                rows = dd.parse_constituents_csv(r.text)
-                if len(rows) >= 10:
-                    entry = {"at": time.time(), "rows": rows, "source": "NSE constituent list (live CSV)"}
-                    UNIVERSE_CACHE[universe] = entry
-                    return entry
-                errors.append(f"{base}: only {len(rows)} rows parsed")
-            else:
-                errors.append(f"{base}: HTTP {r.status_code}")
-        except Exception as exc:
-            errors.append(f"{base}: {str(exc)[:80]}")
-    if hit:  # stale list is better than none
-        return {**hit, "source": hit["source"] + " (stale - refresh failed)"}
-    if universe == "nifty50":
+    names = dd.FALLBACK_LISTS.get(universe)
+    if names:
         await ensure_instruments()
         by_sym = {r.get("trading_symbol"): r for r in FUTURES["eq"]}
         rows = [{"symbol": sym, "name": sym, "industry": "", "isin": "", "key": by_sym[sym]["instrument_key"]}
-                for sym in dd.FALLBACK_NIFTY50 if sym in by_sym]
-        if len(rows) >= 30:
-            entry = {"at": time.time() - UNIVERSE_TTL + 900, "rows": rows,
-                     "source": f"Built-in fallback list ({len(rows)} of 50 resolved) - may be outdated"}
+                for sym in names if sym in by_sym]
+        if len(rows) >= max(8, int(len(names) * 0.6)):
+            entry = {"at": time.time() - UNIVERSE_TTL + 900 if errors else time.time(), "rows": rows,
+                     "source": f"Built-in {cfg['label']} list ({len(rows)} of {len(names)} resolved via Upstox) - may be outdated after a rebalance"}
             UNIVERSE_CACHE[universe] = entry
             return entry
-    raise HTTPException(status_code=502, detail="Could not load " + cfg["label"] + " constituents: " + " | ".join(errors))
+        errors.append("instrument file not available yet")
+    raise HTTPException(status_code=502, detail=(
+        f"{cfg['label']} has no built-in list. Download {cfg['file']} from niftyindices.com in your browser, save it as "
+        f"universes/{cfg['file']} in the project and redeploy."
+        + (" Details: " + " | ".join(errors) if errors else "")))
 
 
 async def _quotes(keys, ttl=QUOTE_TTL):
@@ -4338,6 +5261,93 @@ async def dashboard_premium_graph(symbol: str = "NIFTY", expiry: str = "current_
         return dd.unavailable(_err_text(exc))
 
 
+# ---- v1.20.82: one-time download links for the Android app --------------------------------------------------------------------------
+# The app's WebView cannot download files, and saving through the phone's share menu does not work on every phone. The page now also
+# makes a short-lived link (random, 15 min, a few uses, kept only in memory) that can be pasted into Chrome, where downloads work.
+_DL = {}
+DL_TTL_SEC = 900
+DL_MAX_USES = 5
+DL_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _dl_prune(now=None):
+    now = now or time.time()
+    for k in [k for k, v in _DL.items() if v["expires"] < now or v["uses"] >= DL_MAX_USES]:
+        _DL.pop(k, None)
+
+
+def _dl_name(name):
+    keep = "".join(ch for ch in str(name or "") if ch.isalnum() or ch in "-_.")[:120].strip(".")
+    return keep or "download.txt"
+
+
+@app.post("/api/dl")
+async def dl_create(request: Request):
+    _need_user(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "JSON body expected")
+    import base64, secrets as _sec
+    name, mime = _dl_name((body or {}).get("name")), str((body or {}).get("mime") or "application/octet-stream")[:80]
+    if body.get("b64") is not None:
+        try:
+            data = base64.b64decode(body["b64"], validate=True)
+        except Exception:
+            raise HTTPException(400, "Bad file data")
+    else:
+        data = str(body.get("text") or "").encode("utf-8")
+    if not data or len(data) > DL_MAX_BYTES:
+        raise HTTPException(413, "File is empty or too large")
+    _dl_prune()
+    while len(_DL) >= 20:
+        _DL.pop(min(_DL, key=lambda k: _DL[k]["expires"]), None)
+    tok = _sec.token_urlsafe(24)
+    _DL[tok] = {"expires": time.time() + DL_TTL_SEC, "name": name, "mime": mime, "data": data, "uses": 0}
+    return {"url": f"/dl/{tok}/{name}", "expires_in": DL_TTL_SEC}
+
+
+@app.get("/dl/{tok}/{name}")
+async def dl_get(tok: str, name: str):
+    _dl_prune()
+    it = _DL.get(tok)
+    if not it:
+        return Response("This download link has expired or was already used. Make a new one in the app.", status_code=404, media_type="text/plain")
+    it["uses"] += 1
+    return Response(it["data"], media_type=it["mime"], headers={"Content-Disposition": f'attachment; filename="{it["name"]}"', "Cache-Control": "no-store"})
+
+
+@app.get("/api/upstox/usage")
+async def upstox_usage():
+    """v1.20.81: Upstox calls per API in the last second / minute / 30 minutes against the published limits."""
+    return {"limits": {"per_sec": RL_LIMITS[1], "per_min": RL_LIMITS[60], "per_30min": RL_LIMITS[1800]}, "by_api": rl_counts()}
+
+
+# v1.20.88: "Check for app update" in the Android app (More -> Account). The APK workflow publishes apk-version.json next to
+# OptionIntelligence.apk in the apk-latest release; the server reads it only when the button is pressed (a repeat within 60 s
+# gets the same answer) and the page compares it with the build the app sends in its user agent (OIApp-APK/<n>).
+# Only a public file on GitHub is read - nothing is sent.
+APK_RELEASE = os.getenv("APK_RELEASE_URL", "https://github.com/trdrtiwari-cmd/option-intelligence/releases/download/apk-latest").rstrip("/")
+_APK_INFO = {"at": 0.0, "data": None}
+
+
+@app.get("/api/app/apk")
+async def app_apk_info():
+    if time.time() - _APK_INFO["at"] < 60 and _APK_INFO["data"] is not None:
+        return _APK_INFO["data"]
+    data = {"build": None, "url": APK_RELEASE + "/OptionIntelligence.apk"}
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as c:
+            r = await c.get(APK_RELEASE + "/apk-version.json")
+        if r.status_code == 200:
+            b = r.json().get("build")
+            data["build"] = int(b) if b is not None else None
+    except Exception as exc:
+        logger.info("APK version check failed: %s", str(exc)[:120])
+    _APK_INFO.update(at=time.time(), data=data)
+    return data
+
+
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    return {"ok": True, "version": APP_VERSION}          # v1.20.79: the page header shows which server version is running

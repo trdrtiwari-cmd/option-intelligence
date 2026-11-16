@@ -251,6 +251,9 @@ def test_export_includes_terminal_and_page():
     old_tok = M.runtime_token
     M.runtime_token = None
     day = M.ist_now().date().isoformat()
+    # v1.20.77: the snapshot lists the analyses of the combinations in use (alert setting + what a terminal used in the last 6 h);
+    # the test never registered its scalp / 70 terminal, so it only passed where the alert setting happened to be scalp / 70.
+    M._USER_COMBOS[("NIFTY", 5, "scalp", 70)] = __import__("time").time()
     M._AN_CACHE[("NIFTY", 5, "scalp", 70, -1)] = (__import__("time").time(), {"status": "ok", "score": 72, "regime_label": "SIDEWAYS",
         "gates": [{"label": "Not sideways / not in a range", "pass": False}, {"label": "Score ≥ 70", "pass": True}],
         "final": {"level": "WATCH", "action": "WATCH CE", "headline": "h", "blockers": ["x: y"]}, "option_pick": {"name": "NIFTY 24300 CE", "ltp": 301.4}})

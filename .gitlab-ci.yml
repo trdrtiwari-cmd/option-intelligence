@@ -1,0 +1,15 @@
+# GitLab CI for Option Intelligence (moved from GitHub, Nov 2026).
+#  - test:      runs the automated tests on every push to main
+# Keeping the Render server awake is done by cron-job.org, not here (no scheduled pipelines - see the GitHub suspension).
+stages: [test]
+
+test:
+  stage: test
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web"
+  script:
+    - cd option-intelligence-main
+    - pip install --quiet -r requirements.txt pytest
+    - python -m pytest -q
+

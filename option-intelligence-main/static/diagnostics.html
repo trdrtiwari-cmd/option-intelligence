@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.55">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.55">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.88">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.88">
 </head>
 <body>
 <header class="topbar">
@@ -69,8 +69,15 @@
     <section class="panel"><div class="section-head"><div><h2>Gate check — setups blocked by exactly one gate</h2><p>If these would have paid more than confirmed signals, that gate is too strict. If they would have lost, it is doing its job.</p></div></div><div class="table-wrap"><table id="ablation"></table></div></section>
     <section class="panel"><h2>Read this before acting on it</h2><ul id="limits" class="dg-verdict"></ul></section>
   </div>
+  <section class="panel" id="derivStudy"><div class="section-head"><div><h2>Derivatives filters — which option works (Off / Option A / Option B)</h2><p>Judged on the live signals the app recorded with their OI, PCR, IV / VIX and heavyweight-stock readings (Upstox has no history of these, so the replay above cannot test them). Each option and each check is shown on its own: compare its win rate and points per trade with "Off - every signal". Change the live option on the Signals page.</p></div></div>
+    <div class="toolbar dg-toolbar"><label>Underlying<select id="dvSymbol"><option value="">Both</option><option value="NIFTY">NIFTY 50</option><option value="BANKNIFTY">BANK NIFTY</option></select></label><label>From<input type="date" id="dvStart"></label><label>To<input type="date" id="dvEnd"></label><label>Option B minimum score<select id="dvScore"><option value="60" selected>60</option><option value="65">65</option><option value="70">70</option></select></label><button id="dvLoad" type="button">Show results</button></div>
+    <p class="sub" id="dvMsg"></p><p id="dvVerdict" style="font-weight:600"></p>
+    <h3 class="dg-sub">Each option</h3><div class="table-wrap"><table id="dvOptions" class="cardify"></table></div>
+    <h3 class="dg-sub">Each check on its own</h3><div class="table-wrap"><table id="dvChecks" class="cardify"></table></div>
+    <p class="sub" id="dvNote"></p></section>
 </main>
+<footer>Personal research tool for the account owner · Not investment advice · Do not share its prices or signals with other people · Market data: your own Upstox account</footer>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/issues.js?v=1.20.55"></script><script src="/static/savefile.js?v=1.20.55"></script><script src="/static/sync.js?v=1.20.55" data-next="/static/diagnostics.js?v=1.20.55"></script>
-<script src="/static/mobile.js?v=1.20.55" defer></script><script src="/static/sections.js?v=1.20.55" defer></script><script src="/static/tables.js?v=1.20.55" defer></script>
+<script src="/static/issues.js?v=1.20.88"></script><script src="/static/savefile.js?v=1.20.88"></script><script src="/static/sync.js?v=1.20.88" data-next="/static/diagnostics.js?v=1.20.88"></script>
+<script src="/static/derivstudy.js?v=1.20.88" defer></script><script src="/static/mobile.js?v=1.20.88" defer></script><script src="/static/sections.js?v=1.20.88" defer></script><script src="/static/tables.js?v=1.20.88" defer></script>
 </body></html>

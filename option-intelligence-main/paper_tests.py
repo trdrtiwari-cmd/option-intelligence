@@ -15,7 +15,14 @@ from datetime import datetime, timedelta
 
 from indicators import IST
 
-STRATEGIES = {"macd_loose": "MACD histogram turn (loose) - paper only"}
+STRATEGIES = {"macd_loose": "MACD histogram turn (loose) - paper only",
+              # v1.20.75: the two other "more signals" candidates of the 30-day Diagnostics (13 Oct - 12 Nov 2026), forward-tested the same way
+              "stoch_loose": "Stochastic cross (loose) - paper only",
+              "early_trend": "Early trend entry (Priority score) - paper only"}
+SHORT = {"macd_loose": "MACD turn", "stoch_loose": "Stochastic", "early_trend": "Early trend"}
+LEADING_KIND = {"macd_loose": "macd_turn", "stoch_loose": "stoch"}
+MODES = {"off": (), "on": ("macd_loose",), "all": ("macd_loose", "stoch_loose", "early_trend")}   # the Signals-page setting
+EARLY_MAX_PER_DAY = 3                 # same limits as diagnostics.strong_trend_events
 SYMBOLS = ("NIFTY",)                  # tested on NIFTY only
 HORIZON, COST = 12, 4.0               # same as the Diagnostics defaults
 
@@ -37,7 +44,14 @@ def _bar_minute(c):
 def check_macd_loose(a, cs_closed, interval, in_window):
     """The entry (dict) when the loose MACD rule fires on the last closed candle, else None.
     a: the engine's analysis of exactly these candles; in_window(minute) -> bool is the live entry window."""
+    return check_leading_loose(a, cs_closed, interval, in_window, "macd_loose")
+
+
+def check_leading_loose(a, cs_closed, interval, in_window, strategy):
+    """v1.20.75: the loose rule for any leading trigger (macd_loose, stoch_loose) - engine side, score passing, entry window,
+    trigger fires on the last closed candle. Exactly what diagnostics.leading_compare measures as variant 'loose'."""
     import leading as _ld
+    kind = LEADING_KIND[strategy]
     side = a.get("side")
     if side not in ("CE", "PE") or not cs_closed or not a.get("atr"):
         return None
@@ -48,11 +62,45 @@ def check_macd_loose(a, cs_closed, interval, in_window):
     close_min = _bar_minute(last) + interval
     if not in_window(close_min):
         return None
-    if not _ld.fires(cs_closed, len(cs_closed) - 1, side, "macd_turn"):
+    if not _ld.fires(cs_closed, len(cs_closed) - 1, side, kind):
         return None
     t = last["_dt"].astimezone(IST)
-    return {"strategy": "macd_loose", "side": side, "day": t.date().isoformat(), "bar_time": t.strftime("%H:%M"),
+    return {"strategy": strategy, "side": side, "day": t.date().isoformat(), "bar_time": t.strftime("%H:%M"),
             "signal_close": float(last["close"]), "atr": float(a["atr"]), "score": int(a.get("score") or 0)}
+
+
+def check_early_trend(pa, cs_closed, interval, in_window, today_rows=()):
+    """v1.20.75: the entry when the Early trend rule (trend_entry.check, variant 'early') allows this closed candle, else None.
+    pa: the analysis of exactly these candles with the PRIORITY score model and strong-trend entries off - the same inputs
+    diagnostics.strong_trend_events uses. Not on a bar that is already a confirmed signal, only inside the entry window, at most
+    EARLY_MAX_PER_DAY a day and not within HORIZON candles of the previous paper entry (one trade at a time)."""
+    import trend_entry as _te
+    side, atr = pa.get("side"), pa.get("atr")
+    if side not in ("CE", "PE") or not atr or not cs_closed or str(pa.get("signal") or "").startswith("CONFIRMED"):
+        return None
+    last = cs_closed[-1]
+    close_min = _bar_minute(last) + interval
+    if not in_window(close_min):
+        return None
+    t = last["_dt"].astimezone(IST)
+    mine = [r for r in today_rows if r.get("day") == t.date().isoformat()]
+    if len(mine) >= EARLY_MAX_PER_DAY:
+        return None
+    for r in mine:
+        try:
+            hh, mm = str(r["bar_time"]).split(":")
+            if 0 <= _bar_minute(last) - (int(hh) * 60 + int(mm)) < HORIZON * interval:
+                return None
+        except Exception:
+            continue
+    failed = [g["label"] for g in pa.get("gates") or [] if not g.get("pass")]
+    px, e9 = pa.get("last_close"), pa.get("ema9")
+    stretch = (((e9 - px) if side == "PE" else (px - e9)) / atr) if (px is not None and e9 is not None) else None
+    vwap = pa.get("vwap") if pa.get("vwap") is not None else pa.get("vwap_approx")
+    if not _te.check(cs_closed, side, atr, pa.get("rsi"), vwap, stretch, failed, "early"):
+        return None
+    return {"strategy": "early_trend", "side": side, "day": t.date().isoformat(), "bar_time": t.strftime("%H:%M"),
+            "signal_close": float(last["close"]), "atr": float(atr), "score": int(pa.get("score") or 0)}
 
 
 def record(db_path, symbol, interval, entry, lock=None):

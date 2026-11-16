@@ -507,19 +507,38 @@
   // (once per setup; it stays on that contract while the side is the same), and goes back to the index after 10 minutes without a
   // setup - 2 minutes when the engine leans the other side. "Index only" never switches.
   let OPT = null, autoIdle = null, lastSide = null;
+  // v1.20.88: like the terminal (v1.20.74), no automatic switch to an option while the market is closed - after 15:30 the last
+  // setup (e.g. WATCH CE at 15:30) kept the Chart tab on the option while the terminal showed the index price. Market state from
+  // /api/status, asked every 5 min; unknown = treated as open, so nothing changes if the call fails.
+  let mktOpen = null;
+  // v1.20.88: the first analysis can arrive before /api/status answers - so no automatic switch until the state is known, and
+  // a switch already made goes back to the index as soon as the answer says closed. If the call fails, treat as open (old behaviour).
+  async function refreshMarket() {
+    try { const s = await api("/api/status"); mktOpen = !!(s.market && s.market.open); } catch { if (mktOpen === null) mktOpen = true; }
+    if (mktOpen === false && OPT && OPT.auto && S.view === "auto") toIndex("Market closed: chart back to the index");
+  }
+  refreshMarket(); setInterval(refreshMarket, 300000);
   const optQ = () => OPT ? `&instrument_key=${encodeURIComponent(OPT.key)}` : "";
   function showOpt() {
     $("optBar").hidden = !OPT;
     if (OPT) $("optText").innerHTML = `Option chart: <b>${esc(OPT.name)}</b> · premium candles${OPT.why ? " · " + esc(OPT.why) : ""}`;
     document.title = `${OPT ? OPT.name : S.sym} ${S.tf}m · Chart · Option Intelligence`;
   }
+  // v1.20.70: the socket sends the charted option's every tick, other strikes once a second - so it must know which one is charted
+  function subMsg() { return JSON.stringify({ type: "sub", interval: S.tf, mode: mode(), score_min: scoreMin(), reconfirm: reconfirm(), view: "index", opt_key: OPT ? OPT.key : "" }); }
+  function resub() { try { if (ws && ws.readyState === 1) ws.send(subMsg()); } catch { } }
   function toOption(pk, why) {
-    OPT = { key: pk.instrument_key, type: pk.type, name: pk.name || `${S.sym} ${pk.strike} ${pk.type}`, why };
-    autoIdle = null; showOpt(); loadCandles(); toast(`${why}: chart switched to ${OPT.name}`);
+    OPT = { key: pk.instrument_key, type: pk.type, name: pk.name || `${S.sym} ${pk.strike} ${pk.type}`, why, auto: true };
+    autoIdle = null; showOpt(); loadCandles(); resub(); toast(`${why}: chart switched to ${OPT.name}`);
   }
-  function toIndex(msg) { if (!OPT) return; OPT = null; autoIdle = null; showOpt(); loadCandles(); if (msg) toast(msg); }
+  function toIndex(msg) { if (!OPT) return; OPT = null; autoIdle = null; showOpt(); loadCandles(); resub(); if (msg) toast(msg); }
   function autoView(a) {
     if (S.view !== "auto" || !a) return;
+    if (mktOpen === null) return;                               // market state not known yet - decide once /api/status answers
+    if (mktOpen === false) {                                   // closed: back to the index, no new switch
+      if (OPT && OPT.auto) toIndex("Market closed: chart back to the index");
+      return;
+    }
     const pk = a.option_pick, lvl = a.final && a.final.level;
     if (pk && pk.instrument_key && ["WATCH", "PENDING", "CONFIRMED"].includes(lvl) && (!pk.symbol || pk.symbol === S.sym)) {
       autoIdle = null;
@@ -559,7 +578,7 @@
     const g = loadGen + 1;
     await loadCandles();
     api(`/api/analysis?symbol=${S.sym}&interval=${S.tf}&mode=${mode()}&score_min=${scoreMin()}&reconfirm=${reconfirm()}`).then(a => { if (g === loadGen) onAnalysis(a); }).catch(() => { });
-    connect();
+    if (document.visibilityState === "visible" || (ws && ws.readyState <= 1)) connect();   // v1.20.67: a hidden tab connects when shown
   }
   function mergeBars(list) {
     if (!cs.length) return;
@@ -588,7 +607,7 @@
     const g = ++wsGen;
     if (ws) { ws.onclose = ws.onmessage = ws.onerror = null; try { ws.close(); } catch { } }
     ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/live?symbol=${S.sym}`);
-    ws.onopen = () => { if (g === wsGen) ws.send(JSON.stringify({ type: "sub", interval: S.tf, mode: mode(), score_min: scoreMin(), reconfirm: reconfirm(), view: "index" })); };
+    ws.onopen = () => { if (g === wsGen) ws.send(subMsg()); };
     ws.onmessage = ev => {
       if (g !== wsGen) return;
       let m; try { m = JSON.parse(ev.data); } catch { return; }
@@ -603,11 +622,17 @@
     };
     ws.onclose = () => { if (g === wsGen) setTimeout(() => { if (g === wsGen && document.visibilityState === "visible") connect(); }, 4000); };
   }
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && (!ws || ws.readyState > 1)) connect(); });
-  window.addEventListener("storage", e => { if (/^oi-(score-min|signal-mode)-v2$/.test(e.key || "")) { A = null; connect(); } });   // Terminal changed its signal settings
+  let hiddenTimer = null;                 // v1.20.67 bandwidth: no live socket while the Chart tab is off screen for 20 s
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(hiddenTimer);
+    if (document.visibilityState === "visible") { if (!ws || ws.readyState > 1) connect(); return; }
+    hiddenTimer = setTimeout(() => { if (document.visibilityState !== "visible" && ws) { wsGen++; ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null; try { ws.close(); } catch { } ws = null; } }, 20000);
+  });
+  window.addEventListener("storage", e => { if (/^oi-(score-min|signal-mode)-v2$/.test(e.key || "")) { A = null; if (document.visibilityState === "visible") connect(); } });   // Terminal changed its signal settings
   let lastPoll = 0;
   setInterval(() => {                      // option candles (the socket only pushes index candles), or the index when the socket is quiet
     if (document.visibilityState !== "visible" || !cs.length) return;
+    if (window.__oiMarketOpen && !window.__oiMarketOpen() && Date.now() - lastPoll < (window.__oiClosedWait || 900000)) return;   // v1.20.68
     const due = OPT ? Date.now() - lastPoll >= 5000 : Date.now() - lastMsg >= 20000 && Date.now() - lastPoll >= 15000;
     if (!due) return;
     lastPoll = Date.now();

@@ -35,6 +35,12 @@ SESSION_DAYS = 30
 MAX_VALUE_BYTES = 2_000_000       # per saved key
 MAX_KEYS_PER_USER = 40
 MAX_USERS = 200                   # sanity cap on an invite-code deployment
+# v1.20.78: the prices come from the OWNER's Upstox login. Letting other people see them (or the BUY signals) is sharing real-time
+# market data and trading calls with third parties, which needs exchange / SEBI permissions an individual does not have. So after
+# the owner's account no new account can be created unless the owner sets ALLOW_EXTRA_USERS=1 - a deliberate, visible choice.
+ALLOW_EXTRA_USERS = os.getenv("ALLOW_EXTRA_USERS", "").strip().lower() in ("1", "true", "yes")
+PERSONAL_USE_REASON = ("Sign-ups are closed: this is a personal tool. Its prices come from the owner's own Upstox login and may not be "
+                       "shared with other people. (Owner: ALLOW_EXTRA_USERS=1 on the server re-opens invite-code sign-ups - read LEGAL.md first.)")
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,63}$")
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,31}$")
 
@@ -286,6 +292,8 @@ def user_count():
 def signup_status():
     """What the sign-up form should ask for."""
     n = user_count()
+    if n > 0 and not ALLOW_EXTRA_USERS:
+        return {"open": False, "needs_code": bool(SIGNUP_CODE), "first_user": False, "closed_reason": PERSONAL_USE_REASON}
     if SIGNUP_CODE:
         return {"open": n < MAX_USERS, "needs_code": True, "first_user": n == 0}
     return {"open": n == 0, "needs_code": False, "first_user": n == 0,
@@ -298,6 +306,8 @@ def create_user(username, password, code=""):
     validate_password(password, username)
     with db() as c:
         n = c.one("SELECT COUNT(*) AS n FROM users WHERE username <> ?", (REVIEW_USERNAME,))["n"]
+        if n > 0 and not ALLOW_EXTRA_USERS:
+            raise AccountError(PERSONAL_USE_REASON, 403)
         if SIGNUP_CODE:
             if not hmac.compare_digest(str(code or ""), SIGNUP_CODE):
                 raise AccountError("Invalid invite code.", 403)
@@ -400,7 +410,7 @@ def _hash_token(token):
 
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
-CACHE_TTL = 30
+CACHE_TTL = 900                   # v1.20.83: 15 min (v1.20.82: 5 min, before 30 s) - an open app no longer keeps the database awake
 
 
 def _cache_clear():
@@ -419,7 +429,7 @@ def create_session(user_id, user_agent=""):
 
 
 def session_user(token):
-    """User for a session token, or None. Cached for 30 s so the 5-10 s polling does not hit the database each time."""
+    """User for a session token, or None. Cached for CACHE_TTL so the 5-10 s polling does not hit the database each time."""
     if not token or len(token) > 100:
         return None
     h = _hash_token(token)
@@ -581,6 +591,11 @@ def safe_next(path):
     return path if path.startswith("/") and not path.startswith("//") and "\\" not in path else "/"
 
 
+def _public(path, method="GET"):
+    """v1.20.82: the fixed public paths, plus one-time download links (GET /dl/<random>/<name>)."""
+    return path in PUBLIC_PATHS or (path.startswith("/dl/") and method in ("GET", "HEAD"))
+
+
 class SessionAuthMiddleware:
     """Everything except the public paths needs a valid login cookie. Pages redirect to /login, APIs answer 401 JSON,
     WebSockets are closed with code 4401. Cross-site POST/PUT/DELETE requests are refused (Origin check)."""
@@ -607,11 +622,11 @@ class SessionAuthMiddleware:
             try:
                 user = await asyncio.to_thread(session_user, token)
             except Exception:       # database trouble must not look like "logged out" forever
-                if path in PUBLIC_PATHS:
+                if _public(path, method):
                     user = None
                 else:
                     return await self._json(send, 503, {"detail": "Account database is unavailable. Try again shortly."})
-        if not user and path not in PUBLIC_PATHS and (review_cookie_ok(_cookie(scope.get("headers"), REVIEW_COOKIE))
+        if not user and not _public(path, method) and (review_cookie_ok(_cookie(scope.get("headers"), REVIEW_COOKIE))
                                                       or review_key_ok(dict(scope.get("headers") or []).get(b"x-review-key", b"").decode("latin-1"))):
             if (scope["type"] == "http" and method not in ("GET", "HEAD", "OPTIONS") and path not in REVIEW_ALLOWED_WRITES) \
                     or path in REVIEW_BLOCKED_PATHS:
@@ -622,7 +637,7 @@ class SessionAuthMiddleware:
                 return await self._json(send, 503, {"detail": "Account database is unavailable. Try again shortly."})
             token = ""
         scope["oi_user"], scope["oi_token"] = user, token
-        if user or path in PUBLIC_PATHS:
+        if user or _public(path, method):
             return await self.app(scope, receive, send)
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 4401})
