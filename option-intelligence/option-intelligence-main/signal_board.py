@@ -17,6 +17,8 @@ Pure sqlite / Python: no web framework.
 import sqlite3
 from datetime import datetime, timedelta
 
+from signal_fusion import blocker_label
+
 STAGES = ("WATCH", "SETUP", "BUY", "NO BUY", "FAILED")
 COLUMNS = [("created_at", "TEXT"), ("session_date", "TEXT"), ("symbol", "TEXT"), ("interval", "INTEGER"), ("mode", "TEXT"), ("side", "TEXT"),
            ("stage", "TEXT"), ("episode", "TEXT"), ("option_name", "TEXT"), ("option_key", "TEXT"), ("strike", "REAL"), ("expiry", "TEXT"),
@@ -67,8 +69,7 @@ def blocked_by(a, final):
         if isinstance(g, dict) and not g.get("pass") and g.get("label"):
             out.append(str(g["label"]))
     for b in (final or {}).get("blockers") or []:
-        parts = str(b).split(": ")
-        lab = (": ".join(parts[:2]) if str(b).startswith("Profit check:") else parts[0]).strip()
+        lab = blocker_label(b)
         if lab and lab not in out:
             out.append(lab)
     return " · ".join(out)[:400]

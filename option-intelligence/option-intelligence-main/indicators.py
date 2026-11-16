@@ -440,6 +440,79 @@ def count_ema_crosses(e9, e21, atr, n=20, dead_band=0.1):
     return crosses
 
 
+# ---------------------------------------------------------------- v1.20.72 score model + fast trend identifier
+# classic  - the weights used up to v1.20.71: higher timeframe 18, Supertrend 15, ADX 12 (45 of 100 on the three slowest
+#            indicators, 0 on price structure) and the side is whichever total is larger. After a turn those three still vote
+#            for the OLD direction, so the engine "leaned the other way" while the new move ran (14 of 44 missed moves, 2-12 Nov).
+# priority - price first: price-structure / fast trend 20, breakout 10, VWAP 10; momentum EMA 12, MACD 10, RSI 8, volume 5;
+#            lagging confirmers Supertrend 8, ADX 7, higher timeframe 10. When price has proved a direction the side follows it,
+#            and a lagging indicator that still points the old way is not counted against the move. Every entry gate is unchanged.
+SCORE_MODELS = ("classic", "priority")
+SCORE_MODEL_LABELS = {"classic": "Classic (indicator majority)", "priority": "Priority (price first + fast trend)"}
+PRIORITY_WEIGHTS = {"structure": 20, "breakout": 10, "vwap": 10, "ema": 12, "macd": 10, "rsi": 8, "volume": 5, "supertrend": 8, "adx": 7, "htf": 10}
+LAGGING_KEYS = ("supertrend", "adx", "htf")
+SCORE_MODEL = (_os.getenv("SCORE_MODEL", "classic").strip().lower() or "classic")
+if SCORE_MODEL not in SCORE_MODELS:
+    SCORE_MODEL = "classic"
+FAST_MOVE_ATR = 1.5        # the burst: at least this many ATR ...
+FAST_EFF = 0.65            # ... nearly one-way (Kaufman efficiency) ...
+FAST_BARS = (3, 4, 5)      # ... within 3-5 closed bars
+FAST_SWING = 6             # and a close beyond the high / low of the 6 bars before the burst
+FAST_HOLD = 12             # stays valid this many bars while no close goes back through EMA 21
+
+
+def set_score_model(v):
+    global SCORE_MODEL
+    v = str(v or "classic").strip().lower()
+    SCORE_MODEL = v if v in SCORE_MODELS else "classic"
+    return SCORE_MODEL
+
+
+def fast_trend(cs, e9, e21, atr):
+    """A new trend seen within 3-5 CLOSED bars, long before ADX / Supertrend / the higher timeframe turn.
+    Burst: >= 1.5 ATR in 3-5 bars of one session with efficiency >= 0.65, the close beyond EMA 9 and EMA 21, beyond the swing
+    high / low of the 6 bars before the burst, and in the burst's half of its own bar (no rejection wick).
+    It stays valid for 12 bars while no close goes back through EMA 21 by more than 0.25 ATR, so the retest entry that follows
+    still sees the right side. Returns {direction: +1 / -1 / 0, age_bars, move_atr, bars, efficiency, evidence}."""
+    out = {"direction": 0, "age_bars": None, "move_atr": None, "bars": None, "efficiency": None, "evidence": None}
+    n = len(cs)
+    if not atr or n < max(FAST_BARS) + FAST_SWING + 2:
+        return out
+    closes = [c["close"] for c in cs]
+    day = lambda c: c["_dt"].astimezone(IST).date() if c.get("_dt") is not None else None
+    last = n - 1
+    for i in range(last, max(max(FAST_BARS) + FAST_SWING, last - FAST_HOLD) - 1, -1):
+        bar = cs[i]
+        rng = bar["high"] - bar["low"]
+        for k in FAST_BARS:
+            if day(cs[i - k]) != day(bar):
+                break                                           # an opening gap is not a burst
+            net = closes[i] - closes[i - k]
+            d = 1 if net > 0 else -1
+            if abs(net) < FAST_MOVE_ATR * atr:
+                continue
+            eff = efficiency_ratio(closes[i - k:i + 1])
+            if eff < FAST_EFF or d * (closes[i] - e9[i]) <= 0 or d * (closes[i] - e21[i]) <= 0:
+                continue
+            ref = cs[i - k - FAST_SWING + 1:i - k + 1]
+            if (d == 1 and closes[i] <= max(c["high"] for c in ref)) or (d == -1 and closes[i] >= min(c["low"] for c in ref)):
+                continue
+            if rng > 0 and ((closes[i] - bar["low"]) / rng < 0.5 if d == 1 else (bar["high"] - closes[i]) / rng < 0.5):
+                continue
+            if any(d * (closes[m] - e21[m]) < -0.25 * atr for m in range(i + 1, last + 1)):
+                return out                                      # the newest burst has already failed
+            ext = max(d * closes[m] for m in range(i, last + 1))
+            if ext - d * closes[last] >= FAST_MOVE_ATR * atr:
+                return out                                      # a counter-move as large as a burst: the trend is no longer proven
+            word = "up" if d == 1 else "down"
+            out.update(direction=d, age_bars=last - i, move_atr=round(abs(net) / atr, 1), bars=k, efficiency=round(eff, 2),
+                       evidence=f"{abs(net) / atr:.1f} ATR {word} in {k} bars (efficiency {eff:.2f}) · closed "
+                                f"{'above' if d == 1 else 'below'} the prior swing {'high' if d == 1 else 'low'} and EMA 9 / 21"
+                                + (f" · {last - i} bars ago, still holding EMA 21" if last - i else " · on this bar"))
+            return out
+    return out
+
+
 def directional_structure(cs, e9, e21, atr, vwap, n=20):
     """Is price actually TRENDING right now (even if ADX / Supertrend / score still lag)?
     Returns {direction: +1 / -1 / 0, evidence: [...], broke_out: +1 / -1 / 0, ...}.
@@ -534,8 +607,9 @@ def breakout_quality(cs, atr, side, n=20):
 
 
 def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=None, volume_source=None, now=None, mode="standard", score_min=60,
-            pattern_minutes=None, trend_entry_variant=None, tune=None, extra_checks=None):
+            pattern_minutes=None, trend_entry_variant=None, tune=None, extra_checks=None, score_model=None):
     rules = mode_rules(mode)
+    model = score_model if score_model in SCORE_MODELS else SCORE_MODEL
     T = tune_values(tune)
     if mode == "standard" and T["chase_atr"] != rules["chase_atr"]:
         rules = dict(rules, chase_atr=T["chase_atr"])
@@ -622,6 +696,23 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     ]
     if extra_checks:                 # v1.20.57: Option B - derivatives checks (derivatives.py) scored with the price indicators
         checks = checks + [dict(c) for c in extra_checks]
+    _tot = lambda flag: round(sum(c["weight"] for c in checks if c["ok"] and c[flag]) / sum(c["weight"] for c in checks if c["ok"]) * 100)
+    classic_bull, classic_bear = _tot("bull"), _tot("bear")          # what the classic model says - always reported
+    ds_early = directional_structure(cs, e9, e21, atr, vwap, 20)
+    ft = fast_trend(cs, e9, e21, atr)
+    price_dir = ds_early["direction"] or ft["direction"]             # price has proved a direction (20-bar structure, else the fast burst)
+    if model == "priority":
+        for c in checks:
+            if c["key"] in PRIORITY_WEIGHTS:
+                c["weight"] = PRIORITY_WEIGHTS[c["key"]]
+        if price_dir:
+            for c in checks:                                         # a slow indicator still on the old side is late, not a vote against
+                if c["key"] in LAGGING_KEYS and c["ok"] and c["bear" if price_dir == 1 else "bull"]:
+                    c["bear" if price_dir == 1 else "bull"] = False
+                    c["detail"] += " · lags the price trend - not counted against it"
+        src = ("; ".join(ds_early["evidence"]) if ds_early["direction"] else "Fast trend: " + ft["evidence"]) if price_dir else "No price-structure trend and no fast burst"
+        checks.insert(0, {"key": "structure", "label": "Price trend (structure / fast trend identifier)", "weight": PRIORITY_WEIGHTS["structure"], "ok": True,
+                          "bull": price_dir == 1, "bear": price_dir == -1, "detail": src})
     available = sum(c["weight"] for c in checks if c["ok"])
     bull = round(sum(c["weight"] for c in checks if c["ok"] and c["bull"]) / available * 100)
     bear = round(sum(c["weight"] for c in checks if c["ok"] and c["bear"]) / available * 100)
@@ -636,7 +727,7 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
         chop["range_low"], chop["range_high"] = min(lows[-N:]), max(highs[-N:])
         chop["range_atr"] = (chop["range_high"] - chop["range_low"]) / atr
         chop["crosses"] = count_ema_crosses(e9, e21, atr, N)                     # with a dead band, no noise crosses
-    ds = directional_structure(cs, e9, e21, atr, vwap, N)
+    ds = ds_early
     trend_dir = ds["direction"]
     eff = chop["efficiency"]
     # crossing EMAs alone no longer means "range": the market must also lack directional progress
@@ -670,8 +761,12 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
                        f"(bull {bull} / bear {bear}) - a lean, not a trend") if prior_bias != "NEUTRAL" else \
                       f"No clear trend: no price-structure move, no range, indicators balanced (bull {bull} / bear {bear})"
 
+    if ft["direction"] and not trend_dir:                        # shown in both models; only the priority model acts on it
+        regime_note += f" · Early {'up' if ft['direction'] == 1 else 'down'}trend (fast identifier): {ft['evidence']}"
     squeeze = bool(bb and bb[2])
     side = "CE" if bull > bear else "PE" if bear > bull else None
+    if model == "priority" and price_dir:
+        side = "CE" if price_dir == 1 else "PE"                  # price first: the side follows the proven direction, the score must still reach the minimum
     dom = bull if side == "CE" else bear
     want = "bull" if side == "CE" else "bear"
     by_key = {c["key"]: c for c in checks}
@@ -801,9 +896,11 @@ def analyze(raw_candles, symbol="NIFTY", interval=5, htf_raw=None, htf_interval=
     return {
         "status": "ok", "symbol": symbol, "interval": interval, "mode": mode, "mode_label": rules["label"],
         "mode_rules": {k: rules[k] for k in ("room_atr", "fresh_bars", "expire_bars", "max_chase_atr")},
-        "decision": decision, "signal": signal, "side": side, "score": max(bull, bear), "bull_score": bull, "bear_score": bear,
+        "decision": decision, "signal": signal, "side": side, "score": (bull if side == "CE" else bear) if side else max(bull, bear), "bull_score": bull, "bear_score": bear,
         "regime": regime, "regime_label": regime_label, "regime_phase": regime_phase, "regime_note": regime_note, "sideways": sideways, "prior_bias": prior_bias,
         "chart_pattern": chart_pattern, "pattern_effects": pattern_effects, "trend_entry": trend_entry, "tune_changes": tune_changes(tune),
+        "score_model": model, "fast_trend": ft, "price_dir": price_dir,
+        "score_classic": {"bull": classic_bull, "bear": classic_bear, "side": "CE" if classic_bull > classic_bear else "PE" if classic_bear > classic_bull else None},
         "trend_evidence": ds["evidence"], "candle_confirmation": candle_confirmation(cs, side) if side else {"pattern": "NO_DIRECTIONAL_BIAS", "confirmed": False, "detail": "No CE/PE bias to confirm."},
         "range": {"low": chop["range_low"], "high": chop["range_high"], "atr_multiple": round(chop["range_atr"], 2) if chop["range_atr"] is not None else None,
                   "efficiency": round(chop["efficiency"], 2) if chop["efficiency"] is not None else None, "ema_crosses": chop["crosses"], "broke_out": ds["broke_out"]}, "checks": checks, "gates": gates,

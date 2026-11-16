@@ -1,4 +1,4 @@
-"""Upstox call layer (v1.18.11): shared client, in-flight de-duplication, retry on 429, graceful timeout.
+"""Upstox call layer (v1.18.11): shared client, in-flight de-duplication, graceful timeout; v1.20.81: no retry on 429.
 Run: python tests/test_upstox_client.py   (main.py needs FastAPI, so the block is cut out and run against a fake httpx)"""
 import asyncio, types
 from pathlib import Path
@@ -29,7 +29,9 @@ def load(script):
             return Resp(*step)
     fh.AsyncClient = lambda **k: Client()
     a = SRC.index("_UPSTOX_CLIENT = None"); b = SRC.index("async def check_token_state():")
-    ns = {"httpx": fh, "asyncio": asyncio, "os": __import__("os"), "HTTPException": HTTPException, "token_or_401": lambda: "tok"}
+    import time, logging, datetime
+    ns = {"httpx": fh, "asyncio": asyncio, "os": __import__("os"), "HTTPException": HTTPException, "token_or_401": lambda: "tok",
+          "time": time, "logger": logging.getLogger("t"), "ist_now": datetime.datetime.now}
     exec(SRC[a:b], ns)
     return ns, calls, fh
 
@@ -45,9 +47,14 @@ def test_identical_calls_share_one_request_and_results_are_independent():
 
 
 def test_rate_limit_is_retried_then_succeeds():
+    """v1.20.81: a 429 is no longer retried at once (that is what gets an account suspended): one call, a clean 429, and the API
+    is paused; a 503 is still retried."""
     async def run():
         ns, calls, _ = load([(429, {"e": 1}), (200, {"data": 5})])
-        assert await ns["upstox_get"]("https://x/q") == {"data": 5} and len(calls) == 2
+        try: await ns["upstox_get"]("https://x/q"); assert False
+        except HTTPException as e: assert e.status_code == 429 and len(calls) == 1
+        ns2, calls2, _ = load([(503, {"e": 1}), (200, {"data": 5})])
+        assert await ns2["upstox_get"]("https://x/q") == {"data": 5} and len(calls2) == 2
     asyncio.run(run())
 
 

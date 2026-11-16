@@ -53,6 +53,8 @@ jobs:
             echo "::warning::GOOGLE_SERVICES_JSON_BASE64 is not a valid google-services.json (base64 or raw) - building WITHOUT native push"
           fi
       - run: npx capacitor-assets generate --android --iconBackgroundColor '#0b1220' --splashBackgroundColor '#0b1220'
+      - name: Let the app save downloaded files (v1.20.83)
+        run: node android-patch.mjs
       - run: npx cap sync android
       - run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon
         working-directory: option-intelligence-main/mobile/android

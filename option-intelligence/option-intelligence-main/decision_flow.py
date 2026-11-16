@@ -17,6 +17,7 @@ MODES = {"strict": "Strict - your full rules: room 0.25-0.5 ATR needs a retest-h
 ROOM_BLOCK_ATR = 0.25
 ROOM_NORMAL_ATR = 0.5
 MAX_TICK_AGE_S = 30.0
+MAX_REST_AGE_S = 10.0           # v1.20.74: a REST quote this fresh stands in for a silent stream
 
 
 def sr_room(cs, atr, interval, symbol, side, price):
@@ -98,12 +99,18 @@ def reentry_gate(side, side_buys, pattern, last_closed_bar, interval, structure_
     return {"label": label, "pass": ok, "detail": f"{n} {side} BUY already today (last {last[11:16] or last}) - {why}"}
 
 
-def freshness_gate(tick_age_s, market_open):
+def freshness_gate(tick_age_s, market_open, rest_age_s=None):
+    """rest_age_s (v1.20.74): age of the Upstox REST quote this analysis was priced with, when the stream had no fresh tick.
+    The gate exists so a decision is never made on an old price; a quote fetched seconds ago is not an old price, so a silent
+    stream no longer blocks the entry while the watchdog restarts it."""
     label = f"Live data fresh (index tick ≤ {MAX_TICK_AGE_S:g} s old)"
     if not market_open:
         return None
     if tick_age_s is None:
         return {"label": label, "pass": True, "detail": "no live stream - using the latest candles (REST)"}
+    if tick_age_s > MAX_TICK_AGE_S and rest_age_s is not None and 0 <= rest_age_s <= MAX_REST_AGE_S:
+        return {"label": label, "pass": True,
+                "detail": f"live stream silent for {tick_age_s:.0f} s - priced from a fresh Upstox quote ({rest_age_s:.0f} s old)"}
     return {"label": label, "pass": tick_age_s <= MAX_TICK_AGE_S, "detail": f"last tick {tick_age_s:.0f} s ago"}
 
 

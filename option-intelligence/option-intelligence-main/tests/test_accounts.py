@@ -15,6 +15,7 @@ def fresh():
     acc._cache_clear()
     acc._FAILS.clear()
     acc.SIGNUP_CODE = ""
+    acc.ALLOW_EXTRA_USERS = True          # v1.20.78: these tests cover the invite mechanics; the personal-use default is in test_v1_20_78
 
 
 def raises(fn, status=None, text=None):

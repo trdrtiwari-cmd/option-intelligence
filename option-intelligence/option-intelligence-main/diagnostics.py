@@ -36,7 +36,7 @@ MIN_N = 8          # fewer samples than this are shown but never used to draw a 
 
 # ---------------------------------------------------------------- replay
 def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf_interval=None, volume_source=None, first_bar=40, tune=None,
-           window=None, progress=None, score_min=60, live_window=True, pattern_minutes=None):
+           window=None, progress=None, score_min=60, live_window=True, pattern_minutes=None, score_model=None):
     """One record per closed bar from `first_bar` on: the technical signal as it stood when that bar closed.
     live_window (v1.19.1): apply the live app's entry-time window (ENTRY_START_MIN..ENTRY_CUTOFF) so the replay only counts
     entries the app would actually have signalled. Before this, entries at 09:15-09:45 and after 13:30 were counted too."""
@@ -53,7 +53,7 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
         sub = htf[:h]
         a = analyze(cs[max(0, i + 1 - window):i + 1], symbol, interval, htf_raw=sub or None, htf_interval=htf_interval if sub else None,
                     volume_source=volume_source, now=close_dt, mode=mode, score_min=score_min, pattern_minutes=pattern_minutes,
-                    trend_entry_variant="off", tune=tune)   # v1.20.28: replay the base rules; strong-trend entries are measured as a what-if
+                    trend_entry_variant="off", tune=tune, score_model=score_model)   # v1.20.28: replay the base rules; strong-trend entries are measured as a what-if
         if a.get("status") != "ok":
             continue
         side, atr = a.get("side"), a.get("atr")
@@ -79,7 +79,10 @@ def replay(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, 
                     "pattern_bars_ago": cpat.get("bars_ago"),
                     "failed": failed, "trigger": trigger, "stretch_atr": stretch, "atr": atr,
                     "rsi_ext": (rsi if side == "PE" else 100 - rsi) if (rsi is not None and side) else None,
-                    "rsi": rsi, "vwap": a.get("vwap") if a.get("vwap") is not None else a.get("vwap_approx")})
+                    "rsi": rsi, "vwap": a.get("vwap") if a.get("vwap") is not None else a.get("vwap_approx"),
+                    # v1.20.75: every scoring indicator's vote on this bar - [weight, +1 bullish / -1 bearish / 0 neutral] (indicator test)
+                    "votes": {c["key"]: [c["weight"], 1 if c.get("bull") else -1 if c.get("bear") else 0]
+                              for c in a.get("checks") or [] if c.get("ok") and c.get("key")}})
     return cs, out
 
 
@@ -519,7 +522,186 @@ def missed_moves(cs, replayed, horizon=12, move_atr=2.5, max_adverse_atr=0.75, b
     missed = len(moves) - caught
     rows = sorted(({"gate": g, "moves": n, "pct": round(100.0 * n / missed, 1) if missed else 0.0} for g, n in blockers.items()), key=lambda x: -x["moves"])
     return {"moves": len(moves), "caught": caught, "missed": missed, "blockers": rows, "examples": examples,
+            "starts": [[m["i"], m["d"]] for m in moves],
             "rule": f"move ≥ {move_atr:g} ATR within {horizon} bars without {max_adverse_atr:g} ATR against first; caught = CONFIRMED on that side from {before} bars before to {after} after the start"}
+
+
+# ---------------------------------------------------------------- v1.20.75 indicator test: is every scoring indicator earning its place?
+IND_LABELS = {"ema": "EMA 9/21", "supertrend": "Supertrend", "vwap": "VWAP", "macd": "MACD", "rsi": "RSI band", "adx": "ADX", "breakout": "11-bar breakout",
+              "volume": "Volume", "htf": "Higher timeframe", "pattern_break": "Pattern breakout", "pattern_retest": "Pattern retest",
+              "structure": "Price trend (structure)"}
+
+
+# v1.20.76: indicators removed TOGETHER. The 14 Oct - 13 Nov run showed RSI band, ADX and the two pattern checks change no signal
+# when removed one at a time; this measures the clean-up as a whole before anything is changed live.
+COMBINED_SETS = [
+    ("RSI band + ADX (both are also hard rules, so the score counts them twice)", ("rsi", "adx")),
+    ("Pattern breakout + Pattern retest", ("pattern_break", "pattern_retest")),
+    ("RSI band + ADX + both pattern checks", ("rsi", "adx", "pattern_break", "pattern_retest")),
+]
+
+
+def _score_without(votes, drop=None):
+    """(bull, bear, side) of the 0-100 score from the stored votes, optionally without one indicator (a key) or several (a tuple /
+    set of keys) - the same arithmetic as indicators.analyze for the Classic model (side = the larger total)."""
+    gone = () if drop is None else (drop,) if isinstance(drop, str) else tuple(drop)
+    avail = sum(w for k, (w, v) in votes.items() if k not in gone)
+    if not avail:
+        return 0, 0, None
+    bull = round(sum(w for k, (w, v) in votes.items() if k not in gone and v > 0) / avail * 100)
+    bear = round(sum(w for k, (w, v) in votes.items() if k not in gone and v < 0) / avail * 100)
+    return bull, bear, ("CE" if bull > bear else "PE" if bear > bull else None)
+
+
+def indicator_test(cs, replayed, starts, interval, horizon, cost, target, stop, score_min=60):
+    """What each SCORING indicator does on these days. Uses the votes stored by replay(), so nothing is replayed again.
+
+    Per indicator:
+      with / against / neutral  its vote at the START of each big move (missed_moves: >= 2.5 ATR, the bar before the entry)
+      right_side                 on how many of those starts the score's side matches the move, when the score is added up WITHOUT it
+      trades                     the confirmed signals when the "Score >= min" rule uses the score without it: a bar blocked ONLY by the
+                                 score may pass, a confirmed bar whose score falls under the minimum is lost. Every other rule - including
+                                 the indicator's own hard gate (ADX, Supertrend, higher timeframe, RSI) - stays exactly as it is. A bar
+                                 where the side itself would change cannot be judged without a new replay and is counted in side_changes.
+    pairs: indicators that vote the same way on most bars (they count one opinion twice).
+    Only meaningful for the Classic score (the Priority model overrides the side with the price trend)."""
+    rec = {r["i"]: r for r in replayed if r.get("votes")}
+    keys = [k for k in IND_LABELS if any(k in r["votes"] for r in rec.values())]
+    tr = lambda rows: [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
+    moves = [(i, d) for i, d in starts if i in rec]
+    is_conf = lambda r: r["signal"].startswith("CONFIRMED")
+    base_ev = _run_starts(replayed, is_conf)
+    base_rows = evaluate(cs, base_ev, interval, horizon, cost, target, stop, with_extras=True)
+    base_keys = {(r["i"], r["side"]) for r in base_rows}
+    base_right = sum(1 for i, d in moves if _score_without(rec[i]["votes"])[2] == ("CE" if d > 0 else "PE"))
+    import indicators as _indm
+    out = {"model": _indm.SCORE_MODEL, "moves": len(moves), "right_side_now": base_right, "signals_now": stats(tr(base_rows)), "signals_now_total": round(sum(tr(base_rows)), 1),
+           "score_min": score_min, "indicators": [], "pairs": []}
+    def without(drop):
+        """Right-side count and confirmed signals when the score is added up without `drop` (a key or several keys)."""
+        right = sum(1 for i, d in moves if _score_without(rec[i]["votes"], drop)[2] == ("CE" if d > 0 else "PE"))
+        box = {"side_changes": 0}
+
+        def ok(r):
+            if not r.get("side") or not r.get("votes"):
+                return False
+            bull, bear, side = _score_without(r["votes"], drop)
+            if side != r["side"]:
+                box["side_changes"] += is_conf(r)
+                return False
+            dom = bull if side == "CE" else bear
+            if is_conf(r):
+                return dom >= score_min
+            return bool(r["failed"]) and all(str(f).startswith("Score") for f in r["failed"]) and dom >= score_min
+        rows = evaluate(cs, _run_starts(replayed, ok), interval, horizon, cost, target, stop, with_extras=True)
+        new_keys = {(r["i"], r["side"]) for r in rows}
+        added = [r for r in rows if (r["i"], r["side"]) not in base_keys]
+        removed = [r for r in base_rows if (r["i"], r["side"]) not in new_keys]
+        return {"right_side_without": right, "right_side_change": right - base_right,
+                "trades_without": stats(tr(rows)), "total_without": round(sum(tr(rows)), 1), "total_change": round(sum(tr(rows)) - sum(tr(base_rows)), 1),
+                "added": stats(tr(added)), "removed": stats(tr(removed)), "side_changes": box["side_changes"]}
+
+    for k in keys:
+        w_ = next((r["votes"][k][0] for r in rec.values() if k in r["votes"]), 0)
+        with_ = against = neutral = 0
+        for i, d in moves:
+            v = rec[i]["votes"].get(k, [0, 0])[1]
+            with_ += v == d
+            against += v == -d
+            neutral += v == 0
+        n = max(1, len(moves))
+        d_ = {"key": k, "label": IND_LABELS[k], "weight": w_, "with": with_, "against": against, "neutral": neutral,
+              "with_pct": round(100.0 * with_ / n, 1), "against_pct": round(100.0 * against / n, 1), **without(k)}
+        late = d_["against_pct"] >= 40 and d_["against"] > d_["with"]
+        helps = d_["right_side_change"] >= max(3, round(0.05 * len(moves)))
+        hurts_pts = d_["total_change"] < 0
+        d_["verdict"] = ("no big moves in this period" if not moves else
+                         "LATE and costly: against most big moves at their start, and the score picks the right side more often without it - "
+                         "candidate to remove from the score or lower its weight (its hard gate stays)" if late and helps and not hurts_pts else
+                         "late at the start of moves, but removing it from the score does not help here - keep" if late else
+                         "the score is on the right side more often without it - candidate to lower its weight" if helps and not hurts_pts else
+                         "rarely votes at the start of a move - adds little to the score" if d_["with_pct"] + d_["against_pct"] < 25 else
+                         "points with the move more often than against - keep" if with_ > against else "no clear effect in this period - keep")
+        out["indicators"].append(d_)
+    for a_i, ka in enumerate(keys):                      # indicators that say the same thing
+        for kb in keys[a_i + 1:]:
+            have = [(r["votes"][ka][1], r["votes"][kb][1]) for r in rec.values() if ka in r["votes"] and kb in r["votes"]]
+            both = [(x, y) for x, y in have if x and y]
+            # both must take a side on at least half of the bars: two indicators that rarely vote always "agree" when they do
+            if len(both) >= 100 and len(both) >= 0.5 * len(rec):
+                out["pairs"].append({"a": IND_LABELS[ka], "b": IND_LABELS[kb], "bars": len(both),
+                                     "agree_pct": round(100.0 * sum(1 for x, y in both if x == y) / len(both), 1)})
+    out["pairs"].sort(key=lambda p: -p["agree_pct"])
+    out["pairs"] = out["pairs"][:6]
+    out["combined"] = []
+    for label, ks in COMBINED_SETS:                      # v1.20.76: several indicators removed together
+        ks = tuple(k for k in ks if k in keys)
+        if len(ks) < 2:
+            continue
+        c = {"label": label, "keys": list(ks), "weight": sum(next((r["votes"][k][0] for r in rec.values() if k in r["votes"]), 0) for k in ks), **without(ks)}
+        same = not c["added"].get("n") and not c["removed"].get("n") and not c["side_changes"]
+        c["verdict"] = ("no signal changes and the score is on the right side as often - safe to remove these from the score" if same and c["right_side_change"] >= 0 else
+                        "no signal changes, but the score is on the right side less often - keep" if same else
+                        "more points and the right side as often - candidate to remove" if c["total_change"] > 0 and c["right_side_change"] >= 0 and not c["side_changes"] else
+                        "changes the signals for the worse - keep these in the score" if c["total_change"] < 0 else
+                        "changes the signals without a clear gain - keep")
+        out["combined"].append(c)
+    return out
+
+
+def indicator_test_lines(it):
+    """The indicator test as verdict lines (also what the Download-for-Claude file carries)."""
+    if not it or not it.get("indicators"):
+        return []
+    inds = it["indicators"]
+    lines = []
+    if it["moves"]:
+        by_late = sorted(inds, key=lambda d: -d["against_pct"])
+        lines.append({"level": "info", "text": f"Indicator test 1/4 - vote of each scoring indicator at the START of the {it['moves']} big moves (with the move / against it): "
+                      + "; ".join(f"{d['label']} ({d['weight']}) {d['with_pct']:g}% / {d['against_pct']:g}%" for d in by_late)
+                      + ". An indicator that is against most moves at their start is late, not wrong - it turns after the move has begun."})
+    sn = it["signals_now"]
+    parts = []
+    for d in sorted(inds, key=lambda d: (-d["right_side_change"], -d["total_change"])):
+        t = d["trades_without"]
+        parts.append(f"{d['label']}: right side {d['right_side_without']} ({d['right_side_change']:+d}), {t.get('n', 0)} signals {d['total_without']:+.0f} pts ({d['total_change']:+.0f})"
+                     + (f", side changes on {d['side_changes']} signal{'s' if d['side_changes'] != 1 else ''}" if d["side_changes"] else ""))
+    lines.append({"level": "info", "text": f"Indicator test 2/4 - the score added up WITHOUT one indicator (its own hard gate and every other rule unchanged). Now: score on the "
+                  f"right side at the start of {it['right_side_now']} of {it['moves']} big moves, {sn.get('n', 0)} signals {it['signals_now_total']:+.0f} pts (before the live rules, live trailing exit). "
+                  "Without - " + "; ".join(parts) + "."})
+    cands = [d for d in inds if d["verdict"].startswith(("LATE and costly", "the score is on the right side"))]
+    weak = [d for d in inds if d["verdict"].startswith("rarely votes")]
+    pairs = [p for p in it.get("pairs") or [] if p["agree_pct"] >= 85]
+    txt = ("Indicators that say the same thing (same vote on 85%+ of bars - one opinion counted twice): "
+           + "; ".join(f"{p['a']} and {p['b']} {p['agree_pct']:g}%" for p in pairs) + ". " if pairs else "No two indicators vote the same on 85%+ of bars. ")
+    txt += ("Candidates to remove from the score or lower in weight: " + ", ".join(f"{d['label']} ({d['weight']})" for d in cands) + ". " if cands
+            else "No indicator is a clear candidate to remove in this period. ")
+    if weak:
+        txt += "Rarely voting at the start of a move: " + ", ".join(d["label"] for d in weak) + ". "
+    if it.get("model") == "priority":
+        txt += "Score model is Priority: the side follows the price trend first, so the right-side numbers describe the score alone. "
+    txt += (f"Verdict: nothing is changed automatically - {sn.get('n', 0)} signals is under 30, so treat this as a direction, repeat it on another 30 days, "
+            "and change a weight only if the same indicator shows up both times.")
+    lines.append({"level": "action" if cands else "info", "text": "Indicator test 3/4 - " + txt})
+    comb = it.get("combined") or []
+    if comb:
+        def one(c):
+            t, a, r = c["trades_without"], c["added"], c["removed"]
+            ch = []
+            if a.get("n"):
+                ch.append(f"adds {a['n']} ({a.get('total', 0):+.0f} pts)")
+            if r.get("n"):
+                ch.append(f"loses {r['n']} ({r.get('total', 0):+.0f} pts)")
+            if c["side_changes"]:
+                ch.append(f"side changes on {c['side_changes']}")
+            return (f"{c['label']} [{c['weight']} of the weight]: right side {c['right_side_without']} ({c['right_side_change']:+d}), "
+                    f"{t.get('n', 0)} signals {c['total_without']:+.0f} pts ({c['total_change']:+.0f})" + (", " + ", ".join(ch) if ch else ", no signal added or lost")
+                    + f" - {c['verdict']}")
+        safe = any(c["verdict"].startswith(("no signal changes and", "more points")) for c in comb)
+        lines.append({"level": "action" if safe else "info",
+                      "text": "Indicator test 4/4 - several indicators removed from the score TOGETHER (their hard rules and every other rule unchanged): "
+                              + "; ".join(one(c) for c in comb) + ". Remove them live only if a second 30-day run says the same."})
+    return lines
 
 
 # ---------------------------------------------------------------- v1.20.7 what-if: trend-day entries (Diagnostics only)
@@ -661,7 +843,8 @@ def strong_trend_whatif(cs, replayed, conf_rows, interval, horizon, cost, target
     base = tr(conf_rows)
     out = {"baseline": stats(base), "variants": []}
     for variant, label in (("rsi", "Strong trend: allow RSI up to 75 (CE) / down to 25 (PE)"),
-                           ("continuation", "Strong trend continuation: break of the last 3 bars, pullback rules relaxed")):
+                           ("continuation", "Strong trend continuation: break of the last 3 bars, pullback rules relaxed"),
+                           ("early", "Early trend entry: fast trend burst, a pause, then a break of the last 2 bars")):
         rows = evaluate(cs, strong_trend_events(cs, replayed, variant), interval, horizon, cost, target, stop, with_extras=True)
         v = {"variant": variant, "label": label, "trail": stats(tr(rows)), "combined": stats(base + tr(rows)),
              "fixed_atr": stats([r["atr_grid"]["1.5/1.5"] for r in rows if "1.5/1.5" in r.get("atr_grid", {})]),
@@ -906,11 +1089,17 @@ def _levels_around(sr, price):
 def sr_features(cs, rows, interval, symbol):
     """Adds to each evaluated row: distance from the level it is bought off (support for CE, resistance for PE) and the room to the
     next opposite level, both in ATR, plus the n-th same-side signal of the day."""
-    cache, seen = {}, {}
+    # v1.20.77: the zones are read on the signal bar itself, from exactly the candles the live app uses (decision_flow.sr_room: the
+    # last 6 sessions ending on that bar). They used to come from a snapshot taken every 6 bars counted from the FIRST bar of the
+    # data, up to 5 bars old - so when the 30-day window moved by a day the same trade got another room (29 Oct 11:40 CE: 0.16 ATR
+    # in one run, 0.82 in the next) and the decision rules kept a different set of trades (100% winners, then 90%).
+    import option_plan as _op
+    per = max(1, round(375 / max(1, interval)))
+    seen = {}
     for r in sorted(rows, key=lambda x: x["i"]):
         atr = r.get("atr")
         price = cs[r["i"]]["close"]
-        sr = _sr_at(cs, r["i"], atr, interval, symbol, cache) if atr else {}
+        sr = (_op.sr_levels(cs[max(0, r["i"] + 1 - per * 6):r["i"] + 1], atr, interval, symbol) or {}) if atr else {}
         below, above = _levels_around(sr, price) if sr else ([], [])
         own, opp = (below, above) if r["side"] == "CE" else (above, below)
         r["sr_dist"] = round(abs(price - own[0]["price"]) / atr, 2) if own and atr else None
@@ -1395,11 +1584,81 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                                f"(live trailing exit; fixed 1.5/1.5 ATR {v['fixed_atr'].get('avg', 0):+.1f}) vs current signals "
                                                f"{stw['baseline'].get('avg', 0):+.1f}. Verdict: {v['verdict']}."})
             else:
-                rep["verdict"].append({"level": "info", "text": f"What-if “{v['label']}”: no extra trades in this period (no strong-trend bar was blocked only by RSI)."})
+                rep["verdict"].append({"level": "info", "text": f"What-if “{v['label']}”: no extra trades in this period (no such bar was blocked only by the pullback rules)."})
     except Exception as exc:
         rep["strong_trend"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     mm = missed_moves(cs, replayed, horizon=horizon)
     rep["missed_moves"] = mm
+    try:                       # v1.20.72: the same days replayed with the OTHER score model (indicators.SCORE_MODELS), live trailing exit
+        import indicators as _ind
+        live_m = _ind.SCORE_MODEL
+        other_m = "priority" if live_m == "classic" else "classic"
+        _, rp2 = replay(raw_candles, symbol, interval, mode, htf_raw, htf_interval, volume_source, score_min=score_min,
+                        live_window=live_window, pattern_minutes=pattern_minutes, tune=tune, score_model=other_m)
+        conf2, _n2 = events_from(rp2)
+        rows2 = evaluate(cs, conf2, interval, horizon, cost, target, stop, with_extras=True)
+        raw_cur, raw_oth = all_rows, rows2
+        # v1.20.73: the other model gets the SAME live rules (decision rules, one per side, daily limits) as the live one -
+        # v1.20.72 compared the live model after those rules with the other model before them (10 trades against 13).
+        if live_rules is not None and lr_info and not lr_info.get("error"):
+            try:
+                sr_features(cs, rows2, interval, symbol)
+            except Exception:
+                pass
+            rows2, _lr2 = apply_live_rules(rows2, dict(live_rules, plan=live_rules.get("plan") or live_plan or "trail"))
+        mm2 = missed_moves(cs, rp2, horizon=horizon)
+        tr = lambda rows: [r["strat"][TRAIL_NAME] for r in rows if TRAIL_NAME in r.get("strat", {})]
+        lean = lambda m: next((b["moves"] for b in m["blockers"] if b["gate"].startswith("Engine leaned")), 0)
+        half = days[len(days) // 2] if len(days) >= 4 else None
+        def pack(name, rows, m):
+            d = {"model": name, "label": _ind.SCORE_MODEL_LABELS[name], "trail": stats(tr(rows)), "total": round(sum(tr(rows)), 1),
+                 "moves": m["moves"], "caught": m["caught"], "leaned_away": lean(m)}
+            if half:
+                d["first"], d["second"] = stats(tr([r for r in rows if r["day"] < half])), stats(tr([r for r in rows if r["day"] >= half]))
+            return d
+        cur, oth = pack(live_m, conf_rows, mm), pack(other_m, rows2, mm2)
+        cur["all_signals"], oth["all_signals"] = stats(tr(raw_cur)), stats(tr(raw_oth))
+        pri, cla = (cur, oth) if live_m == "priority" else (oth, cur)
+        pn, pa, ca = pri["trail"].get("n", 0), pri["trail"].get("avg", 0) or 0, cla["trail"].get("avg", 0) or 0
+        both = bool(pri.get("first", {}).get("n")) and bool(pri.get("second", {}).get("n")) and pri["first"].get("avg", 0) > 0 and pri["second"].get("avg", 0) > 0
+        sv = ("no signals from either model in this period" if not pn and not cla["trail"].get("n") else
+              "priority adds no signals in this period" if not pn else
+              "no difference between the two models in this period - keep Classic" if pn == cla["trail"].get("n") and pri["total"] == cla["total"] else
+              "priority better - proven (15+ trades, positive in both halves, more points in total)" if pn >= 15 and both and pri["total"] > cla["total"] else
+              "priority loses - keep Classic" if pa <= 0 else
+              "priority worse than Classic in this period - keep Classic" if pri["total"] < cla["total"] else
+              "priority positive, not proven yet (needs 15+ trades, positive in both halves)")
+        rep["score_model"] = {"live": live_m, "priority": pri, "classic": cla, "verdict": sv}
+        # the early trend entry needs the right side early, so it is also measured on the Priority replay
+        erows = evaluate(cs, strong_trend_events(cs, replayed if live_m == "priority" else rp2, "early"), interval, horizon, cost, target, stop, with_extras=True)
+        es = stats(tr(erows))
+        ef = stats(tr([r for r in erows if half and r["day"] < half])) if half else {}
+        e2 = stats(tr([r for r in erows if half and r["day"] >= half])) if half else {}
+        ev = ("no trades in this period" if not es.get("n") else
+              "works - 15+ trades and positive in both halves; switch on Score model = Priority and Strong-trend entries = Early" if es["n"] >= 15 and ef.get("n") and e2.get("n") and ef.get("avg", 0) > 0 and e2.get("avg", 0) > 0 else
+              "positive, not proven (needs 15+ trades, positive in both halves)" if es.get("avg", 0) > 0 else "loses - keep it off")
+        rep["early_priority"] = {"trail": es, "first": ef, "second": e2, "verdict": ev,
+                                 "trades": [{"day": r["day"], "time": r["hhmm"], "side": r["side"], "pts": round(r["strat"].get(TRAIL_NAME, 0), 1)} for r in erows][:40]}
+        rep["verdict"].insert(0, {"level": "action" if ev.startswith("works") else "info",
+                                  "text": f"Early trend entry with the Priority score (buys the first pause-break after a fast trend burst), live trailing exit: "
+                                          f"{es.get('n', 0)} extra trades, {es.get('win_rate', 0)}% winners, {es.get('avg', 0) or 0:+.1f} pts each ({sum(tr(erows)):+.0f} total). Verdict: {ev}."})
+        rep["verdict"].insert(0, {"level": "action" if sv.startswith(("priority better", "priority loses", "priority worse")) and live_m != ("priority" if sv.startswith("priority better") else "classic") else "info",
+                                  "text": f"Score model (live: {_ind.SCORE_MODEL_LABELS[live_m]}), both with your live rules, live trailing exit - Priority (price first + fast trend identifier): "
+                                          f"{pn} trades, {pri['trail'].get('win_rate', 0)}% winners, {pa:+.1f} pts each ({pri['total']:+.0f} total), big moves caught {pri['caught']} of {pri['moves']}, "
+                                          f"engine leaning the wrong way on {pri['leaned_away']} | Classic: {cla['trail'].get('n', 0)} trades, {cla['trail'].get('win_rate', 0)}% winners, "
+                                          f"{ca:+.1f} pts each ({cla['total']:+.0f} total), caught {cla['caught']} of {cla['moves']}, leaning the wrong way on {cla['leaned_away']}. "
+                                          f"Before the live rules: Priority {pri['all_signals'].get('n', 0)} signals {pri['all_signals'].get('avg', 0) or 0:+.1f} pts each, "
+                                          f"Classic {cla['all_signals'].get('n', 0)} signals {cla['all_signals'].get('avg', 0) or 0:+.1f}. "
+                                          f"Verdict: {sv}. Change it on the Signals page (Score model)."})
+    except Exception as exc:
+        rep["score_model"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    try:                       # v1.20.75: what each scoring indicator contributes (no extra replay - uses the stored votes)
+        it = indicator_test(cs, replayed, mm.get("starts") or [], interval, horizon, cost, target, stop, score_min=max(50, min(70, int(score_min))))
+        rep["indicator_test"] = it
+        for ln in reversed(indicator_test_lines(it)):
+            rep["verdict"].insert(0, ln)
+    except Exception as exc:
+        rep["indicator_test"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     if mm["moves"]:
         top = mm["blockers"][0] if mm["blockers"] else None
         rep["verdict"].insert(1, {"level": "action" if top and mm["missed"] >= 3 else "info",

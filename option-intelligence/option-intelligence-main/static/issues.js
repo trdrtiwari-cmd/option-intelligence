@@ -1,3 +1,42 @@
+/* v1.20.67 bandwidth - must run before any page script, so it sits at the top of issues.js (loaded first everywhere). */
+(function () {
+"use strict";
+// ------------------------------------------------------------- v1.20.67: only the tab on screen talks to the server
+// Every tab (Terminal, Chart, Data, Signals, Tests) is kept alive in its own frame. A hidden frame still reported
+// document.visibilityState === "visible", so all five pages polled the server and two of them held live sockets at the
+// same time - this used up the 5 GB monthly bandwidth on Render. Now a page that is not the shown tab reports "hidden":
+// every existing "only when visible" check pauses it, and its live socket is closed until the tab is opened again.
+let tabActive = true;
+try {
+  const fr = window.self !== window.top && window.frameElement;
+  if (fr && fr.style.display === "none") tabActive = false;
+} catch { }
+try {
+  const nv = Object.getOwnPropertyDescriptor(Document.prototype, "visibilityState");
+  if (nv && nv.get) {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get() { const v = nv.get.call(document); return v === "visible" && !tabActive ? "hidden" : v; } });
+    Object.defineProperty(document, "hidden", { configurable: true, get() { return document.visibilityState !== "visible"; } });
+  }
+} catch { }
+function setTabActive(on) {
+  on = !!on; if (on === tabActive) return;
+  tabActive = on;
+  try { document.dispatchEvent(new Event("visibilitychange")); } catch { }
+}
+window.__oiSetTabActive = setTabActive;
+// Market open / closed for every page. The Terminal stores the server's answer (it knows NSE holidays) each minute; if that is
+// missing or old, fall back to the clock (Mon-Fri 09:00-15:35 IST). Closed = holidays, weekends, before 09:00 and after 15:35.
+const MKT_KEY = "oi-market-v1";
+window.__oiSetMarket = open => { try { localStorage.setItem(MKT_KEY, JSON.stringify({ open: !!open, at: Date.now() })); } catch { } };
+window.__oiMarketOpen = () => {
+  try { const m = JSON.parse(localStorage.getItem(MKT_KEY) || "null"); if (m && Date.now() - m.at < 10 * 60e3) return !!m.open; } catch { }
+  const d = new Date(Date.now() + 5.5 * 3600e3), dow = d.getUTCDay(), min = d.getUTCHours() * 60 + d.getUTCMinutes();
+  return dow >= 1 && dow <= 5 && min >= 540 && min <= 935;
+};
+window.__oiClosedWait = 15 * 60e3;     // market closed: pages reload their data every 15 min only (the data cannot change)
+window.addEventListener("message", e => { if (e.origin === location.origin && e.source === window.parent && e.data && typeof e.data.oiActive === "boolean") setTabActive(e.data.oiActive); });
+if (!tabActive) setTimeout(() => { try { document.dispatchEvent(new Event("visibilitychange")); } catch { } }, 0);
+})();
 /* v1.20.49: page problem reporter - loaded first on every page.
    Sends the problems this page hits to the server (POST /api/client-issues), so "Download for Claude" (day / week / month) lists
    them from every tab and every device, without anyone having to notice or screenshot them:

@@ -67,6 +67,24 @@ except ValueError:
     SCORE_CAP = 0   # dashboard levels that count as "agrees"
 
 
+def blocker_label(text):
+    """Rule name of a blocker string "label: detail". v1.20.71: the label itself may contain ': ' inside brackets
+    ("Reconfirmed (60s hold: setup persists, price holds)") or clock times ("09:45"), so cut at the first ': ' that
+    is outside brackets - not at the first colon."""
+    s, depth = str(text), 0
+    for i, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == ":" and depth == 0 and s[i + 1:i + 2] == " ":
+            if s[:i] == "Profit check":        # "Profit check: <rule>: detail" - the rule name is the second part
+                rest = blocker_label(s[i + 2:])
+                return ("Profit check: " + rest).strip()
+            return s[:i].strip()
+    return s.strip()
+
+
 def _hhmm(dt):
     return dt.astimezone(IST).strftime("%H:%M")
 
@@ -268,13 +286,16 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
     lean_run = (replay or {}).get("lean")
     timing = {"state": "NONE", "side": side, "generated_at": None, "generated_at_text": None, "age_minutes": None, "age_bars": None,
               "signal_price": None, "price_now": a.get("last_close"), "moved_atr": None, "basis": None, "estimated": False,
-              "lean_since_text": lean_run["text"] if lean_run else None, "rules": {
+              "lean_since_text": lean_run["text"] if lean_run else None, "session_day": None, "rules": {
                   "fresh_minutes": fresh_min, "expire_minutes": expire_min, "max_chase_atr": max_chase}}
 
     def describe(since_dt, price, basis, estimated):
         age_min = max(0.0, (now_dt - since_dt).total_seconds() / 60.0)
         atr = a.get("atr")
         moved = ((a.get("last_close") - price) * want / atr) if (atr and price is not None and a.get("last_close") is not None and side) else None
+        # v1.20.71: before the open the last signal is from the previous session - say which day, not "2,446 min ago"
+        prev = since_dt.astimezone(IST).date() != now_dt.astimezone(IST).date()
+        timing["session_day"] = since_dt.astimezone(IST).strftime("%d %b") if prev else None
         timing.update({"generated_at": since_dt.astimezone(IST).isoformat(), "generated_at_text": _hhmm(since_dt) + " IST",
                        "age_minutes": round(age_min, 1), "age_bars": round(age_min / interval, 1), "signal_price": price,
                        "moved_atr": round(moved, 2) if moved is not None else None, "basis": basis, "estimated": estimated})
@@ -398,7 +419,7 @@ def fuse(a, dash, replay, dash_track, now_dt, market_open, interval, mode="stand
         headline = f"The {side} setup was generated {timing['generated_at_text'] or 'earlier'} and the entry moment has passed. Wait for the next pullback signal."
     elif tech_level in ("CONFIRMED", "WATCH") and side and not opposes:
         level, action = "WATCH", f"WATCH {side}"
-        headline = "Not all conditions line up yet: " + "; ".join(b.split(":")[0] for b in blockers[:3]) if blockers else f"Watching {side}."
+        headline = "Not all conditions line up yet: " + "; ".join(blocker_label(b) for b in blockers[:3]) if blockers else f"Watching {side}."
         if tech_level == "WATCH":
             headline = f"Terminal gates for {side} are not all met yet — no entry."
     elif tech_level in ("CONFIRMED", "WATCH") and opposes:

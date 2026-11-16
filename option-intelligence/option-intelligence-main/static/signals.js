@@ -143,6 +143,7 @@ async function loadConfig() {
     if ($('optOnePer')) $('optOnePer').value = cfg.one_per_side || 'off';
     if ($('optDayTarget')) $('optDayTarget').value = String(cfg.daily_target_rs ?? 0);
     if ($('optTrendEntry')) $('optTrendEntry').value = cfg.trend_entry || 'off';
+    if ($('optScoreModel')) $('optScoreModel').value = cfg.score_model || 'classic';
     if ($('optRules')) $('optRules').value = cfg.decision_rules || 'auto';
     if ($('optRulesNow') && cfg.decision_rules_now) $('optRulesNow').textContent = Object.entries(cfg.decision_rules_now).map(([k, v]) => `${k}: ${v.note}`).join(' · ');
     if ($('optStratNifty')) $('optStratNifty').value = cfg.strategy_nifty || 'pullback';
@@ -192,6 +193,7 @@ async function saveAtr(reset) {
                           ...($('optOnePer') ? {opt_one_per_side: $('optOnePer').value} : {}),
                           ...($('optDayTarget') ? {opt_daily_target_rs: Number($('optDayTarget').value)} : {}),
                           ...($('optTrendEntry') ? {opt_trend_entry: $('optTrendEntry').value} : {}),
+                          ...($('optScoreModel') ? {opt_score_model: $('optScoreModel').value} : {}),
                           ...($('optRules') ? {opt_decision_rules: $('optRules').value} : {}),
                           ...($('optStratNifty') ? {opt_strategy_nifty: $('optStratNifty').value} : {}),
                           ...($('optStratBank') ? {opt_strategy_banknifty: $('optStratBank').value} : {}),
@@ -238,7 +240,12 @@ $('exportXlsx').onclick = () => exportFile('xlsx');
 $('exportCsv').onclick = () => exportFile('csv');
 ['startDate', 'endDate', 'symbol'].forEach(id => $(id).addEventListener('change', load));
 loadConfig().then(load);
-setInterval(() => { if (document.visibilityState === 'visible') load(); }, 10000);
+let lastAutoLoad = Date.now();
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  if (window.__oiMarketOpen && !window.__oiMarketOpen() && Date.now() - lastAutoLoad < (window.__oiClosedWait || 900000)) return;   // v1.20.68: closed / holiday
+  lastAutoLoad = Date.now(); load();
+}, 10000);
 
 
 // ---- v1.20.0 Claude strategy monitor
@@ -311,7 +318,7 @@ $('monExport').onclick = async () => {
     const text = await r.text(), name = per === 'day' ? `strategy-review-${day}.json` : `strategy-review-${per}-to-${day}.json`;
     const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
     const hasFs = !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem);
-    if (window.oiSave && (!native || hasFs)) { msg((await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this ' + word); return; }
+    if (window.oiSave) { msg((await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this ' + word); return; }
     let copied = false;
     try { await navigator.clipboard.writeText(text + '\n\nreview this ' + word); copied = true; } catch {}
     if (!copied) { const ta = document.createElement('textarea'); ta.value = text + '\n\nreview this ' + word; document.body.appendChild(ta); ta.select();
@@ -367,17 +374,20 @@ $('monReport').onclick = async () => {
   catch (e) { $('monSaved').textContent = 'Could not save the report: ' + e.message; }
 };
 
-// ---- v1.20.41 paper test (MACD turn, loose) - logged and scored only, never a BUY
+// ---- v1.20.41 paper tests (v1.20.75: MACD turn, Stochastic, Early trend) - logged and scored only, never a BUY
 async function loadPaper() {
   if (!$('paperRows')) return;
   try {
     const r = await fetch('/api/paper-tests?symbol=NIFTY&days=30', {credentials: 'same-origin'});
     if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch {} throw Error(d || r.status); }
-    const d = await r.json(), a = d.all || {}, h = x => x && x.n ? `${x.n} trades, ${x.win_rate}% won, ${signed(x.avg, 1)} pts each` : '—';
-    $('paperVerdict').innerHTML = `${d.on ? '' : '<b>Switched off</b> (Signals settings) · '}Last 30 days: <b>${a.n ? `${a.n} closed trades, ${a.win_rate}% won, ${signed(a.avg, 1)} pts each (${signed(a.total, 1)} total)` : 'no closed trades yet'}</b>` +
-      (d.first ? ` · first half ${h(d.first)} · second half ${h(d.second)}` : '') + ` · Verdict: <b>${esc(d.verdict || '')}</b>`;
-    $('paperRows').innerHTML = (d.trades || []).length ? d.trades.map(t =>
-      `<tr><td>${esc(t.day)}</td><td>${esc(t.bar_time)} <span class="sig-sub">score ${t.score ?? '—'}</span></td><td><b>${esc(t.side)}</b></td><td>${t.entry != null ? fmt(t.entry) : '—'}</td>` +
+    const d = await r.json(), h = x => x && x.n ? `${x.n} trades, ${x.win_rate}% won, ${signed(x.avg, 1)} pts each` : '—';
+    // v1.20.75: one line per paper test (MACD turn, Stochastic, Early trend); the table lists the entries of all of them
+    const tests = (d.tests && d.tests.length) ? d.tests : [d], many = tests.length > 1;
+    $('paperVerdict').innerHTML = tests.map(x => { const a = x.all || {}; return `${many ? `<b>${esc(x.short || x.label || '')}</b>: ` : ''}${x.on ? '' : '<b>Switched off</b> (Signals settings) · '}Last 30 days: <b>${a.n ? `${a.n} closed trades, ${a.win_rate}% won, ${signed(a.avg, 1)} pts each (${signed(a.total, 1)} total)` : 'no closed trades yet'}</b>` +
+      (x.first ? ` · first half ${h(x.first)} · second half ${h(x.second)}` : '') + ` · Verdict: <b>${esc(x.verdict || '')}</b>`; }).join('<br>');
+    const trades = tests.flatMap(x => x.trades || []).sort((p, q) => (q.day + q.bar_time).localeCompare(p.day + p.bar_time));
+    $('paperRows').innerHTML = trades.length ? trades.map(t =>
+      `<tr><td>${esc(t.day)}</td><td>${esc(t.bar_time)} <span class="sig-sub">${many && t.test ? esc(t.test) + ' · ' : ''}score ${t.score ?? '—'}</span></td><td><b>${esc(t.side)}</b></td><td>${t.entry != null ? fmt(t.entry) : '—'}</td>` +
       `<td style="${tone(t.pts)}"><b>${t.pts == null ? '—' : signed(t.pts, 1)}</b></td><td>${t.mfe != null ? '+' + fmt(t.mfe, 1) + ' / −' + fmt(t.mae, 1) : '—'}</td><td>${esc(t.status)}</td></tr>`).join('')
       : '<tr><td colspan="7" class="empty">No paper entries yet - they are logged during market hours (09:45 onwards, inside the entry windows).</td></tr>';
   } catch (e) { $('paperVerdict').textContent = 'Could not load the paper test: ' + e.message; $('paperRows').innerHTML = ''; }
