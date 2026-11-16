@@ -60,6 +60,10 @@ jobs:
         working-directory: option-intelligence-main/mobile/android
       - name: Name the APK
         run: cp android/app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/OptionIntelligence.apk"
+      - name: Write apk-version.json (the app's "Update available" banner reads it - v1.20.88)
+        run: |
+          node -e "const u=require('./capacitor.config.json').android.appendUserAgent||'';const m=/OIApp-APK\/(\d+)/.exec(u);if(!m)throw new Error('no OIApp-APK/<n> in appendUserAgent');require('fs').writeFileSync(process.env.GITHUB_WORKSPACE+'/apk-version.json',JSON.stringify({build:+m[1],sha:process.env.GITHUB_SHA.slice(0,7)}))"
+          cat "$GITHUB_WORKSPACE/apk-version.json"
       - uses: actions/upload-artifact@v4
         with:
           name: option-intelligence-apk
@@ -70,5 +74,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete apk-latest --yes --cleanup-tag || true
-          gh release create apk-latest OptionIntelligence.apk --target "$GITHUB_SHA" --title "Android APK (latest)" \
+          gh release create apk-latest OptionIntelligence.apk apk-version.json --target "$GITHUB_SHA" --title "Android APK (latest)" \
             --notes "Option Intelligence Android app - loads $APP_URL. Download OptionIntelligence.apk on your phone, open it and allow installing from this source once. Debug-signed for personal use (not Play Store). Built from ${GITHUB_SHA::7}."

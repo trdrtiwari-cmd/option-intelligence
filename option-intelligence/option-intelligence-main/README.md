@@ -1,5 +1,26 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.88
+- Android app: "Check for app update" button (More -> Account, shown only inside the app). Nothing is checked on its own. The APK tells its build (OIApp-APK/2 in the user agent); the APK workflow publishes apk-version.json in the apk-latest release; /api/app/apk reads it when the button is pressed. If GitHub has a newer build, an Update button opens the APK in Chrome - then tap Install. Normal server updates still need no new APK.
+- To publish a new APK build in future: raise the number in mobile/capacitor.config.json (OIApp-APK/<n>) together with the native change.
+
+## v1.20.87
+- Android app (rebuild the APK): asks for storage permission on Android 9 and older, and saves the file once allowed. Android 10+ needs no permission to save to Downloads, so nothing is asked there.
+- Android app: after each download a message says "Saved: Downloads/OptionIntelligence/<file>", or why it failed.
+
+## v1.20.86
+- Chart tab: after the close it could still open on the last signal's option, because the first analysis arrived before the market state was known. It now waits for the market state and goes back to the index as soon as it knows the market is closed.
+- Signals page, Download for Claude: the "Preparing the review file" message stays and counts seconds until the file is ready (the first file of the day replays 10 days and can take 1-2 minutes). It used to vanish after 90 s.
+
+## v1.20.85
+- Chart tab: after the market closes it no longer switches to the last signal's option (e.g. NIFTY 25200 CE) - it shows the index, same as the Terminal's last price. During market hours it works as before.
+- Claude strategy monitor: Download for Claude, Download AI report and Test AI now show their progress and result in a message at the bottom of the screen (the old line was below the settings, off-screen on a phone).
+- App download: if no "download complete" notification appears, the message keeps a "Copy download link" button for Chrome.
+
+## v1.20.84 - login page layout fixed
+- The personal-use line added in v1.20.78 sat beside the login form (the page is a centred row), squeezing the form into a narrow column. It is now inside the form's column.
+- "Repeat password" and "Invite code" showed on the Log in tab: the page's label style overrode their hidden state. They now show only on "Create account".
+
 ## v1.20.83 - the Android app saves files; the database sleeps longer (no strategy rule changed)
 - **Files are saved on the phone.** A new APK lets every Save / Download go through Android's own download manager: the file lands in **Downloads/OptionIntelligence/** and a "download complete" notification appears. The page recognises this APK (it adds `OIApp-DL/1` to its user agent) and uses it first; an older APK keeps the share menu and the "Copy download link" fallback. **Needs a new APK:** push the `option-intelligence-main/mobile/` folder and `.github/workflows/android-apk.yml` to GitHub - the "Build Android APK" workflow builds it and publishes it as the apk-latest release; install it over the old one. Works on Android 10 and newer.
 - **Neon:** 80 of the 100 free compute hours were used by 16 Nov (storage only 0.03 GB). Heartbeat now every 30 min in market hours (`HEARTBEAT_SEC`), backups of non-urgent changes every 30 min (`MIRROR_GAP_SEC`; new signals and exits still at once), login re-checked every 15 min.

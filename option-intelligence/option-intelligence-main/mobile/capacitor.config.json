@@ -15,7 +15,7 @@
   "android": {
     "backgroundColor": "#0b1220",
     "allowMixedContent": false,
-    "appendUserAgent": "OIApp-DL/1"
+    "appendUserAgent": "OIApp-DL/1 OIApp-APK/2"
   },
   "ios": {
     "backgroundColor": "#0b1220",

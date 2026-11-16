@@ -85,9 +85,11 @@ def test_tradingview_notice_on_every_page_that_draws_a_chart():
 
 
 def test_personal_use_line_on_every_page_and_legal_file():
-    for page in ("index.html", "dashboard.html", "signals.html", "diagnostics.html", "notifications.html", "account.html", "login.html"):
+    for page in ("index.html", "dashboard.html", "signals.html", "diagnostics.html", "notifications.html", "account.html"):
         h = read("static/" + page)
         assert h.count("<footer") == 1 and "Not investment advice" in h and "Do not share its prices or signals" in h
+    lg = read("static/login.html")                 # v1.20.84: inside the centred column, not a <footer> beside it
+    assert "<footer" not in lg and "Do not share its prices or signals" in lg and lg.index("Do not share") < lg.index("</main>")
     assert "Not investment advice" in read("static/chart.html")
     legal = read("LEGAL.md")
     assert "ALLOW_EXTRA_USERS=1" in legal and "24 May 2024" in legal and "not legal advice" in legal

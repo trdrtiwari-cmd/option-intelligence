@@ -149,7 +149,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.83"
+APP_VERSION = "1.20.88"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -5321,6 +5321,31 @@ async def dl_get(tok: str, name: str):
 async def upstox_usage():
     """v1.20.81: Upstox calls per API in the last second / minute / 30 minutes against the published limits."""
     return {"limits": {"per_sec": RL_LIMITS[1], "per_min": RL_LIMITS[60], "per_30min": RL_LIMITS[1800]}, "by_api": rl_counts()}
+
+
+# v1.20.88: "Check for app update" in the Android app (More -> Account). The APK workflow publishes apk-version.json next to
+# OptionIntelligence.apk in the apk-latest release; the server reads it only when the button is pressed (a repeat within 60 s
+# gets the same answer) and the page compares it with the build the app sends in its user agent (OIApp-APK/<n>).
+# Only a public file on GitHub is read - nothing is sent.
+APK_RELEASE = os.getenv("APK_RELEASE_URL", "https://github.com/trdrtiwari-cmd/option-intelligence/releases/download/apk-latest").rstrip("/")
+_APK_INFO = {"at": 0.0, "data": None}
+
+
+@app.get("/api/app/apk")
+async def app_apk_info():
+    if time.time() - _APK_INFO["at"] < 60 and _APK_INFO["data"] is not None:
+        return _APK_INFO["data"]
+    data = {"build": None, "url": APK_RELEASE + "/OptionIntelligence.apk"}
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as c:
+            r = await c.get(APK_RELEASE + "/apk-version.json")
+        if r.status_code == 200:
+            b = r.json().get("build")
+            data["build"] = int(b) if b is not None else None
+    except Exception as exc:
+        logger.info("APK version check failed: %s", str(exc)[:120])
+    _APK_INFO.update(at=time.time(), data=data)
+    return data
 
 
 @app.get("/health")

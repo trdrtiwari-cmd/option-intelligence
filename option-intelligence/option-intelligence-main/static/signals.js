@@ -307,26 +307,34 @@ $('monReview').onclick = async () => {
 
 // v1.20.5: the Android app's WebView ignores file downloads, so: share sheet (send straight to the Claude app) -> normal
 // download in a browser -> copy to clipboard (paste into a Claude chat). Every path tells you what happened.
+// v1.20.88: the message line ('monSaved') sits below the settings - off the screen on a phone - so a tap on Download looked dead.
+// Every step now also shows in the toast at the bottom of the screen.
+function monToast(t, ms) { if (window.oiToast) window.oiToast(t, ms || 9000); }
 $('monExport').onclick = async () => {
-  const btn = $('monExport'), msg = t => { $('monSaved').textContent = t; };
+  const btn = $('monExport'), msg = t => { $('monSaved').textContent = t; monToast(t, /^Preparing/.test(t) ? 90000 : 9000); };
   const day = $('endDate').value || new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
-  btn.disabled = true; msg('Preparing the review file… (up to a minute if the replay has to run)');
+  btn.disabled = true; $('monSaved').textContent = 'Preparing the review file…';
+  // v1.20.88: the first file of the day replays the last 10 days on the server - 1-2 minutes on a small server. The message stays
+  // and counts the seconds until the file is ready (it used to vanish after 90 s, which looked like nothing happened).
+  const t0 = Date.now(), tick = () => monToast(`Preparing the review file… ${Math.round((Date.now() - t0) / 1000)} s - the first file of the day replays the last 10 days and can take 1-2 minutes. Keep this page open.`, 15000);
+  tick(); const timer = setInterval(tick, 5000);
   try {
     const per = $('monPeriod') ? $('monPeriod').value : 'day', word = per === 'day' ? 'day' : per;
     const r = await fetch('/api/monitor/export?day=' + encodeURIComponent(day) + '&period=' + per, {credentials: 'same-origin'});
     if (!r.ok) throw Error((await r.text()).slice(0, 200) || r.status);
-    const text = await r.text(), name = per === 'day' ? `strategy-review-${day}.json` : `strategy-review-${per}-to-${day}.json`;
+    const text = await r.text(); clearInterval(timer);
+    const name = per === 'day' ? `strategy-review-${day}.json` : `strategy-review-${per}-to-${day}.json`;
     const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
     const hasFs = !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem);
-    if (window.oiSave) { msg((await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this ' + word); return; }
+    if (window.oiSave) { $('monSaved').textContent = (await window.oiSave(name, text, 'application/json')) + ' - then in Claude write: review this ' + word; return; }
     let copied = false;
     try { await navigator.clipboard.writeText(text + '\n\nreview this ' + word); copied = true; } catch {}
     if (!copied) { const ta = document.createElement('textarea'); ta.value = text + '\n\nreview this ' + word; document.body.appendChild(ta); ta.select();
       try { copied = document.execCommand('copy'); } catch {} ta.remove(); }
     msg(copied ? `Copied the ${day} review data (${Math.round(text.length / 1024)} KB). Open a Claude chat, long-press → Paste, send.`
                : 'Could not copy here - open this page in Chrome and press Download for Claude there.');
-  } catch (e) { msg('Download failed: ' + e.message); }
-  finally { btn.disabled = false; }
+  } catch (e) { clearInterval(timer); msg('Download failed: ' + e.message); }
+  finally { clearInterval(timer); btn.disabled = false; }
 };
 
 function aiWhy(st, cfg) {
@@ -338,10 +346,11 @@ function aiWhy(st, cfg) {
   return '';
 }
 $('monTest').onclick = async () => {
-  $('monSaved').textContent = 'Testing…';
+  $('monSaved').textContent = 'Testing…'; monToast('Testing the AI…', 30000);
   try { const r = await fetch('/api/monitor/test-ai', {method: 'POST', credentials: 'same-origin'}); const d = await r.json();
     $('monSaved').textContent = (d.ok ? '✓ ' : '✗ ') + (d.message || r.status);
   } catch (e) { $('monSaved').textContent = '✗ ' + e.message; }
+  monToast($('monSaved').textContent);
   loadMonitor();
 };
 
@@ -355,7 +364,8 @@ function noteHint(e, st) {            // v1.20.10: say why there is no AI note i
 // v1.20.39: save the AI (Gemini / Claude) review shown above, plus the findings of the same day, as a text file
 $('monReport').onclick = async () => {
   const i = +($('monReviewPick').value || 0), r = monReviews[i];
-  if (!r) { $('monSaved').textContent = 'No AI review yet - press "Run review now" first.'; return; }
+  if (!r) { $('monSaved').textContent = 'No AI review yet - press "Run review now" first.'; monToast($('monSaved').textContent); return; }
+  monToast('Preparing the AI report…', 30000);
   const day = String(r.created_at || '').slice(0, 10);
   let evs = [];
   try { const q = await fetch(`/api/monitor?start=${day}&end=${day}&limit=300`, {credentials: 'same-origin'}); if (q.ok) evs = (await q.json()).events || []; } catch {}
@@ -371,7 +381,7 @@ $('monReport').onclick = async () => {
   lines.push('', 'Code findings are facts from the app; the AI text is a second opinion - check it before changing any rule.');
   const name = `ai-report-${day}-${timeOnly(r.created_at).slice(11, 16).replace(':', '')}.txt`;
   try { $('monSaved').textContent = window.oiSave ? await window.oiSave(name, lines.join('\n'), 'text/plain') : 'Saving is not available on this page.'; }
-  catch (e) { $('monSaved').textContent = 'Could not save the report: ' + e.message; }
+  catch (e) { $('monSaved').textContent = 'Could not save the report: ' + e.message; monToast($('monSaved').textContent); }
 };
 
 // ---- v1.20.41 paper tests (v1.20.75: MACD turn, Stochastic, Early trend) - logged and scored only, never a BUY

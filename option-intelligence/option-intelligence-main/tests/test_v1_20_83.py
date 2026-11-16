@@ -18,7 +18,7 @@ def read(name):
 
 def test_app_announces_native_downloads():
     cfg = json.loads(read("mobile/capacitor.config.json"))
-    assert cfg["android"]["appendUserAgent"] == "OIApp-DL/1"
+    assert cfg["android"]["appendUserAgent"] .startswith("OIApp-DL/1")
     assert cfg["server"]["url"].startswith("https://")
 
 

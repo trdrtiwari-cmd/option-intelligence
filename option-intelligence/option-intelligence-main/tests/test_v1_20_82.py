@@ -142,4 +142,4 @@ def test_page_offers_the_chrome_link_in_the_app():
     js = read("static/savefile.js")
     assert 'fetch("/api/dl"' in js and "Copy download link" in js and "if (native() && !nativeDownloads())" in js
     assert "return window.oiSave(name ||" in js
-    assert "if (window.oiSave) { msg((await window.oiSave(name, text, 'application/json'))" in read("static/signals.js")
+    assert "if (window.oiSave) { $('monSaved').textContent = (await window.oiSave(name, text, 'application/json'))" in read("static/signals.js")

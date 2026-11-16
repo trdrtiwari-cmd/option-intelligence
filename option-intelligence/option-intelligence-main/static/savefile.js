@@ -56,6 +56,7 @@
 
   // v1.20.83: the APK built with android-patch.mjs saves downloads itself (Android download manager -> Downloads/OptionIntelligence)
   const nativeDownloads = () => /OIApp-DL\/\d/.test(navigator.userAgent || "");
+  let LAST_LINK = null;
 
   async function save(name, data, mime) {
     const blob = data instanceof Blob ? data : new Blob([data], { type: mime || "application/octet-stream" });
@@ -63,6 +64,7 @@
       const link = await makeLink(name, blob);
       if (link) {
         window.location.href = link;          // the app's download listener takes it; the page stays where it is
+        LAST_LINK = link;
         return `Saving to Downloads/OptionIntelligence - a "download complete" notification appears when it is done.`;
       }
     }
@@ -109,6 +111,10 @@
 
   window.oiSave = async (name, data, mime) => {
     const msg = await save(name, data, mime);
+    if (native() && nativeDownloads() && LAST_LINK) {   // v1.20.88: keep a way out if no notification appears
+      const l = LAST_LINK; LAST_LINK = null;
+      toast(msg + " If no notification appears: tap Copy download link and paste it in Chrome.", 0, l); return msg;
+    }
     if (native() && !nativeDownloads()) {   // older app: also offer the Chrome link - saving through the share menu fails on some phones
       const blob = data instanceof Blob ? data : new Blob([data], { type: mime || "application/octet-stream" });
       const link = await makeLink(name, blob);
