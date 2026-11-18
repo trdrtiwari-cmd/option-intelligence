@@ -111,7 +111,7 @@
 
   window.oiSave = async (name, data, mime) => {
     const msg = await save(name, data, mime);
-    if (native() && nativeDownloads() && LAST_LINK) {   // v1.20.88: keep a way out if no notification appears
+    if (native() && nativeDownloads() && LAST_LINK) {   // v1.20.90: keep a way out if no notification appears
       const l = LAST_LINK; LAST_LINK = null;
       toast(msg + " If no notification appears: tap Copy download link and paste it in Chrome.", 0, l); return msg;
     }

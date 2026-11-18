@@ -12,7 +12,7 @@ jobs:
     steps:
       - name: Ping /health
         env:
-          APP_URL: ${{ secrets.APP_URL || 'https://option-intelligence-vqit.onrender.com' }}
+          APP_URL: ${{ secrets.APP_URL || 'https://option-intelligence.duckdns.org' }}
         run: |
           # a sleeping Render Free service needs up to ~60 s to wake: retry instead of failing the run
           curl -fsS --retry 5 --retry-delay 10 --retry-all-errors --max-time 90 "${APP_URL%/}/health" && echo " awake"

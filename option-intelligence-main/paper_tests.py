@@ -18,10 +18,14 @@ from indicators import IST
 STRATEGIES = {"macd_loose": "MACD histogram turn (loose) - paper only",
               # v1.20.75: the two other "more signals" candidates of the 30-day Diagnostics (13 Oct - 12 Nov 2026), forward-tested the same way
               "stoch_loose": "Stochastic cross (loose) - paper only",
-              "early_trend": "Early trend entry (Priority score) - paper only"}
-SHORT = {"macd_loose": "MACD turn", "stoch_loose": "Stochastic", "early_trend": "Early trend"}
+              "early_trend": "Early trend entry (Priority score) - paper only",
+              # v1.20.90: a CONFIRMED setup the live profit check refused ONLY for "Room to the target" (next level too close), when
+              # there is still at least ROOM_MIN_ATR ATR of room - would it have paid? Scored with the same trailing exit.
+              "room_relaxed": "Target to level (profit-check room relaxed) - paper only"}
+SHORT = {"macd_loose": "MACD turn", "stoch_loose": "Stochastic", "early_trend": "Early trend", "room_relaxed": "Target to level"}
+ROOM_MIN_ATR = 0.5
 LEADING_KIND = {"macd_loose": "macd_turn", "stoch_loose": "stoch"}
-MODES = {"off": (), "on": ("macd_loose",), "all": ("macd_loose", "stoch_loose", "early_trend")}   # the Signals-page setting
+MODES = {"off": (), "on": ("macd_loose",), "all": ("macd_loose", "stoch_loose", "early_trend", "room_relaxed")}   # the Signals-page setting
 EARLY_MAX_PER_DAY = 3                 # same limits as diagnostics.strong_trend_events
 SYMBOLS = ("NIFTY",)                  # tested on NIFTY only
 HORIZON, COST = 12, 4.0               # same as the Diagnostics defaults
@@ -101,6 +105,30 @@ def check_early_trend(pa, cs_closed, interval, in_window, today_rows=()):
         return None
     return {"strategy": "early_trend", "side": side, "day": t.date().isoformat(), "bar_time": t.strftime("%H:%M"),
             "signal_close": float(last["close"]), "atr": float(atr), "score": int(pa.get("score") or 0)}
+
+
+TARGET_DERIVED = ("Room to the target", "Premium reward", "Profit at target", "Premium gain at target")
+
+
+def check_room_relaxed(a, plan, cs_closed, min_atr=ROOM_MIN_ATR):
+    """v1.20.90: the entry when the live profit check refused a CONFIRMED setup for "Room to the target" (v1.20.94: plus the premium checks worked out from that same target - every other
+    check passed) and the room left is still at least min_atr ATR. One per closed candle (the table key)."""
+    if not plan or plan.get("ok") or not cs_closed or not a.get("atr"):
+        return None
+    checks = plan.get("checks") or []
+    failed = [str(c.get("label", "")) for c in checks if not c.get("pass")]
+    # v1.20.94: the premium checks are worked out from the SAME shortened target, so they fail together with "Room to the
+    # target" - requiring Room alone meant this test could never record a trade (18 Nov 10:30 PE: Room + Premium reward)
+    if not any(f.startswith("Room to the target") for f in failed) or not all(f.startswith(TARGET_DERIVED) for f in failed):
+        return None
+    ix = plan.get("index") or {}
+    side = a.get("side") if a.get("side") in ("CE", "PE") else None
+    if not side or float(ix.get("reward_pts") or 0) < min_atr * float(a["atr"]):
+        return None
+    last = cs_closed[-1]
+    t = last["_dt"].astimezone(IST)
+    return {"strategy": "room_relaxed", "side": side, "day": t.date().isoformat(), "bar_time": t.strftime("%H:%M"),
+            "signal_close": float(last["close"]), "atr": float(a["atr"]), "score": int(a.get("score") or 0)}
 
 
 def record(db_path, symbol, interval, entry, lock=None):

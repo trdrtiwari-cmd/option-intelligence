@@ -6,7 +6,7 @@ const fs = require("fs");
 const path = require("path");
 
 const APP_ID = "com.optionintelligence.desktop";
-let BUILT_URL = "https://option-intelligence-vqit.onrender.com";
+let BUILT_URL = "https://option-intelligence.duckdns.org";
 try { BUILT_URL = JSON.parse(fs.readFileSync(path.join(__dirname, "app-url.json"), "utf8")).url || BUILT_URL; } catch { /* keep default */ }
 // v1.20.42: the site address can be changed inside the app (saved per user) - no rebuild needed if the Render address differs
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");

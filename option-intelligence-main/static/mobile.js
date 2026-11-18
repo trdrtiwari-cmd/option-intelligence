@@ -77,12 +77,13 @@
       nav.appendChild(a);
     });
     const more = document.createElement("button"); more.type = "button"; more.innerHTML = svg("more") + "<span>More</span>";
-    if (path === "/account") more.className = "on";
+    if (path === "/account" || path === "/summary") more.className = "on";
     nav.appendChild(more);
 
     const bg = document.createElement("div"); bg.className = "m-sheet-bg";
     sheet = document.createElement("div"); sheet.className = "m-sheet"; sheet.setAttribute("role", "dialog"); sheet.setAttribute("aria-label", "More");
     sheet.innerHTML = '<h3>More</h3>' +
+      '<a class="m-row" href="/summary"><span>Summary<small>Terminal, Data Check and the essentials on one page</small></span></a>' +
       '<a class="m-row" href="/account"><span>Account &amp; saved settings<small>Password, saved data, reset preferences, app update</small></span></a>' +
       '<a class="m-row" id="mUpstox" href="/api/login" hidden><span>Connect Upstox<small>Owner only - refresh the daily token</small></span></a>' +
       '<label class="m-row"><span>Notifications<small id="mNotifyInfo">Which signals send a push</small></span><select class="m-select" id="mNotify"><option value="all">All signal changes</option><option value="confirmed">Confirmed buy only</option></select></label>' +
@@ -312,7 +313,7 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", show); else show();
 })();
 
-/* v1.20.88: "Check for app update" (Account page, only inside the Android app). Nothing is checked on its own - only when the
+/* v1.20.90: "Check for app update" (Account page, only inside the Android app). Nothing is checked on its own - only when the
    button is pressed. The app sends its build as OIApp-APK/<n> in the user agent (older APKs send none = 0); if GitHub has a
    newer build an Update button appears: it opens the APK link in Chrome, which downloads it - then tap the download and Install
    (Android always asks for that tap). Your settings stay. */
@@ -341,6 +342,46 @@
       }).catch(function () { msg.textContent = "Could not check - no connection?"; })
         .then(function () { btn.disabled = false; });
     };
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
+})();
+
+/* v1.20.92: "Move database" on the Account page (owner only). The address is sent only with these two requests and is not stored. */
+(function () {
+  "use strict";
+  function init() {
+    var panel = document.getElementById("dbMovePanel");
+    if (!panel) return;
+    fetch("/api/auth/me", { credentials: "same-origin", cache: "no-store" }).then(function (r) { return r.json(); }).then(function (me) {
+      var u = (me && (me.user || me)) || {};
+      if (!u.is_admin) return;
+      panel.hidden = false;
+      var url = document.getElementById("dbMoveUrl"), msg = document.getElementById("dbMoveMsg"),
+          test = document.getElementById("dbMoveTest"), copy = document.getElementById("dbMoveCopy"), over = document.getElementById("dbMoveOver");
+      function post(path) {
+        return fetch(path, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: url.value.trim(), overwrite: !!over.checked }) })
+          .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error((d && d.detail) || ("HTTP " + r.status)); return d; }); });
+      }
+      url.addEventListener("input", function () { copy.disabled = true; });
+      test.onclick = function () {
+        test.disabled = true; copy.disabled = true; msg.textContent = "Connecting…";
+        post("/api/admin/db/test").then(function (d) {
+          msg.textContent = "Connected · " + d.ms + " ms per query (" + d.verdict + ") · PostgreSQL " + String(d.server_version).split(" ")[0] +
+            (d.has_app_data ? "\nThis database already has app data (" + d.users + " user). Tick 'Replace' to overwrite it." : "\nEmpty - ready to copy.");
+          copy.disabled = d.ms > 300 && !confirm("This database is slow (" + d.ms + " ms). Allow copying anyway?");
+        }).catch(function (e) { msg.textContent = "✗ " + e.message; }).then(function () { test.disabled = false; });
+      };
+      copy.onclick = function () {
+        if (!confirm("Copy all data into the new database now? The current database is not changed.")) return;
+        copy.disabled = true; test.disabled = true; msg.textContent = "Copying… (about a minute)";
+        post("/api/admin/db/copy").then(function (d) {
+          msg.textContent = (d.ok ? "✓ Copy complete and checked:\n" : "✗ Some tables do not match:\n") +
+            d.tables.map(function (t) { return t.table + " " + t.source + " → " + t.copied + (t.ok ? " ✓" : " ✗"); }).join("\n") +
+            (d.ok ? "\n\nNext: Render → your service → Environment → DATABASE_URL = the new address → Save. Keep the old database for 1-2 weeks." : "");
+        }).catch(function (e) { msg.textContent = "✗ " + e.message; }).then(function () { test.disabled = false; copy.disabled = false; });
+      };
+    }).catch(function () {});
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
 })();

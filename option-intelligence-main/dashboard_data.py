@@ -546,7 +546,11 @@ def final_signal(blocks, market_open=True):
         if decay and level == "CONFIRMED":
             level = "BIAS"
         state = "BULLISH" if side == "CE" else "BEARISH"
-        action = {"CONFIRMED": f"BUY {side} SETUP", "BIAS": f"{side} BIAS — wait for trigger", "WATCH": f"WATCH {side} — not aligned yet"}[level]
+        # v1.20.90: "CE SETUP CONFIRMED" (was "BUY CE SETUP"): this is only the 5 data checks agreeing - one input of the Terminal,
+        # which decides the BUY. After the close it is the last session's read, so it says so.
+        action = {"CONFIRMED": f"{side} SETUP CONFIRMED", "BIAS": f"{side} BIAS — wait for trigger", "WATCH": f"WATCH {side} — not aligned yet"}[level]
+        if not market_open:
+            action = f"{side} {'SETUP CONFIRMED' if level == 'CONFIRMED' else level} · last session"
 
     n = len(avail)
     names = lambda ks: ", ".join(CHECK_NAMES[k] for k in ks)

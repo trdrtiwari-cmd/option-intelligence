@@ -115,7 +115,7 @@ def test_final_signal():
     z = {**blk("BULLISH", "UP"), "levels": ZONE_LEVELS}
     allbull = {"zone": z, "premium": blk("BULLISH"), "graph": blk("BULLISH"), "breadth": blk("BULLISH"), "sectors": blk("BULLISH")}
     f = dd.final_signal(allbull)
-    assert f["action"] == "BUY CE SETUP" and f["level"] == "CONFIRMED" and f["score"] == 100, f
+    assert f["action"].startswith("CE SETUP CONFIRMED") and f["level"] == "CONFIRMED" and f["score"] == 100, f
     assert f["plan"] and f["invalidation"] and len(f["contributions"]) == 5
     # premium decay caps CONFIRMED at BIAS and adds a caution
     f = dd.final_signal({**allbull, "premium": blk("CAUTION", "PREMIUM DECAY")})
@@ -127,7 +127,7 @@ def test_final_signal():
     # bearish confirmed
     f = dd.final_signal({"zone": {**blk("BEARISH", "DOWN"), "levels": ZONE_LEVELS}, "premium": blk("BEARISH"), "graph": blk("BEARISH"),
                          "breadth": blk("BEARISH"), "sectors": blk("NEUTRAL")})
-    assert f["action"] == "BUY PE SETUP" and f["state"] == "BEARISH", f
+    assert f["action"].startswith("PE SETUP CONFIRMED") and f["state"] == "BEARISH", f
     # cancelling checks -> WAIT
     f = dd.final_signal({"zone": blk("NEUTRAL", "MID"), "premium": blk("BULLISH"), "graph": blk("BEARISH"), "breadth": blk("NEUTRAL"), "sectors": blk("NEUTRAL")})
     assert f["action"] == "WAIT" and f["level"] == "NO EDGE"

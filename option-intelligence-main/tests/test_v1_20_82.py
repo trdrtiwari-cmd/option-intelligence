@@ -78,7 +78,7 @@ def test_intraday_slows_down_near_the_upstox_limit():
 # ---------------------------------------------------------------- database sleeps
 def test_heartbeat_only_in_market_hours_every_10_min():
     src = read("main.py")
-    assert "time.time() - last_beat > HEARTBEAT_SEC and in_session(grace_minutes=5)" in src and M.HEARTBEAT_SEC == 1800
+    assert "time.time() - max(last_beat, _HB_AT[0]) > HEARTBEAT_SEC and in_session(grace_minutes=5)" in src and M.HEARTBEAT_SEC == 3600
 
 
 def test_gap_counts_from_todays_open_not_from_last_evening(monkeypatch):
@@ -95,13 +95,13 @@ def test_gap_counts_from_todays_open_not_from_last_evening(monkeypatch):
 
 def test_backup_is_throttled_but_signals_and_exits_are_copied_at_once():
     src = read("main.py")
-    assert "(_SL_URGENT[0] or not is_open or time.time() - _SL_LAST_MIRROR[0] >= MIRROR_GAP_SEC)" in src
-    assert src.count("_SL_URGENT[0] = True") == 4                    # new signal + three exit paths
-    assert M.MIRROR_GAP_SEC == 1800
+    assert "(_SL_URGENT[0] or time.time() - _SL_LAST_MIRROR[0] >= MIRROR_GAP_SEC)" in src  # v1.20.92: hourly also after the close
+    assert src.count("_SL_URGENT[0] = True") == 5  # v1.20.92: + the forced copy at the close                    # new signal + three exit paths
+    assert M.MIRROR_GAP_SEC == 3600
 
 
 def test_login_check_cached_for_5_minutes():
-    assert acc.CACHE_TTL == 900
+    assert acc.CACHE_TTL == 3600  # v1.20.92
 
 
 # ---------------------------------------------------------------- download links

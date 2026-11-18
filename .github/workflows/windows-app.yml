@@ -9,7 +9,7 @@ on:
       app_url:
         description: "Deployed site address"
         required: false
-        default: "https://option-intelligence-vqit.onrender.com"
+        default: "https://option-intelligence.duckdns.org"
   push:
     branches: [main]
     paths:
@@ -21,7 +21,7 @@ jobs:
   windows:
     runs-on: windows-latest
     env:
-      APP_URL: ${{ inputs.app_url || secrets.APP_URL || 'https://option-intelligence-vqit.onrender.com' }}
+      APP_URL: ${{ inputs.app_url || secrets.APP_URL || 'https://option-intelligence.duckdns.org' }}
     defaults:
       run:
         shell: bash

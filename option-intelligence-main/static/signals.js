@@ -307,14 +307,14 @@ $('monReview').onclick = async () => {
 
 // v1.20.5: the Android app's WebView ignores file downloads, so: share sheet (send straight to the Claude app) -> normal
 // download in a browser -> copy to clipboard (paste into a Claude chat). Every path tells you what happened.
-// v1.20.88: the message line ('monSaved') sits below the settings - off the screen on a phone - so a tap on Download looked dead.
+// v1.20.90: the message line ('monSaved') sits below the settings - off the screen on a phone - so a tap on Download looked dead.
 // Every step now also shows in the toast at the bottom of the screen.
 function monToast(t, ms) { if (window.oiToast) window.oiToast(t, ms || 9000); }
 $('monExport').onclick = async () => {
   const btn = $('monExport'), msg = t => { $('monSaved').textContent = t; monToast(t, /^Preparing/.test(t) ? 90000 : 9000); };
   const day = $('endDate').value || new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
   btn.disabled = true; $('monSaved').textContent = 'Preparing the review file…';
-  // v1.20.88: the first file of the day replays the last 10 days on the server - 1-2 minutes on a small server. The message stays
+  // v1.20.90: the first file of the day replays the last 10 days on the server - 1-2 minutes on a small server. The message stays
   // and counts the seconds until the file is ready (it used to vanish after 90 s, which looked like nothing happened).
   const t0 = Date.now(), tick = () => monToast(`Preparing the review file… ${Math.round((Date.now() - t0) / 1000)} s - the first file of the day replays the last 10 days and can take 1-2 minutes. Keep this page open.`, 15000);
   tick(); const timer = setInterval(tick, 5000);

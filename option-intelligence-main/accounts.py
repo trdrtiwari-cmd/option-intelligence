@@ -410,7 +410,7 @@ def _hash_token(token):
 
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
-CACHE_TTL = 900                   # v1.20.83: 15 min (v1.20.82: 5 min, before 30 s) - an open app no longer keeps the database awake
+CACHE_TTL = 3600                  # v1.20.92: 60 min (single user). v1.20.83: 15 min (v1.20.82: 5 min, before 30 s) - an open app no longer keeps the database awake
 
 
 def _cache_clear():
@@ -759,3 +759,75 @@ def vapid_keys():
         stored = meta_set_if_absent("vapid_keys", json.dumps({"public": b64(pub_b), "private": b64(priv_b)}))
     d = json.loads(stored)
     return d["public"], d["private"]
+
+
+# ---------------------------------------------------------------- v1.20.92: move the database to another PostgreSQL
+COPY_TABLES = ["users", "sessions", "user_data", "push_devices", "notification_history", "app_meta"]   # parents first
+_SERIAL_TABLES = ("users", "push_devices", "notification_history")
+
+
+def _pg_schema():
+    pk, fl = "BIGSERIAL PRIMARY KEY", "DOUBLE PRECISION"
+    return [s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", pk).replace(" REAL", " " + fl) if not IS_PG else s for s in SCHEMA]
+
+
+def _target_connect(url):
+    import psycopg as _pg
+    from psycopg.rows import dict_row as _dr
+    u = (url or "").strip()
+    if not u.startswith(("postgres://", "postgresql://")):
+        raise AccountError("The new database address must start with postgres:// or postgresql://")
+    if DATABASE_URL and u == DATABASE_URL:
+        raise AccountError("That is the database the app already uses.")
+    return _pg.connect(u, connect_timeout=15, row_factory=_dr)
+
+
+def target_test(url):
+    """Connect to the new database, time a few round trips and say whether it already holds app data. Nothing is written."""
+    t0 = time.time()
+    with _target_connect(url) as c:
+        connect_ms = round((time.time() - t0) * 1000)
+        times = []
+        for _ in range(3):
+            t1 = time.time()
+            c.execute("SELECT 1").fetchone()
+            times.append((time.time() - t1) * 1000)
+        ver = c.execute("SHOW server_version").fetchone()["server_version"]
+        has = c.execute("SELECT to_regclass('public.users') AS t").fetchone()["t"]
+        users = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] if has else 0
+    ms = round(sorted(times)[1])
+    return {"ok": True, "ms": ms, "connect_ms": connect_ms, "server_version": ver, "has_app_data": bool(users), "users": users,
+            "verdict": "fast" if ms <= 120 else "ok" if ms <= 300 else "slow - better stay on the current database"}
+
+
+def copy_to(url, overwrite=False):
+    """Copy every account table (users, logins, saved settings, push devices, alert history, app_meta: Upstox token,
+    signal-log copies, paper trades ...) into the new PostgreSQL. The current database is only read, never changed.
+    Refuses a target that already has users unless overwrite=True (then its tables are emptied first)."""
+    with db() as src:
+        data = {t: src.all(f"SELECT * FROM {t}") for t in COPY_TABLES}
+    with _target_connect(url) as tc:
+        for stmt in _pg_schema():
+            tc.execute(stmt)
+        n_users = tc.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        if n_users and not overwrite:
+            raise AccountError(f"The new database already holds app data ({n_users} user(s)). Tick 'replace' to overwrite it.")
+        for t in reversed(COPY_TABLES):
+            tc.execute(f"DELETE FROM {t}")
+        for t in COPY_TABLES:
+            rows = data[t]
+            if not rows:
+                continue
+            cols = list(rows[0].keys())
+            sql = f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})"
+            with tc.cursor() as cur:
+                cur.executemany(sql, [tuple(r[c] for c in cols) for r in rows])
+        for t in _SERIAL_TABLES:
+            tc.execute(f"SELECT setval(pg_get_serial_sequence('{t}', 'id'), COALESCE((SELECT MAX(id) FROM {t}), 0) + 1, false)")
+        check = []
+        for t in COPY_TABLES:
+            n_new = tc.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"]
+            check.append({"table": t, "source": len(data[t]), "copied": n_new, "ok": n_new == len(data[t])})
+        tc.commit()
+    return {"ok": all(c["ok"] for c in check), "tables": check,
+            "bytes": sum(len(str(r)) for t in COPY_TABLES for r in data[t])}

@@ -54,4 +54,4 @@ def test_page_uses_native_downloads_first():
 def test_database_sleeps_longer():
     import main as M
     import accounts as acc
-    assert M.HEARTBEAT_SEC == 1800 and M.MONITOR_GAP_MIN_SEC == 2700 and M.MIRROR_GAP_SEC == 1800 and acc.CACHE_TTL == 900
+    assert M.HEARTBEAT_SEC == 3600 and M.MONITOR_GAP_MIN_SEC == 5400 and M.MIRROR_GAP_SEC == 3600 and acc.CACHE_TTL == 3600
