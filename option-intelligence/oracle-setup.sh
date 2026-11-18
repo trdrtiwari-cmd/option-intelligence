@@ -176,6 +176,13 @@ fi
 grep -v '^DATABASE_URL=' "$ENV_FILE" > "$ENV_FILE.tmp" || true
 printf 'DATABASE_URL=%s\n' "$LOCAL_DB" >> "$ENV_FILE.tmp"
 grep -q '^KEEPALIVE=' "$ENV_FILE.tmp" || echo "KEEPALIVE=0" >> "$ENV_FILE.tmp"
+# v1.20.94: the signal log lives OUTSIDE the code folder - inside it, the app's writes blocked every "git pull" (update)
+mkdir -p "$HOME/oi-data"
+if ! grep -q '^SIGNAL_LOG_DB=' "$ENV_FILE.tmp"; then
+  echo "SIGNAL_LOG_DB=$HOME/oi-data/signal_log.sqlite3" >> "$ENV_FILE.tmp"
+  [ -f "$HOME/oi-data/signal_log.sqlite3" ] || cp "$APP_DIR/signal_log.sqlite3" "$HOME/oi-data/" 2>/dev/null || true
+fi
+git -C "$REPO_DIR" checkout -- . 2>/dev/null || true
 mv "$ENV_FILE.tmp" "$ENV_FILE"; chmod 600 "$ENV_FILE"
 
 # ------------------------------------------------------------------ copy the data from the old database (once)
@@ -237,6 +244,7 @@ cat > "$HOME/oi-update.sh" <<EOF
 #!/usr/bin/env bash
 # Get the newest version from GitLab and restart the app (run by hand, or by the automatic update below).
 set -e
+git -C "$REPO_DIR" checkout -- . 2>/dev/null || true      # the server never edits the code: drop stray local changes so the pull works
 git -C "$REPO_DIR" pull --ff-only -q
 APP_DIR=\$(python3 - "$REPO_DIR" <<'PY'
 import os, re, sys
@@ -270,7 +278,7 @@ chmod +x "$HOME/oi-update.sh"
 
 cat > "$HOME/oi-autoupdate.sh" <<EOF
 #!/usr/bin/env bash
-# Every 15 min: if GitLab has a newer version, update - but never during market hours (Mon-Fri 09:00-15:45 IST).
+# Every 5 min: if GitLab has a newer version, update - but never during market hours (Mon-Fri 09:00-15:45 IST).
 dow=\$(date +%u); hm=\$(date +%H%M)
 if [ "\$dow" -le 5 ] && [ "\$hm" -ge 0900 ] && [ "\$hm" -le 1545 ]; then exit 0; fi
 git -C "$REPO_DIR" fetch -q origin || exit 0
@@ -290,7 +298,7 @@ chmod 700 "$HOME/oi-backup.sh"
 
 ( { crontab -l 2>/dev/null || true; } | { grep -v -e duckdns/duck.sh -e oi-autoupdate.sh -e oi-backup.sh || true; }
   echo "*/5 * * * * $HOME/duckdns/duck.sh >/dev/null 2>&1"
-  echo "*/15 * * * * $HOME/oi-autoupdate.sh >/dev/null 2>&1"
+  echo "*/5 * * * * $HOME/oi-autoupdate.sh >/dev/null 2>&1"
   echo "30 2 * * * $HOME/oi-backup.sh >/dev/null 2>&1" ) | crontab -
 
 # ------------------------------------------------------------------ check
@@ -303,7 +311,7 @@ fi
 echo
 echo "  Your address:   https://$DOMAIN   (the HTTPS certificate can take 1-2 minutes the first time)"
 echo "  Upstox redirect URL (Upstox developer app, only if you use 'Connect Upstox'):  https://$DOMAIN/auth/callback"
-echo "  New versions: upload to GitLab as usual - this server picks them up within 15 min after the market closes."
+echo "  New versions: upload to GitLab as usual - this server picks them up within 5 min after the market closes."
 echo "  Update now by hand:   ~/oi-update.sh        App log:   sudo journalctl -u oi -f"
 echo "  Database backups:     ~/backups (every night at 02:30, kept 14 days)"
 if [ "$NEW_ENV" = 1 ]; then

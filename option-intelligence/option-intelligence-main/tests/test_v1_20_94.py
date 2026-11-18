@@ -59,3 +59,10 @@ def test_apps_point_at_the_oracle_address():
     assert url in (ROOT / "mobile" / "capacitor.config.json").read_text(encoding="utf-8")
     assert url in (ROOT.parent / ".github" / "workflows" / "android-apk.yml").read_text(encoding="utf-8")
     assert "onrender.com" not in (ROOT / "desktop" / "app-url.json").read_text(encoding="utf-8")
+
+
+def test_signal_log_kept_out_of_the_code_folder_on_the_server():
+    s = (ROOT.parent / "oracle-setup.sh").read_text(encoding="utf-8")
+    assert 'SIGNAL_LOG_DB=$HOME/oi-data/signal_log.sqlite3' in s
+    assert s.count('checkout -- .') >= 2
+    assert "*.sqlite3" in (ROOT / ".gitignore").read_text(encoding="utf-8")

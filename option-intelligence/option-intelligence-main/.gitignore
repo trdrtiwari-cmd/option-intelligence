@@ -13,3 +13,7 @@ mobile/android/
 mobile/ios/
 mobile/www/*
 !mobile/www/index.html
+
+# app data written at run time (v1.20.94)
+*.sqlite3
+*.sqlite3-journal
