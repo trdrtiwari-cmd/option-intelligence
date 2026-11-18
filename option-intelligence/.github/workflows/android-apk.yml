@@ -9,7 +9,7 @@ on:
       app_url:
         description: "Deployed site address"
         required: false
-        default: "https://option-intelligence-vqit.onrender.com"
+        default: "https://option-intelligence.duckdns.org"
   push:
     branches: [main]
     paths:
@@ -21,7 +21,7 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     env:
-      APP_URL: ${{ inputs.app_url || 'https://option-intelligence-vqit.onrender.com' }}
+      APP_URL: ${{ inputs.app_url || 'https://option-intelligence.duckdns.org' }}
       GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
     defaults:
       run:
@@ -56,6 +56,16 @@ jobs:
       - name: Let the app save downloaded files (v1.20.83)
         run: node android-patch.mjs
       - run: npx cap sync android
+      - name: Sign every build with the SAME key (v1.20.89 - else Android refuses the update with "App not installed")
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "::warning::No DEBUG_KEYSTORE_BASE64 secret - this APK gets a new random key and cannot update the installed app (uninstall first)"; exit 0
+          fi
+          mkdir -p ~/.android
+          printf '%s' "$DEBUG_KEYSTORE_BASE64" | tr -d ' \r\n' | base64 --decode > ~/.android/debug.keystore
+          keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey >/dev/null && echo "Fixed signing key in place"
       - run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon
         working-directory: option-intelligence-main/mobile/android
       - name: Name the APK

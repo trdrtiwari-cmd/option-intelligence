@@ -1289,6 +1289,69 @@ PLAN_KEYS = {"t1.5": "1.5/1.5", "t2": "2/1.5", "t3": "3/1.5"}
 DEFAULT_LOTS = {"NIFTY": 65, "BANKNIFTY": 30}       # fallback only, when the option chain does not give the lot size
 
 
+def profit_room_whatif(cs, rows, interval, symbol, prof, horizon=12, cost=4.0, plan="trail", relaxed_min_atr=0.5):
+    """v1.20.90: the live profit check's first rule - "Room to the target" - replayed on the signals the live rules keep.
+    Live, a CONFIRMED setup becomes a BUY only if the target, pulled in just before the next Medium/Strong support / resistance,
+    is at least max(min_rr x stop, min_target_atr x ATR) away (capped at the plan's own target). Diagnostics did not replay it
+    ("not replayed: profit check"), so a signal that won here could still be refused live. Same code as live
+    (option_plan.sr_levels on the last 6 sessions ending on the signal bar + option_plan.profit_plan); the option-premium
+    checks still need live quotes and are not replayed.
+    prof: {"cfg": option settings (min_rr, min_target_atr, sr_buffer_atr, sr_ignore_atr), "sl_atr", "min_sl", "tgt_atr"}.
+    Also measures the paper rule "Target to the level": the same signals bought when the room is at least relaxed_min_atr ATR -
+    (a) with the live trailing exit, (b) with the target at the level (fixed stop as live)."""
+    import option_plan as _op
+    prof = prof or {}
+    cfg = dict(_op.DEFAULTS, **(prof.get("cfg") or {}))
+    sl_atr, min_sl, tgt_atr = float(prof.get("sl_atr") or 1.5), float(prof.get("min_sl") or 20.0), float(prof.get("tgt_atr") or 3.0)
+    cfg["min_target_atr"] = min(float(cfg.get("min_target_atr") or 1.2), tgt_atr)
+    per = max(1, round(375 / max(1, interval)))
+    out, passed, blocked, relaxed_trail, relaxed_level = [], [], [], [], []
+    for r in sorted(rows, key=lambda x: x["i"]):
+        atr, i = r.get("atr"), r["i"]
+        if not atr:
+            continue
+        entry = cs[i]["close"]
+        sr = _op.sr_levels(cs[max(0, i + 1 - per * 6):i + 1], atr, interval, symbol) or {}
+        p = _op.profit_plan(r["side"], entry, atr, sr, None, None, sl_atr, min_sl, tgt_atr, cfg)
+        room = p["checks"][0]
+        ix = p.get("index") or {}
+        tgt_pts, risk = float(ix.get("reward_pts") or 0), float(ix.get("risk_pts") or 0)
+        pts = plan_points(r, plan)
+        row = {"day": r["day"], "time": r.get("hhmm"), "side": r["side"], "pass": bool(room["pass"]),
+               "target_atr": round(tgt_pts / atr, 2), "needs_atr": None, "basis": ix.get("target_basis"),
+               "pts": None if pts is None else round(pts, 1)}
+        need = min(tgt_atr * atr, max(cfg["min_rr"] * risk, cfg["min_target_atr"] * atr, cfg.get("min_target_pts") or 0.0))
+        row["needs_atr"] = round(need / atr, 2)
+        if pts is not None:
+            (passed if room["pass"] else blocked).append(pts)
+        if tgt_pts >= relaxed_min_atr * atr:            # the paper rule: room of at least relaxed_min_atr ATR is enough
+            if pts is not None:
+                relaxed_trail.append(pts)
+            e0, path = _path(cs, r, interval, 10 ** 4)    # to the 15:20 square-off, like the live exit
+            if path:
+                d = 1 if r["side"] == "CE" else -1
+                v, _why = first_touch(path, e0, d, max(1.0, tgt_pts), max(risk, min_sl))
+                relaxed_level.append(v - cost)
+                row["level_pts"] = round(v - cost, 1)
+            row["relaxed"] = True
+        out.append(row)
+    res = {"n": len(out), "live_pass": stats(passed), "live_blocked": stats(blocked), "relaxed_min_atr": relaxed_min_atr,
+           "relaxed_trail": stats(relaxed_trail), "relaxed_level": stats(relaxed_level), "trades": out[:40],
+           "rule": f"target before the next Medium/Strong level must be ≥ {cfg['min_rr']:g} × stop and ≥ {cfg['min_target_atr']:g} ATR "
+                   f"(never more than the plan's {tgt_atr:g} ATR); stop {sl_atr:g} ATR (min {min_sl:g} pts)"}
+    nb, n = len([x for x in out if not x["pass"]]), len(out)
+    rt, rl = res["relaxed_trail"], res["relaxed_level"]
+    res["verdict"] = ("no signals to check" if not n else
+                      "the profit check refuses most of the signals that win in the replay - it is the main reason for no live BUY"
+                      if nb >= max(1, n // 2) and (res["live_blocked"].get("avg") or 0) > 0 else
+                      "the profit check refuses some signals, and those lost - it protects you" if nb and (res["live_blocked"].get("avg") or 0) <= 0 else
+                      "the profit check refuses a few signals" if nb else "the profit check lets every signal through")
+    res["paper_verdict"] = ("no extra trades" if not rt.get("n") else
+                            "positive, not proven (needs 15+ trades, forward-tested as the paper test 'Target to level')" if (rt.get("avg") or 0) > 0 else
+                            "loses - keep the live rule")
+    return res
+
+
 def plan_points(r, plan):
     """Net index points of a replayed signal at the live exit plan ('trail' or a fixed ATR plan)."""
     if plan == "trail":
@@ -1345,7 +1408,7 @@ def apply_live_rules(conf_rows, rules):
         applied.append(f"Max {int(rules['max_buys_day'])} BUY(s) per day")
     if rules.get("max_daily_losses"):
         applied.append(f"Daily loss limit: {int(rules['max_daily_losses'])} stop-outs (approx.: a loss counts from its entry, not its exit)")
-    not_replayed = ["Reconfirm hold and signal freshness (needs live ticks)", "Profit check (option premiums, bid / ask)",
+    not_replayed = ["Reconfirm hold and signal freshness (needs live ticks)", "Profit check: option premiums, bid / ask (its 'Room to the target' rule IS replayed - see that line)",
                     "Data Check dashboard and data freshness", "Derivatives filters (no OI / IV history - see the Derivatives panel)"]
     if rules.get("daily_target_rs"):
         not_replayed.append(f"Daily profit target ₹{float(rules['daily_target_rs']):,.0f} (needs live option P/L)")
@@ -1681,6 +1744,28 @@ def run(raw_candles, symbol="NIFTY", interval=5, mode="scalp", htf_raw=None, htf
                                               + "; ".join(parts) + f". Advised: {(adv or 'balanced').title()} - Auto mode switches to it."})
     except Exception as exc:
         rep["decision_flow_rules"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    try:                       # v1.20.90: the live profit check's "Room to the target" rule, replayed (it was 'not replayed')
+        prof = (live_rules or {}).get("profit")
+        if prof:
+            pr = profit_room_whatif(cs, conf_rows, interval, symbol, prof, horizon, cost, (live_rules or {}).get("plan") or live_plan or "trail")
+            rep["profit_room"] = pr
+            if pr["n"]:
+                lp, lb, rt, rl = pr["live_pass"], pr["live_blocked"], pr["relaxed_trail"], pr["relaxed_level"]
+                nb = len([x for x in pr["trades"] if not x["pass"]])
+                ex = "; ".join(f"{t['day'][5:]} {t['time']} {t['side']} room {t['target_atr']} ATR needs {t['needs_atr']}"
+                               + ("" if t["pts"] is None else f" ({t['pts']:+})") for t in pr["trades"] if not t["pass"])[:600]
+                rep["verdict"].insert(1, {"level": "action" if nb else "info",
+                    "text": f"Profit check “Room to the target” (live only, now replayed - {pr['rule']}): of the {pr['n']} signals your live rules keep, "
+                            f"{pr['n'] - nb} pass and {nb} are REFUSED live"
+                            + (f" - the refused ones made {lb.get('avg', 0):+.1f} pts each ({lb.get('total', 0):+.0f} total) in the replay" if lb.get("n") else "")
+                            + (f", the passing ones {lp.get('avg', 0):+.1f} each" if lp.get("n") else "") + f". Verdict: {pr['verdict']}."
+                            + (f" Refused: {ex}." if ex else "")
+                            + (f" Paper rule “Target to level” (room ≥ {pr['relaxed_min_atr']:g} ATR is enough): {rt.get('n', 0)} trades, {rt.get('win_rate')}% winners, "
+                               f"{rt.get('avg', 0):+.1f} pts each with the live trailing exit; with the target AT the level {rl.get('avg', 0):+.1f} each "
+                               f"({rl.get('win_rate')}% winners). Verdict: {pr['paper_verdict']}." if rt.get("n") else "")
+                            + " Option-premium checks (spread, premium R:R, charges) still need live quotes and are not replayed."})
+    except Exception as exc:
+        rep["profit_room"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
     try:                       # v1.20.36 what-if: fade the confirmed signals
         fd = fade_whatif(cs, confirmed, conf_rows, interval, horizon, cost, target, stop)
         rep["fade"] = fd

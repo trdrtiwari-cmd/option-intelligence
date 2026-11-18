@@ -1,0 +1,102 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="/static/manifest.webmanifest"><link rel="stylesheet" href="/static/mobile.css?v=1.20.94"><link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png"><title>Summary · Option Intelligence</title><link rel="stylesheet" href="/static/style.css?v=1.20.94">
+<style>
+main{max-width:1100px;margin:16px auto;padding:0 12px}
+.sm-card{background:#142238;border:1px solid #2b3d55;border-radius:14px;padding:14px;margin:12px 0}
+.sm-card h2{margin:0 0 8px;font-size:18px}.sm-card h3{margin:10px 0 6px;font-size:14px;color:#91a4ba;text-transform:uppercase;letter-spacing:.04em}
+.sm-row{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;justify-content:space-between}
+.sm-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:700px){.sm-grid{grid-template-columns:1fr}}
+.sm-box{background:#0f1b2d;border:1px solid #22344c;border-radius:10px;padding:10px}
+.sm-big{font-size:22px;font-weight:800;margin:2px 0}.sm-sub{color:#91a4ba;font-size:13px;line-height:1.4}
+.sm-verdict{border-radius:10px;padding:10px 12px;font-weight:600;margin:8px 0}
+.v-good{background:rgba(34,197,94,.12);border:1px solid #22c55e;color:#86efac}.v-warn{background:rgba(234,179,8,.10);border:1px solid #eab308;color:#fde68a}
+.v-bad{background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#fca5a5}.v-info{background:rgba(145,164,186,.10);border:1px solid #2b3d55;color:#cbd5e1}
+.sm-list{margin:4px 0 0;padding-left:18px;font-size:13px;line-height:1.5}.sm-kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:13px}
+.sm-kv span:nth-child(odd){color:#91a4ba}.up{color:var(--green)}.dn{color:var(--red)}.yl{color:var(--yellow)}.mut{color:#91a4ba}
+.sm-pill{display:inline-block;border:1px solid #2b3d55;border-radius:999px;padding:2px 8px;font-size:12px;margin:2px 4px 2px 0}
+</style></head>
+<body><header class="topbar"><div class="brand">OPTION <span>INTELLIGENCE</span></div><a class="button secondary" href="/">Back to terminal</a></header>
+<main>
+<div class="sm-row"><h1 style="margin:6px 0">Summary</h1><span id="smUpdated" class="sm-sub">Loading…</span></div>
+<p class="sm-sub" style="margin:0 0 6px">Terminal, Data Check and the essentials in one place. Read-only: settings stay on their own pages. The final BUY decision is the Terminal's.</p>
+<div id="smHealth"></div>
+<div id="smSymbols"></div>
+<div class="sm-grid"><section class="sm-card" id="smToday"><h2>Today</h2><div class="sm-sub">Loading…</div></section>
+<section class="sm-card" id="smMonitor"><h2>AI monitor</h2><div class="sm-sub">Loading…</div></section></div>
+<section class="sm-card" id="smSettings"><h2>Live settings</h2><div class="sm-sub">Loading…</div></section>
+</main>
+<footer style="text-align:center;color:#91a4ba;font-size:11px;padding:18px">Personal research tool for the account owner · Not investment advice · Do not share its prices or signals with other people · Market data: your own Upstox account</footer>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num=(v,n=2)=>v==null||!isFinite(+v)?"—":(+v).toLocaleString("en-IN",{minimumFractionDigits:n,maximumFractionDigits:n});
+const sideCls=s=>s==="CE"?"up":s==="PE"?"dn":"mut";
+const lvlCls=l=>/BUY|CONFIRMED/.test(l||"")?"up":/WATCH|PENDING|BIAS|STALE/.test(l||"")?"yl":"mut";
+function terminalBox(r){
+  const t=r.terminal||{},f=r.final||{},bp=t.buy_plan,pk=t.option_pick,fe=r.feasibility||{};
+  if(r.terminal_error)return `<div class="sm-box"><h3>Terminal</h3><div class="dn">Not available: ${esc(r.terminal_error)}</div></div>`;
+  const blk=(t.gates_failed||[]).slice(0,6);
+  return `<div class="sm-box"><h3>Terminal (decides the BUY)</h3>
+  <div class="sm-big ${f.buy?sideCls(f.side):lvlCls(f.level)}">${esc(f.action||"WAIT")}</div>
+  <div class="sm-sub">${esc(f.headline||"")}</div>
+  <div class="sm-kv" style="margin-top:8px"><span>Score</span><span><b class="up">CE ${t.bull_score??"—"}</b> · <b class="dn">PE ${t.bear_score??"—"}</b> (${esc(t.score_model||"")})</span>
+  <span>Regime</span><span>${esc(t.regime||"—")}${t.phase?" · "+esc(t.phase):""}</span>
+  <span>Signal time</span><span>${esc((t.timing||{}).generated_at_text||"—")}${(t.timing||{}).moved_atr!=null?" · moved "+num(t.timing.moved_atr,1)+" ATR since":""}</span>
+  ${fe&&fe.score!=null?`<span>Feasibility</span><span>${num(fe.score,0)}/100${fe.room_atr!=null?" · room "+num(fe.room_atr,2)+" ATR":""}</span>`:""}
+  ${pk?`<span>Option</span><span>${esc(pk.name)} · LTP ${num(pk.ltp)}${pk.delta!=null?" · Δ "+num(pk.delta,2):""}</span>`:""}
+  ${bp&&bp.entry!=null?`<span>Plan</span><span>entry ${num(bp.entry)} · stop ${num(bp.stop)} · target ${num(bp.target)} · R:R ${num(bp.rr,2)}</span>`:""}
+  ${bp&&(bp.failed_checks||[]).length?`<span>Profit check</span><span class="dn">${esc(bp.failed_checks.join("; "))}</span>`:""}</div>
+  ${blk.length?`<h3>Still blocking (${(t.gates_failed||[]).length})</h3><ul class="sm-list">${blk.map(g=>`<li>${esc(g)}</li>`).join("")}</ul>`:`<div class="sm-sub up" style="margin-top:6px">✓ Every gate passes</div>`}
+  </div>`;
+}
+function dataBox(r){
+  const d=r.data_check;
+  if(!d)return `<div class="sm-box"><h3>Data Check</h3><div class="dn">Not available: ${esc(r.data_check_error||"")}</div></div>`;
+  const chk=(d.checks||[]).map(c=>`<span class="sm-pill ${c.dir>0?"up":c.dir<0?"dn":"mut"}">${esc(c.name)}: ${esc(c.label)}</span>`).join("");
+  return `<div class="sm-box"><h3>Data Check (one input of the Terminal)</h3>
+  <div class="sm-big ${d.side==="CE"?"up":d.side==="PE"?"dn":"mut"}">${esc(d.action||"—")}</div>
+  <div class="sm-sub">${esc(d.headline||"")}</div>
+  <div class="sm-kv" style="margin-top:8px"><span>Score</span><span>${d.score==null?"—":(d.score>0?"+":"")+num(d.score,0)} · ${d.agree??0} agree / ${d.oppose??0} oppose of ${d.available??"—"}</span></div>
+  <div style="margin-top:6px">${chk}</div>
+  ${(d.cautions||[]).length?`<ul class="sm-list yl">${d.cautions.map(c=>`<li>${esc(c)}</li>`).join("")}</ul>`:""}</div>`;
+}
+function symbolCard(r){
+  const t=r.terminal||{},g=r.guards||{},v=r.verdict||{level:"info",text:""};
+  const guards=[g.buy_enabled===false?"BUY switched off for this index":null,g.strategy?"strategy "+g.strategy:null,g.decision_rules?"decision rules "+g.decision_rules:null,
+    g.max_daily_losses?`stop-outs today ${g.stopouts_today??0} of ${g.max_daily_losses}`:null].filter(Boolean);
+  return `<section class="sm-card"><div class="sm-row"><h2>${esc(r.symbol)} <span class="mut" style="font-weight:400">${num(t.last_close)}</span></h2>
+  <span class="sm-sub">ATR ${num(t.atr,1)} · RSI ${num(t.rsi,1)} · VWAP ${num(t.vwap)}</span></div>
+  <div class="sm-verdict v-${esc(v.level)}">${esc(v.text)}</div>
+  <div class="sm-grid">${terminalBox(r)}${dataBox(r)}</div>
+  <div class="sm-sub" style="margin-top:8px">${guards.map(x=>`<span class="sm-pill">${esc(x)}</span>`).join("")}</div></section>`;
+}
+function render(s){
+  const m=s.market||{};
+  $("smUpdated").textContent=`server v${s.app_version} · ${m.open?"market open":"market closed"} · updated ${new Date().toLocaleTimeString()}`;
+  $("smHealth").innerHTML=(s.health||[]).map(h=>`<div class="sm-verdict v-${esc(h.level)}">${h.level==="good"?"✓ ":"⚠ "}${esc(h.text)}</div>`).join("")
+    +`<div class="sm-sub">Feeds: ${Object.entries(s.feeds||{}).map(([k,f])=>`${esc(k)} ${f.stream_running?"running":"stopped"}${f.tick_age_s!=null?" ("+Math.round(f.tick_age_s)+" s)":""}`).join(" · ")}`
+    +(s.upstox_worst?` · Upstox busiest API ${esc(s.upstox_worst.api)} ${num(s.upstox_worst.pct,0)}% of its limit${s.upstox_worst.rate_limited_today?" · 429s today "+s.upstox_worst.rate_limited_today:""}`:"")+(s.live_socket_today&&s.live_socket_today.total_mb?` · live socket today ${num(s.live_socket_today.total_mb,1)} MB (before compression)`:"")+`</div>`;
+  $("smSymbols").innerHTML=(s.symbols||[]).map(symbolCard).join("")||`<section class="sm-card sm-sub">No index is being watched (Signals page → background alerts).</section>`;
+  const lg=(s.today||{}).signal_log||{},bd=((s.today||{}).board||[]).filter(b=>b.count);
+  $("smToday").innerHTML=`<h2>Today</h2><div class="sm-kv"><span>Signals logged</span><span>${lg.signals??0}${lg.signals?` · ${lg.wins??0} won / ${lg.losses??0} lost · net ${num(lg.net_points,1)} pts`:""}</span></div>
+    <h3>Signal board</h3>${bd.length?`<ul class="sm-list">${bd.map(b=>`<li>${esc(b.stage)}: ${b.count}${b.test_win_rate!=null?` · test trades ${b.test_win_rate}% won`:""}${b.pct_up20!=null?` · option +20% within 60 min in ${b.pct_up20}%`:""}</li>`).join("")}</ul>`:`<div class="sm-sub">Nothing on the board yet today.</div>`}`;
+  const mo=s.monitor||{};
+  $("smMonitor").innerHTML=`<h2>AI monitor</h2><div class="sm-kv"><span>Issues today</span><span>${mo.high?`<b class="dn">${mo.high} high</b> · `:""}${mo.medium??0} medium</span>
+    ${mo.latest?`<span>Latest</span><span>${esc(mo.latest)}</span>`:""}</div>${mo.review?`<h3>Latest review</h3><div class="sm-sub" style="white-space:pre-wrap">${esc(mo.review)}${mo.review.length>=700?"…":""}</div><a class="sm-sub" href="/signals">Full review on the Signals page →</a>`:""}`;
+  const st=s.settings||{};
+  $("smSettings").innerHTML=`<h2>Live settings</h2><div class="sm-kv"><span>Timeframe</span><span>${st.interval} min · ${esc(st.mode)} · score ≥ ${st.score_min}</span>
+    <span>Exit plan</span><span>${esc(st.exit_plan)}</span><span>Score model</span><span>${esc(st.score_model||"classic")}</span>
+    <span>Derivatives filters</span><span>${esc(st.deriv_mode)}</span><span>Paper tests</span><span>${esc(st.paper)}</span></div><a class="sm-sub" href="/signals">Change on the Signals page →</a>`;
+  return !!m.open;
+}
+let timer=null;
+async function load(){
+  let open=false;
+  try{const r=await fetch("/api/summary",{credentials:"same-origin",cache:"no-store"});if(!r.ok)throw Error((await r.text()).slice(0,160)||"HTTP "+r.status);open=render(await r.json())}
+  catch(e){$("smUpdated").textContent="Could not load: "+e.message}
+  clearTimeout(timer);timer=setTimeout(load,open?30000:300000);     // every 30 s in market hours, every 5 min when closed
+}
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
+load();
+})();
+</script><script src="/static/mobile.js?v=1.20.94"></script></body></html>

@@ -4,7 +4,7 @@
   "webDir": "www",
   "backgroundColor": "#0b1220",
   "server": {
-    "url": "https://option-intelligence-vqit.onrender.com",
+    "url": "https://option-intelligence.duckdns.org",
     "cleartext": false,
     "allowNavigation": [
       "*.upstox.com",

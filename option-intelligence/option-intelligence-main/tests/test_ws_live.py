@@ -22,6 +22,10 @@ class FakeWS:
             raise M.WebSocketDisconnect()
         self.out.append(obj)
 
+    async def send_text(self, txt):                 # v1.20.92: the socket sends pre-encoded JSON (to count bytes)
+        import json as _j
+        await self.send_json(_j.loads(txt))
+
     async def receive_json(self):
         if self.inbox:
             return self.inbox.pop(0)

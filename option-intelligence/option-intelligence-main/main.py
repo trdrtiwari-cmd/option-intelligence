@@ -1,4 +1,4 @@
-import os, re, base64, secrets, threading, time, asyncio, json, logging, importlib.util, sqlite3, csv, io
+import os, re, base64, secrets, threading, time, asyncio, json, logging, importlib.util, sqlite3, csv, io, collections
 from datetime import date, timedelta, datetime, timezone, time as dtime
 from pathlib import Path
 from urllib.parse import urlencode
@@ -149,7 +149,7 @@ API_V3 = "https://api.upstox.com/v3"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("option_intelligence")
 
-APP_VERSION = "1.20.88"
+APP_VERSION = "1.20.94"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -576,12 +576,43 @@ def _intra_ttl(interval, now=None):
     return ttl
 
 
+# v1.20.91: on 17 Nov the intraday API reached 84 % of its 30-minute limit. Only the index candles drive the signal and need the
+# fast refresh; futures volume, options (board outcomes, option chart), stocks and VIX change the result little, so they are
+# reused longer. Each call is also counted by kind so the review shows which kind uses the limit.
+INTRA_KIND_MIN_TTL = {"index": 0.0, "fo": float(os.getenv("INTRADAY_FO_SEC", "20") or 20),
+                      "stock": float(os.getenv("INTRADAY_STOCK_SEC", "60") or 60), "other": 60.0}
+_INTRA_KIND_CALLS = {}           # kind -> deque of call times
+
+
+def _intra_kind(key):
+    k = str(key or "")
+    if k in INDEX_KEYS.values():
+        return "index"
+    if k.startswith("NSE_FO") or k.startswith("BSE_FO"):
+        return "fo"
+    if k.startswith("NSE_EQ") or k.startswith("BSE_EQ"):
+        return "stock"
+    return "other"
+
+
+def intraday_by_kind(now=None):
+    now = now or time.time()
+    out = {}
+    for kind, dq in _INTRA_KIND_CALLS.items():
+        while dq and now - dq[0] > 1800:
+            dq.popleft()
+        out[kind] = {"last_30min": len(dq), "min_reuse_s": INTRA_KIND_MIN_TTL.get(kind)}
+    return out
+
+
 async def _intraday_rows(key, interval):
     """Today's candles from Upstox's intraday API, shared by every caller and every `days` value. Raises like upstox_get."""
     ik = (key, int(interval))
     hit = INTRA_CACHE.get(ik)
-    if hit and time.time() - hit[0] < _intra_ttl(interval):
+    kind = _intra_kind(key)
+    if hit and time.time() - hit[0] < max(_intra_ttl(interval), INTRA_KIND_MIN_TTL.get(kind, 0.0)):
         return hit[1]
+    _INTRA_KIND_CALLS.setdefault(kind, collections.deque()).append(time.time())
     intra = await upstox_get(f"{API_V3}/historical-candle/intraday/{key}/minutes/{interval}")
     rows = _rows_to_candles((intra.get("data") or {}).get("candles"))
     INTRA_CACHE[ik] = (time.time(), rows)
@@ -1582,7 +1613,17 @@ def _diag_live_rules(sym):
     return {"decision_rules": rules_mode(sym)[0], "one_per_side": one_per_side_on(),
             "max_buys_day": max_buys_day() if dm in ("gates", "score") else 0, "max_daily_losses": MAX_DAILY_LOSSES,
             "strategy": strategy_for(sym), "symbol_enabled": sym in buy_symbols(), "daily_target_rs": daily_target_rs(), "deriv_mode": dm,
-            "plan": OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN}
+            "plan": OPTION_OVERRIDES.get("exit_plan") if OPTION_OVERRIDES.get("exit_plan") in op.EXIT_PLANS else op.DEFAULT_EXIT_PLAN,
+            "profit": _profit_settings()}
+
+
+def _profit_settings():
+    """v1.20.90: the live profit check's settings (exactly what _buy_plan uses) for the Diagnostics replay of 'Room to the target'."""
+    sc = sx.config()
+    sl_atr, min_sl, tgt_atr, _k = op.plan_levels(OPTION_OVERRIDES.get("exit_plan"), sc["sl_atr"], sc["target_atr"])
+    c = _opt_cfg()
+    return {"cfg": {k: c.get(k) for k in ("min_rr", "min_target_atr", "sr_buffer_atr", "sr_ignore_atr", "min_target_pts")},
+            "sl_atr": sl_atr, "min_sl": min_sl, "tgt_atr": tgt_atr}
 
 
 def _replay_progress(job, every=10, pause=0.005):
@@ -1892,7 +1933,18 @@ WS_PUSH_SEC = float(os.getenv("WS_PUSH_SEC", "0.1"))       # v1.19.7: candles + 
 WS_FULL_TICKS_SEC = float(os.getenv("WS_FULL_TICKS_SEC", "5"))          # market open
 WS_FULL_TICKS_CLOSED_SEC = float(os.getenv("WS_FULL_TICKS_CLOSED_SEC", "300"))     # v1.20.68: closed / holiday - every 5 min
 WS_CLOSED_PUSH_SEC = float(os.getenv("WS_CLOSED_PUSH_SEC", "300"))                 # v1.20.68: candles / analysis check when closed
-WS_ANALYSIS_MIN_SEC = float(os.getenv("WS_ANALYSIS_MIN_SEC", "4"))
+# v1.20.92: 15 s (was 4). Render bandwidth on 17 Nov: 4.75 of 6.44 GB this month was the live socket, mostly this large object.
+# A change of signal (level / side / action / buy check) still goes out at once - only unchanged-signal refreshes wait.
+WS_ANALYSIS_MIN_SEC = float(os.getenv("WS_ANALYSIS_MIN_SEC", "15"))
+WS_INDEX_MIN_SEC = float(os.getenv("WS_INDEX_MIN_SEC", "0.3"))       # v1.20.92: index price at most ~3x a second (was up to 10x)
+_WS_BYTES = {}                    # (day, message type) -> [messages, bytes before compression]
+
+
+def ws_bytes_today():
+    day = ist_now().date().isoformat()
+    out = {t: {"messages": v[0], "mb": round(v[1] / 1e6, 2)} for (d, t), v in _WS_BYTES.items() if d == day}
+    return {"by_type": out, "total_mb": round(sum(v["mb"] for v in out.values()), 2),
+            "note": "sizes before WebSocket compression - Render counts the compressed bytes, usually several times smaller"}
 WS_OPT_OTHERS_SEC = float(os.getenv("WS_OPT_OTHERS_SEC", "1"))         # v1.20.70: other strikes' premiums at most once a second
 WS_PUMP_MAX_SEC = float(os.getenv("WS_PUMP_MAX_SEC", "40"))              # v1.20.72: restart a candle / analysis push stuck longer than this
 WS_CLOSED_LOOP_SEC = 1.0                                                  # market closed: nothing moves, check once a second
@@ -1952,8 +2004,14 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
     pump_task = None
 
     async def send(obj):
+        txt = json.dumps(obj, separators=(",", ":"), default=str)
+        k = (ist_now().date().isoformat(), obj.get("type") or "?")
+        c = _WS_BYTES.setdefault(k, [0, 0]); c[0] += 1; c[1] += len(txt)
+        if len(_WS_BYTES) > 60:
+            for old in sorted(_WS_BYTES)[:20]:
+                _WS_BYTES.pop(old, None)
         async with send_lock:
-            await websocket.send_json(obj)
+            await websocket.send_text(txt)
 
     async def reader():
         while True:
@@ -2049,8 +2107,8 @@ async def live_socket(websocket: WebSocket, symbol: str = "NIFTY"):
                 sent["idx"] = index_tick and index_tick["ltp"]
                 sent["opt"] = {x.get("instrument_key"): x.get("ltp") for x in recent}
             else:
-                if index_tick and index_tick["fresh"] and index_tick["ltp"] != sent["idx"]:
-                    sent["idx"] = index_tick["ltp"]
+                if index_tick and index_tick["fresh"] and index_tick["ltp"] != sent["idx"] and now - sent.get("idx_at", 0.0) >= WS_INDEX_MIN_SEC:
+                    sent["idx"] = index_tick["ltp"]; sent["idx_at"] = now
                     await send({"type": "index", "symbol": sym, "index": index_tick})
                 # v1.19.7: option premiums that moved since the last push (the selected contract's candle moves 10x a second)
                 moved = [x for x in recent if x.get("fresh") and sent["opt"].get(x.get("instrument_key")) != x.get("ltp")]
@@ -2451,6 +2509,25 @@ async def _paper_check(sym, interval, mode, score_min, a, raw_candles, extra=Non
         logger.warning("Paper test check failed for %s: %s", sym, str(exc)[:160])
 
 
+async def _paper_room(sym, interval, mode, score_min, a, plan, raw_candles):
+    """v1.20.90: paper test 'Target to level' - logs a CONFIRMED setup the profit check refused only for 'Room to the target'.
+    Live setting only (like _paper_check), never a BUY, never an alert."""
+    if "room_relaxed" not in paper_strategies() or sym not in ptest.SYMBOLS or not in_session():
+        return
+    _s, l_iv, l_mode, l_score, _d = _poller_cfg()
+    if (interval, mode, score_min) != (l_iv, l_mode, l_score):
+        return
+    try:
+        cs_closed, _ = drop_forming(normalize_candles(raw_candles), interval)
+        entry = ptest.check_room_relaxed(a, plan, cs_closed)
+        if entry and await asyncio.to_thread(ptest.record, SIGNAL_LOG_DB, sym, interval, entry, SIGNAL_LOG_LOCK):
+            logger.info("Paper test room_relaxed: %s %s at %s", sym, entry["side"], entry["bar_time"])
+            data = await asyncio.to_thread(ptest.dump, SIGNAL_LOG_DB, 90, SIGNAL_LOG_LOCK)
+            await asyncio.to_thread(acc.meta_set, "paper_trades", json.dumps(data))
+    except Exception as exc:
+        logger.warning("Paper test room_relaxed failed for %s: %s", sym, str(exc)[:160])
+
+
 async def _paper_brief(days=30, trades=12):
     """v1.20.80: every paper-only test in a few lines for the reviewer - on / off, closed trades, win rate, points, verdict and its
     latest entries. A list (empty when nothing can be read); never raises, a review must not fail because of it."""
@@ -2721,8 +2798,13 @@ SIGNAL_LOG_COLS = None
 # v1.20.82: a new logged signal or exit is copied at once; everything else (signal-board outcomes every 2 min, AI notes, reviews)
 # at most every MIRROR_GAP_SEC during market hours and once after the close. Each copy rewrites a whole month blob, so copying
 # every 2 min wrote ~20 MB a day to the database and never let it sleep.
-MIRROR_GAP_SEC = float(os.getenv("MIRROR_GAP_SEC", "1800") or 1800)      # v1.20.83: 30 min (was 15)
+# v1.20.92: 60 min (v1.20.83: 30, before 15). New signals and exits are still copied at once (_SL_URGENT). After the close the copy
+# also waits for the gap - it used to copy at every board-outcome update (every 2 min until ~16:30), keeping Neon awake (17 Nov:
+# +0.25 CU-h between 16:08 and 20:16 with the market closed). One copy is forced right after the close.
+MIRROR_GAP_SEC = float(os.getenv("MIRROR_GAP_SEC", "3600") or 3600)
 _SL_URGENT = [False]
+_WAS_OPEN = [None]
+_HB_AT = [0.0]                   # last monitor heartbeat written (shared by the poller and the mirror, so one wake-up does both)
 _SL_LAST_MIRROR = [0.0]
 
 
@@ -2893,11 +2975,18 @@ async def _signal_exit_watcher():
             open_by_symbol = await asyncio.to_thread(sx.open_trade_count, SIGNAL_LOG_DB, SIGNAL_LOG_LOCK)
             is_open = market_status()["open"]
             delay = 3.0 if is_open else 60.0
-            if _SIGNAL_LOG_DIRTY.is_set() and (_SL_URGENT[0] or not is_open or time.time() - _SL_LAST_MIRROR[0] >= MIRROR_GAP_SEC):
+            if _WAS_OPEN[0] and not is_open:                 # the close: one copy now, then hourly at most
+                _SL_URGENT[0] = True
+            _WAS_OPEN[0] = is_open
+            if _SIGNAL_LOG_DIRTY.is_set() and (_SL_URGENT[0] or time.time() - _SL_LAST_MIRROR[0] >= MIRROR_GAP_SEC):
                 _SIGNAL_LOG_DIRTY.clear()
                 _SL_URGENT[0] = False
                 _SL_LAST_MIRROR[0] = time.time()
-                try: await asyncio.to_thread(mirror_signal_log)
+                try:
+                    await asyncio.to_thread(mirror_signal_log)
+                    if in_session(grace_minutes=5) and time.time() - _HB_AT[0] > 600:     # the database is awake anyway
+                        _HB_AT[0] = time.time()
+                        await asyncio.to_thread(acc.meta_set, "monitor_heartbeat", str(_HB_AT[0]))
                 except Exception as exc: logger.warning("Signal log mirror failed: %s", str(exc)[:140]); _SIGNAL_LOG_DIRTY.set()
             try: await _end_of_day_summary()
             except Exception as exc: logger.debug("EOD summary: %s", str(exc)[:140])
@@ -3278,7 +3367,9 @@ async def _terminal_snapshot(day):
             "combos_in_use": [list(c) for c in combos], "live_analyses": analyses, "feeds": feeds,
             "signal_log_today": sx.summarize(log, "day").get("total") if log else {"signals": 0},
             "signal_board_today": sb.summary(board), "monitor_status": {"error": _SMON.get("error"), "last_review_at": _SMON.get("last_review_at")},
-            "upstox_usage": {"limits": {"per_sec": RL_LIMITS[1], "per_min": RL_LIMITS[60], "per_30min": RL_LIMITS[1800]}, "by_api": rl_counts()}}
+            "upstox_usage": {"limits": {"per_sec": RL_LIMITS[1], "per_min": RL_LIMITS[60], "per_30min": RL_LIMITS[1800]}, "by_api": rl_counts(),
+                             "intraday_by_kind": intraday_by_kind()},
+            "live_socket_today": ws_bytes_today()}
 
 
 @app.post("/api/monitor/export")
@@ -3311,6 +3402,40 @@ def _latest_diagnostics_summary():
                     "live_trail": r.get("live_trail"), "rupees": (r.get("rupees") or {}).get("rows"),
                     "indicator_test": r.get("indicator_test"),      # v1.20.75
                     "verdict": [v.get("text") for v in (r.get("verdict") or [])][:18]})
+    return out
+
+
+_STAGE_RANK = {"WATCH": 1, "SETUP": 2, "FAILED": 2, "NO BUY": 3, "BUY": 4}
+
+
+def _replay_vs_live(day, sym, rep, board):
+    """v1.20.90: each signal the replay confirmed on `day`, next to what the LIVE app did at that moment (signal board, same index
+    and side, from the signal bar to 15 minutes after its close): bought, or the furthest stage it reached and the rules that
+    blocked it there. Answers 'the replay bought at 10:10 - why did live not?'. No board row = live never even showed WATCH."""
+    out = []
+    for t in (rep or {}).get("trades") or []:
+        if t.get("day") != day or not t.get("time"):
+            continue
+        hh, mm = (int(x) for x in str(t["time"]).split(":")[:2])
+        lo, hi = hh * 60 + mm, hh * 60 + mm + 20
+        rows_ = []
+        for b in board or []:
+            if b.get("symbol") != sym or b.get("side") != t.get("side"):
+                continue
+            ca = str(b.get("created_at") or "")
+            try:
+                m_ = int(ca[11:13]) * 60 + int(ca[14:16])
+            except ValueError:
+                continue
+            if lo <= m_ <= hi:
+                rows_.append(b)
+        best = max(rows_, key=lambda b: (_STAGE_RANK.get(b.get("stage"), 0), str(b.get("created_at")))) if rows_ else None
+        out.append({"time": t["time"], "side": t.get("side"), "replay_pts": t.get("pnl"), "replay_exit": t.get("exit"),
+                    "live_stage": best.get("stage") if best else "not on the board",
+                    "live_at": str(best.get("created_at"))[11:16] if best else None,
+                    "blocked_by": (best.get("blocked_by") or "")[:300] if best else "",
+                    "reason": (best.get("reason") or "")[:200] if best else
+                              "live never showed even WATCH for this side here - feed / server down, or the engine leaned the other way live"})
     return out
 
 
@@ -3385,6 +3510,10 @@ async def _monitor_export_impl(request, day="", fresh=0, client=None, period="da
         evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 300, SIGNAL_LOG_LOCK)
         ctx = mon.review_context(day, sym, log, [e for e in evs if e["kind"] != "SUGGESTION"], mon.missed_from_board(board), rep,
                                  mon.suggestions(rep) if rep else [], mon.board_gate_stats(board))
+        try:
+            ctx = dict(ctx, replay_vs_live=_replay_vs_live(day, sym, rep, board))
+        except Exception as exc:
+            ctx = dict(ctx, replay_vs_live={"error": f"{type(exc).__name__}: {str(exc)[:120]}"})
     ctx = dict(ctx)
     if day == ist_now().date().isoformat():
         ctx["paper_tests"] = await _paper_brief()                 # v1.20.80: as they stand now (not for an older day)
@@ -3724,6 +3853,148 @@ async def notification_history(request: Request, limit: int=100):
     rows = await _run_push_db(acc.push_history, uid, limit)
     return {"rows":rows,"count":len(rows)}
 
+class DbMoveBody(BaseModel):
+    url: str
+    overwrite: bool = False
+
+
+def _db_err(exc):
+    msg = str(exc)
+    for part in ("password", "postgres://", "postgresql://"):
+        if part in msg:
+            msg = msg.split(part)[0] + "…"
+    return msg[:300]
+
+
+@app.post("/api/admin/db/test")
+async def db_move_test(body: DbMoveBody, request: Request):
+    """v1.20.92: 'Move database' step 1 - connect to the new PostgreSQL and time it. Nothing is written; the address is not stored."""
+    _require_admin(request)
+    try:
+        return await asyncio.to_thread(acc.target_test, body.url)
+    except acc.AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not connect: {type(exc).__name__}: {_db_err(exc)}")
+
+
+@app.post("/api/admin/db/copy")
+async def db_move_copy(body: DbMoveBody, request: Request):
+    """v1.20.92: 'Move database' step 2 - copy every account table into the new PostgreSQL (the current one is only read).
+    First the signal log is copied into the current database, so the new one gets today's data too."""
+    _require_admin(request)
+    try:
+        await asyncio.to_thread(mirror_signal_log)
+    except Exception as exc:
+        logger.info("Mirror before database copy failed: %s", str(exc)[:140])
+    try:
+        return await asyncio.to_thread(acc.copy_to, body.url, body.overwrite)
+    except acc.AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Copy failed: {type(exc).__name__}: {_db_err(exc)}")
+
+
+@app.get("/summary")
+async def summary_page():
+    return FileResponse(BASE_DIR / "static" / "summary.html", headers={"Cache-Control": "no-cache"})
+
+
+def _summary_verdict(fin, dfin, mkt_open):
+    """v1.20.90: one plain line that reads the Terminal and the Data Check together."""
+    lvl, side = (fin or {}).get("level") or "WAIT", (fin or {}).get("side")
+    dl, ds = (dfin or {}).get("level"), (dfin or {}).get("side")
+    if not mkt_open:
+        return "info", "Market closed - last session's view. Nothing is actionable until 09:15."
+    if lvl == "CONFIRMED" and (fin or {}).get("buy"):
+        return "good", f"BUY {side}: every gate and the profit check passed."
+    if lvl == "CONFIRMED":
+        return "warn", f"{side} confirmed by the engine - waiting for the profit check / reconfirmation."
+    if side and ds and ds != side and dl in ("CONFIRMED", "BIAS"):
+        return "bad", f"Conflict: the Terminal leans {side}, the Data Check leans {ds} ({dl}). Stand aside."
+    if side and ds == side and dl == "CONFIRMED":
+        return "warn", f"Data Check confirms {side}, but Terminal gates are not all met yet - no entry."
+    if lvl in ("WATCH", "PENDING"):
+        return "warn", f"Watching {side} - not an entry yet."
+    return "info", "No setup - stand aside."
+
+
+@app.get("/api/summary")
+async def summary_api(request: Request):
+    """v1.20.90: everything essential on one page - for each index the Terminal's final signal, the Data Check, the option and buy
+    plan, the gates still blocking, and how the two agree; plus feed, token, Upstox usage, today's signals and board, risk guards and
+    the AI monitor. Reads the same cached analyses the Terminal / Data Check pages use (no extra work when those are fresh)."""
+    _need_user(request)
+    syms, iv, mode, smin, _d = _poller_cfg()
+    mkt = market_status()
+    day = ist_now().date().isoformat()
+    out_syms = []
+    for s_ in [x for x in syms if x in INDEX_KEYS][:2]:
+        row = {"symbol": s_}
+        try:
+            a = await asyncio.wait_for(analysis(symbol=s_, interval=iv, mode=mode, score_min=smin), timeout=25)
+            ca = _compact_analysis(a) or {}
+            fin = a.get("final") or {}
+            row["terminal"] = ca
+            row["final"] = {"level": fin.get("level") or "WAIT", "action": fin.get("action") or "WAIT", "side": fin.get("side") or a.get("side"),
+                            "headline": str(fin.get("headline") or "")[:300], "buy": bool(fin.get("buy"))}
+            row["feasibility"] = a.get("feasibility")
+            row["flow_mode"] = (a.get("decision_flow") or {}).get("mode")
+        except Exception as exc:
+            row["terminal_error"] = f"{type(exc).__name__}: {str(getattr(exc, 'detail', exc))[:160]}"
+            fin = {}
+        try:
+            d = await asyncio.wait_for(dashboard_summary(symbol=s_, interval=iv if iv in (1, 3, 5, 15) else 5), timeout=25)
+            df = d.get("final") or {}
+            row["data_check"] = {k: df.get(k) for k in ("action", "level", "state", "side", "score", "agree", "oppose", "available", "headline")}
+            row["data_check"]["checks"] = [{"name": c.get("name"), "label": c.get("label"), "dir": c.get("dir")} for c in df.get("contributions") or []]
+            row["data_check"]["cautions"] = (df.get("cautions") or [])[:3]
+        except Exception as exc:
+            row["data_check_error"] = f"{type(exc).__name__}: {str(getattr(exc, 'detail', exc))[:160]}"
+        lvl_, txt_ = _summary_verdict(row.get("final"), row.get("data_check"), mkt.get("open"))
+        row["verdict"] = {"level": lvl_, "text": txt_}
+        row["guards"] = {"stopouts_today": stopouts_today(s_) if MAX_DAILY_LOSSES else None, "max_daily_losses": MAX_DAILY_LOSSES,
+                         "strategy": strategy_for(s_), "buy_enabled": s_ in buy_symbols(), "decision_rules": rules_mode(s_)[0]}
+        out_syms.append(row)
+    snap = await _terminal_snapshot(day)
+    usage = snap.get("upstox_usage") or {}
+    worst = None
+    for api_, c in (usage.get("by_api") or {}).items():
+        pct = (c or {}).get("peak_share_pct") if isinstance(c, dict) else None
+        if pct is not None and (worst is None or pct > worst["pct"]):
+            worst = {"api": api_, "pct": pct, "last_30min": c.get("last_30min"), "rate_limited_today": c.get("rate_limited_today")}
+    evs = await asyncio.to_thread(mon.events, SIGNAL_LOG_DB, day, day, "", 500, SIGNAL_LOG_LOCK)
+    real = [e for e in evs if e["kind"] != "SUGGESTION"]
+    try:
+        rvs = await asyncio.to_thread(mon.reviews, SIGNAL_LOG_DB, day, day, 1, SIGNAL_LOG_LOCK)
+    except Exception:
+        rvs = []
+    health = []
+    if (snap.get("token_state") or "") not in ("VALID", "OK"):
+        health.append(("bad", f"Upstox token: {snap.get('token_state') or 'unknown'} - renew it (More -> Connect Upstox)"))
+    for s_, f_ in (snap.get("feeds") or {}).items():
+        if mkt.get("open") and not f_.get("stream_running"):
+            health.append(("bad", f"{s_} live feed is not running"))
+        elif mkt.get("open") and (f_.get("tick_age_s") or 0) > 30:
+            health.append(("warn", f"{s_} last tick {f_.get('tick_age_s'):.0f} s old"))
+    if worst and worst["pct"] >= 70:
+        health.append(("warn", f"Upstox usage high: {worst['api']} at {worst['pct']}% of the 30-minute limit"))
+    if snap.get("monitor_status", {}).get("error"):
+        health.append(("warn", "AI monitor: " + str(snap["monitor_status"]["error"])[:140]))
+    if not health:
+        health.append(("good", "Token, feed and Upstox usage OK"))
+    return {"generated_at": utc_now_iso(), "app_version": APP_VERSION, "market": mkt, "token_state": snap.get("token_state"),
+            "settings": {"interval": iv, "mode": mode, "score_min": smin, "exit_plan": OPTION_OVERRIDES.get("exit_plan") or op.DEFAULT_EXIT_PLAN,
+                         "score_model": ((snap.get("settings") or {}).get("signals_config") or {}).get("score_model"),
+                         "paper": paper_mode(), "deriv_mode": deriv_mode()},
+            "symbols": out_syms, "feeds": snap.get("feeds"), "upstox_worst": worst, "live_socket_today": ws_bytes_today(),
+            "today": {"signal_log": snap.get("signal_log_today"), "board": snap.get("signal_board_today")},
+            "monitor": {"high": sum(e["severity"] == "high" for e in real), "medium": sum(e["severity"] == "medium" for e in real),
+                        "latest": real[0]["title"] if real else None,
+                        "review": (str((rvs[0] if rvs else {}).get("text") or "")[:700] or None)},
+            "health": [{"level": l_, "text": t_} for l_, t_ in health]}
+
+
 @app.get("/notifications")
 async def notifications_page():
     return FileResponse(BASE_DIR / "static" / "notifications.html", headers={"Cache-Control":"no-cache"})
@@ -3875,7 +4146,7 @@ def _mon_refresh(syms, interval, mode, score_min):
 
 # v1.20.83: 30 min (was 10) - Neon showed 80 of the 100 free compute hours used by 16 Nov; every database touch keeps it awake
 # 5 more minutes. The "monitor was offline" alert therefore needs a 45-min gap; Render's paid plan does not sleep anyway.
-HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "1800") or 1800)
+HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "3600") or 3600)     # v1.20.92: 60 min (written with the signal-log copy when it can)
 MONITOR_GAP_MIN_SEC = HEARTBEAT_SEC * 1.5
 
 
@@ -3904,8 +4175,8 @@ async def _alert_poller():
             # heartbeat in the database: lets the next start tell how long the monitor was asleep. v1.20.82: only in market hours
             # and every 10 min - written every minute, day and night, it kept the Neon database awake 24 h a day (Neon sleeps
             # after 5 idle minutes, and a sleeping database uses no compute hours).
-            if time.time() - last_beat > HEARTBEAT_SEC and in_session(grace_minutes=5):
-                last_beat = time.time()
+            if time.time() - max(last_beat, _HB_AT[0]) > HEARTBEAT_SEC and in_session(grace_minutes=5):
+                last_beat = _HB_AT[0] = time.time()
                 try: await asyncio.to_thread(acc.meta_set, "monitor_heartbeat", str(last_beat))
                 except Exception as exc: logger.debug("Heartbeat not saved: %s", str(exc)[:100])
             if market_status()["open"] and runtime_token and ALERT_BACKGROUND_ON():
@@ -4836,6 +5107,7 @@ async def _analysis_compute(symbol: str = "NIFTY", interval: int = 5, mode: str 
                              headline=plan["summary"] + f" · target basis: {ix['target_basis']}")
             else:
                 final.update(level="WATCH", action=f"WATCH {final['side']} — no buy (profit check)", headline=plan["summary"], profit_rejected=True)
+                await _paper_room(sym, interval, mode, score_min, dict(a, side=final.get("side")), plan, result.get("candles") or [])
                 final.setdefault("blockers", []).extend(f"Profit check: {ch['label']}: {ch['detail']}" for ch in plan["checks"] if not ch["pass"])
         try:
             await _route_signal_alerts(sym, interval, mode, a, fused, market["open"])
@@ -5320,10 +5592,11 @@ async def dl_get(tok: str, name: str):
 @app.get("/api/upstox/usage")
 async def upstox_usage():
     """v1.20.81: Upstox calls per API in the last second / minute / 30 minutes against the published limits."""
-    return {"limits": {"per_sec": RL_LIMITS[1], "per_min": RL_LIMITS[60], "per_30min": RL_LIMITS[1800]}, "by_api": rl_counts()}
+    return {"limits": {"per_sec": RL_LIMITS[1], "per_min": RL_LIMITS[60], "per_30min": RL_LIMITS[1800]}, "by_api": rl_counts(),
+            "intraday_by_kind": intraday_by_kind()}
 
 
-# v1.20.88: "Check for app update" in the Android app (More -> Account). The APK workflow publishes apk-version.json next to
+# v1.20.90: "Check for app update" in the Android app (More -> Account). The APK workflow publishes apk-version.json next to
 # OptionIntelligence.apk in the apk-latest release; the server reads it only when the button is pressed (a repeat within 60 s
 # gets the same answer) and the page compares it with the build the app sends in its user agent (OIApp-APK/<n>).
 # Only a public file on GitHub is read - nothing is sent.

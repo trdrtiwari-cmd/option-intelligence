@@ -1,4 +1,4 @@
-const FRONTEND_VERSION = "1.20.88";
+const FRONTEND_VERSION = "1.20.94";
 let paperSelected = null;   // declared first: the startup refresh may read it before the paper-trading section below runs
 let lastGateState=null,lastAnalysisAt=0,lastIdxLtp=null;
 let liveSubSent="",wsBarsAt=0,wsAnalysisAt=0,lastFullRefresh=0,lastBarsRender=0;   // v1.19.6 live push state
@@ -307,6 +307,12 @@ function _renderSignalBase(){
   const fin=a.final||null;
   if(fin&&gstatus!=="CONFIRMED"&&(fin.level==="STALE"||fin.level==="CONFLICT"||fin.level==="PENDING"||fin.profit_rejected)){text=fin.action;sub=fin.headline;cls="stale";color="var(--yellow)"}
   if(fin&&fin.level==="CONFIRMED"&&fin.buy&&gstatus==="CONFIRMED"){text=fin.action;sub=fin.buy.summary;cls="live";color=side==="CE"?"var(--green)":"var(--red)"}
+  // v1.20.90: WATCH / WAIT come from the server's final signal - the same one the Chart tab, the signal board and the alerts use.
+  // The page's own count (WATCH only when 2 or fewer gates fail) said WAIT while the Chart said WATCH CE for the same analysis.
+  if(fin&&gstatus!=="CONFIRMED"&&!fin.profit_rejected){
+    if(fin.level==="WATCH"&&!/^WATCH/.test(text)){text=fin.action||`WATCH ${fin.side||side}`;sub=failed.length?"No entry yet — waiting for: "+failed.map(g=>g.label).join("; "):(fin.headline||sub);cls="stale";color="var(--yellow)"}
+    else if(fin.level==="WAIT"&&/^WATCH/.test(text)){text="WAIT";sub=fin.headline||"No side has enough aligned evidence. Stand aside.";cls="muted";color="var(--yellow)"}
+  }
   lastGateState={side,text,status:gstatus,failed:failed.map(g=>g.label),dom,gates:gates.map(g=>({label:g.label,pass:g.pass,detail:g.detail||""})),timing:a.timing||null,final:fin};
   alertTransitions(a,gstatus,side,fin);
   const tm=a.timing&&a.timing.generated_at_text?a.timing:null;

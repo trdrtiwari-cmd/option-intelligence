@@ -1,5 +1,28 @@
 # Option Intelligence — Upstox Live Derivatives Bridge
 
+## v1.20.93
+- oracle-setup.sh (top folder) rewritten for moving to Oracle Cloud Always Free (Ubuntu 24.04, ARM): PostgreSQL on the same server, one-time copy of all data from the old database (Neon) with the app's own checked copy, India time zone, automatic security updates, DuckDNS + Caddy HTTPS, automatic update from GitLab every 15 min but never during market hours (Mon-Fri 09:00-15:45 IST), nightly database backup kept 14 days. The app itself is unchanged.
+
+## v1.20.92
+- Neon (82.6 of 100 CU-h on 17 Nov): the signal log is copied to the database at most hourly, also after the close (it was copied at every signal-board update until ~16:30); new signals and exits still go at once and one copy is forced at the close. The monitor heartbeat is written with that copy and at most hourly. The login check is cached for 60 min. MIRROR_GAP_SEC / HEARTBEAT_SEC default 3600.
+- Render bandwidth (live socket 4.75 of 6.44 GB this month): unchanged-signal analysis refreshes go out every 15 s (was 4 s) - a change of signal still at once; the index price at most ~3 times a second (WS_ANALYSIS_MIN_SEC / WS_INDEX_MIN_SEC). Bytes sent on the live socket are counted by message type (Summary page, review file).
+- Account page (owner only): "Move database" - test a new PostgreSQL (shows ms per query) and copy every account table into it (users, logins, settings, Upstox token, signal log, paper trades, alert history), checked table by table. The current database is only read. Then set DATABASE_URL on Render.
+
+## v1.20.91
+- Upstox intraday API (84 % of its 30-minute limit on 17 Nov): only the index candles keep the fast refresh. Futures and options (volume proxy, signal-board outcomes, option chart) are reused for at least 20 s, stocks and VIX for 60 s (INTRADAY_FO_SEC / INTRADAY_STOCK_SEC). Calls are counted by kind (index / fo / stock / other) and shown in the usage warning and /api/upstox/usage.
+- Review: a WATCH / SETUP / NO BUY that the app BOUGHT on the same index and side within 15 minutes (or one blocked by "Same-side re-entry" while a trade was open) is no longer listed as a missed trade or counted against a rule - on 17 Nov "Reconfirmed" looked like it blocked 3 winners that were in fact the 09:51 and 10:57 trades.
+
+## v1.20.90
+- Terminal: WATCH / WAIT now come from the server's final signal, the same one the Chart tab, the signal board and the alerts use. The Terminal counted failed gates on its own (WATCH only with 2 or fewer) and showed WAIT while the Chart showed WATCH CE for the same analysis. CONFIRMED / BUY unchanged.
+- New Summary page (More -> Summary, /summary): for each watched index the Terminal's final signal (what still blocks it, score, regime, option, buy plan, room), the Data Check (score, which checks agree), one line that reads the two together (agree / conflict / closed), risk guards; plus feed, token and Upstox usage health, today's signals and signal board, the AI monitor's issues and latest review, and the live settings. Read-only; refreshes every 30 s in market hours, every 5 min when closed.
+- Data Check: "BUY CE SETUP" renamed "CE SETUP CONFIRMED" (it is only the 5 data checks agreeing; the Terminal decides the BUY), with "· last session" after the close. After the close it no longer shows a "Signal since 20:36" time (that was only when the page started watching).
+
+## v1.20.89
+- Diagnostics: the live profit check's "Room to the target" rule is now replayed on the signals your live rules keep (same code as live: S/R of the last 6 sessions, your min reward:risk, exit plan and stop). A line near the top says how many would be REFUSED live and what they made in the replay. Option-premium checks still need live quotes.
+- Paper test "Target to level" (paper mode "All four"): logs every CONFIRMED setup the profit check refused ONLY for "Room to the target" while at least 0.5 ATR of room was left, scored with the live trailing exit. Never a BUY, never an alert.
+- Daily review file: "replay_vs_live" - each signal the replay confirmed that day next to what the live app did at that moment (stage reached and the rules that blocked it). The AI review is told to name that rule first.
+- APK workflow: every build is signed with the same key from the DEBUG_KEYSTORE_BASE64 secret, so an update installs over the old app.
+
 ## v1.20.88
 - Android app: "Check for app update" button (More -> Account, shown only inside the app). Nothing is checked on its own. The APK tells its build (OIApp-APK/2 in the user agent); the APK workflow publishes apk-version.json in the apk-latest release; /api/app/apk reads it when the button is pressed. If GitHub has a newer build, an Update button opens the APK in Chrome - then tap Install. Normal server updates still need no new APK.
 - To publish a new APK build in future: raise the number in mobile/capacitor.config.json (OIApp-APK/<n>) together with the native change.

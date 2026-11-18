@@ -507,11 +507,11 @@
   // (once per setup; it stays on that contract while the side is the same), and goes back to the index after 10 minutes without a
   // setup - 2 minutes when the engine leans the other side. "Index only" never switches.
   let OPT = null, autoIdle = null, lastSide = null;
-  // v1.20.88: like the terminal (v1.20.74), no automatic switch to an option while the market is closed - after 15:30 the last
+  // v1.20.90: like the terminal (v1.20.74), no automatic switch to an option while the market is closed - after 15:30 the last
   // setup (e.g. WATCH CE at 15:30) kept the Chart tab on the option while the terminal showed the index price. Market state from
   // /api/status, asked every 5 min; unknown = treated as open, so nothing changes if the call fails.
   let mktOpen = null;
-  // v1.20.88: the first analysis can arrive before /api/status answers - so no automatic switch until the state is known, and
+  // v1.20.90: the first analysis can arrive before /api/status answers - so no automatic switch until the state is known, and
   // a switch already made goes back to the index as soon as the answer says closed. If the call fails, treat as open (old behaviour).
   async function refreshMarket() {
     try { const s = await api("/api/status"); mktOpen = !!(s.market && s.market.open); } catch { if (mktOpen === null) mktOpen = true; }

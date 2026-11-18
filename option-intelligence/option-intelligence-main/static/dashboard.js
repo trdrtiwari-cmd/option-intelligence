@@ -56,7 +56,8 @@ function renderFinal(d) {
   $("finalAction").textContent = f.action; $("finalAction").style.color = color;
   $("finalLevel").textContent = f.score === null ? f.level : `${f.level} · ${f.agree ?? 0} agree / ${f.oppose ?? 0} oppose of ${f.available} checks with data`;
   const ft = f.timing;
-  $("finalTime").textContent = ft ? `Signal since ${ft.since_text} · ${ft.age_minutes < 1 ? "just now" : Math.round(ft.age_minutes) + " min ago"}` +
+  // v1.20.90: after the close the "since" time is only when this page started watching (e.g. 20:36) - not a signal time
+  $("finalTime").textContent = d.market && d.market.open === false ? "Market closed - last session's data. The final BUY decision is on the Terminal." : ft ? `Signal since ${ft.since_text} · ${ft.age_minutes < 1 ? "just now" : Math.round(ft.age_minutes) + " min ago"}` +
     (ft.exact ? "" : ` (est. — watching since ${ft.observed_from}; may be older)`) +
     (ft.price_at_change ? ` · index ${Number(ft.price_at_change).toLocaleString("en-IN", {maximumFractionDigits: 2})} then` : "") : "";
   $("finalScore").textContent = f.score === null ? "—" : (f.score > 0 ? "+" : "") + f.score.toFixed(0);

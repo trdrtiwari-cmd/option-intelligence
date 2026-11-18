@@ -8,8 +8,8 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
-  <link rel="stylesheet" href="/static/style.css?v=1.20.88">
-  <link rel="stylesheet" href="/static/mobile.css?v=1.20.88">
+  <link rel="stylesheet" href="/static/style.css?v=1.20.94">
+  <link rel="stylesheet" href="/static/mobile.css?v=1.20.94">
 </head>
 <body>
 <header class="topbar">
@@ -20,6 +20,13 @@
   <section class="panel"><h2>Profile</h2><div id="profile" class="sub">Loading…</div><div id="storageNote" class="notice warning" hidden></div></section>
   <section class="panel" id="apkPanel" hidden><h2>App update</h2>
     <div class="account-actions"><button id="apkCheck" class="secondary" type="button">Check for app update</button><span id="apkMsg" class="sub"></span></div>
+  </section>
+  <section class="panel" id="dbMovePanel" hidden><h2>Move database</h2>
+    <p class="sub">Copies everything (account, logins, settings, Upstox token, signal log, paper trades, AI reviews) into a new PostgreSQL database, e.g. Aiven. The current database is only read, never changed. Then put the new address in Render → Environment → DATABASE_URL. Do it after 15:30.</p>
+    <label>New database address (postgres://…)<input id="dbMoveUrl" type="password" autocomplete="off" placeholder="postgres://user:password@host:port/db?sslmode=require"></label>
+    <label style="display:flex;gap:6px;align-items:center"><input id="dbMoveOver" type="checkbox"> Replace data already in the new database</label>
+    <div class="account-actions"><button id="dbMoveTest" class="secondary" type="button">Test connection</button><button id="dbMoveCopy" type="button" disabled>Copy all data</button></div>
+    <div id="dbMoveMsg" class="sub" style="white-space:pre-wrap"></div>
   </section>
   <section class="panel"><h2>Saved data</h2>
     <p class="sub">Paper trades, capital, risk guards and your preferences are saved to this account automatically a moment after every change.</p>
@@ -47,7 +54,7 @@
 </main>
 <footer>Personal research tool for the account owner · Not investment advice · Do not share its prices or signals with other people · Market data: your own Upstox account</footer>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/issues.js?v=1.20.88"></script><script src="/static/savefile.js?v=1.20.88"></script><script src="/static/sync.js?v=1.20.88" data-next="/static/account.js?v=1.20.88"></script>
-<script src="/static/mobile.js?v=1.20.88" defer></script><script src="/static/sections.js?v=1.20.88" defer></script>
+<script src="/static/issues.js?v=1.20.94"></script><script src="/static/savefile.js?v=1.20.94"></script><script src="/static/sync.js?v=1.20.94" data-next="/static/account.js?v=1.20.94"></script>
+<script src="/static/mobile.js?v=1.20.94" defer></script><script src="/static/sections.js?v=1.20.94" defer></script>
 </body>
 </html>

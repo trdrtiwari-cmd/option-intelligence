@@ -31,3 +31,9 @@ def test_apk_info_endpoint(monkeypatch):
     d = asyncio.run(main.app_apk_info())
     assert d["build"] == 3 and d["url"].endswith("/OptionIntelligence.apk")
     main._APK_INFO.update(at=0.0, data=None)
+
+
+def test_workflow_signs_with_fixed_key():
+    wf = (ROOT.parent / ".github" / "workflows" / "android-apk.yml").read_text(encoding="utf-8")
+    assert "DEBUG_KEYSTORE_BASE64" in wf and "~/.android/debug.keystore" in wf
+    assert wf.index("DEBUG_KEYSTORE_BASE64") < wf.index("./gradlew assembleDebug")

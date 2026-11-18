@@ -378,11 +378,37 @@ def missed_from_replay(rep, day):
     return out
 
 
+def _bought_soon(r, board_rows, minutes=15):
+    """v1.20.91: True when the app BOUGHT the same index and side within `minutes` after this setup (or while it was open -
+    'Same-side re-entry'). Such a setup is the same move as the trade, not a missed one (17 Nov: the 09:50 BANKNIFTY and 10:50 NIFTY
+    SETUPs were bought at 09:51 / 10:57 but were still listed as missed, and 'Reconfirmed' looked like it blocked winners)."""
+    def mins(x):
+        s_ = str(x or "")
+        try:
+            return int(s_[11:13]) * 60 + int(s_[14:16]), s_[:10]
+        except ValueError:
+            return None, None
+    m0, d0 = mins(r.get("created_at"))
+    if m0 is None:
+        return False
+    if "Same-side re-entry" in str(r.get("blocked_by") or ""):
+        return True
+    for b in board_rows:
+        if b.get("stage") != "BUY" or b.get("symbol") != r.get("symbol") or b.get("side") != r.get("side"):
+            continue
+        m1, d1 = mins(b.get("created_at"))
+        if m1 is not None and d1 == d0 and 0 <= m1 - m0 <= minutes:
+            return True
+    return False
+
+
 def missed_from_board(board_rows):
     """Signal-board setups that were NOT bought but whose option then paid (target reached in the 60-min test, or +30 % premium)."""
     out, seen = [], set()
     for r in board_rows:
         if r.get("stage") not in ("WATCH", "SETUP", "NO BUY", "FAILED"):
+            continue
+        if _bought_soon(r, board_rows):
             continue
         best = _f(r.get("best_pct_60"))
         # v1.20.2: a +4 % premium is not a missed trade - need the test target AND a real premium gain, or +30 %
@@ -408,6 +434,8 @@ def board_gate_stats(board_rows):
     seen, per = set(), {}
     for r in board_rows:
         if r.get("stage") not in ("WATCH", "SETUP", "NO BUY", "FAILED") or not r.get("test_result"):
+            continue
+        if _bought_soon(r, board_rows):          # v1.20.91: part of a move the app did buy - not evidence against a rule
             continue
         k = (r.get("symbol"), r.get("option_name"), str(r.get("created_at") or "")[:16])
         if k in seen:
@@ -504,6 +532,8 @@ SYSTEM_REVIEW = ("You are reviewing an intraday options signal strategy (NIFTY/B
                  "1.5 ATR, entry windows 09:45-12:00 and 14:30-15:00, square-off 15:20). You get JSON with today's live trades, losses with "
                  "code-detected causes, missed moves with the gates that blocked them, signal-board setups that were not bought, "
                  "today_blocking_rules (for each rule: setups it blocked and how many of those the 1.5 ATR test trade won / lost), "
+                 "'replay_vs_live' (each signal the replay confirmed today next to what the live app did then: stage reached and the rules "
+                 "that blocked it - when the replay bought and live did not, name that rule first in 'Why moves were missed'), "
                  "'terminal' (app settings, the live analysis of each symbol / timeframe in use: score, regime, failed gates, buy plan, S/R, option, "
                  "feed state, today's log and board summary) and, when sent from the terminal, 'page' (chart trendlines, S/R map, selected option). "
                  "'paper_tests': rules that are only tested on paper (logged and scored, never bought, never an alert) - for each one whether it is switched on, its closed trades, win rate, points and its own verdict. "
@@ -550,6 +580,8 @@ def consistency_checks(ctx):
         elif (u.get("peak_share_pct") or 0) >= 80:
             out.append(f"UPSTOX USAGE HIGH: {fam} is at {u['peak_share_pct']:g}% of a published limit ({u.get('last_min')} calls in the last minute, "
                        f"{u.get('last_30min')} in 30 min; limits {(uu.get('limits') or {}).get('per_min')}/min, {(uu.get('limits') or {}).get('per_30min')}/30 min).")
+            if fam.endswith("/intraday") and uu.get("intraday_by_kind"):
+                out[-1] += " Intraday calls in 30 min by kind: " + ", ".join(f"{k} {v.get('last_30min')}" for k, v in sorted(uu["intraday_by_kind"].items())) + "."
     if sc.get("indicator_changes"):
         out.append("INDICATOR VALUES changed from the tested defaults for live signals: "
                    + ", ".join(f"{k} {v}" for k, v in sc["indicator_changes"].items()) + " - check they were tested in Diagnostics first.")
